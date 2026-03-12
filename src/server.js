@@ -88,11 +88,30 @@ function needsSeedRestore() {
 }
 
 function sendJson(response, statusCode, payload) {
-  response.writeHead(statusCode, {
+  response.writeHead(statusCode, buildApiHeaders());
+  response.end(JSON.stringify(payload));
+}
+
+function buildApiHeaders(origin = "") {
+  const headers = {
     "content-type": "application/json; charset=utf-8",
     "cache-control": "no-store"
-  });
-  response.end(JSON.stringify(payload));
+  };
+
+  const allowedOrigins = new Set([
+    "https://www.trotracker.com",
+    "https://tro-case-watch-production.up.railway.app",
+    "http://localhost:4127"
+  ]);
+
+  if (allowedOrigins.has(origin)) {
+    headers["access-control-allow-origin"] = origin;
+    headers["access-control-allow-methods"] = "GET,POST,OPTIONS";
+    headers["access-control-allow-headers"] = "content-type,x-admin-token";
+    headers["vary"] = "Origin";
+  }
+
+  return headers;
 }
 
 async function readRequestBody(request) {
@@ -295,6 +314,12 @@ function findRelaxedPayload(store, filters) {
 }
 
 async function handleApi(request, response, pathname, searchParams) {
+  if (request.method === "OPTIONS") {
+    response.writeHead(204, buildApiHeaders(request.headers.origin || ""));
+    response.end();
+    return;
+  }
+
   if (request.method === "GET" && pathname === "/api/health") {
     return sendJson(response, 200, {
       ok: true,
@@ -430,6 +455,9 @@ const server = http.createServer(async (request, response) => {
   try {
     const url = new URL(request.url, `http://${request.headers.host}`);
     if (url.pathname.startsWith("/api/")) {
+      response.setHeader("access-control-allow-origin", buildApiHeaders(request.headers.origin || "")["access-control-allow-origin"] || "");
+      response.setHeader("access-control-allow-methods", "GET,POST,OPTIONS");
+      response.setHeader("access-control-allow-headers", "content-type,x-admin-token");
       await handleApi(request, response, url.pathname, url.searchParams);
       return;
     }

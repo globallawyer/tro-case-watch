@@ -21,6 +21,8 @@ const nextPageButton = document.querySelector("#next-page");
 const refreshButton = document.querySelector("#refresh-button");
 const contentGrid = document.querySelector(".content-grid");
 const copyWechatButton = document.querySelector("#copy-wechat-button");
+const apiBase =
+  window.location.hostname === "www.trotracker.com" ? "https://tro-case-watch-production.up.railway.app" : "";
 
 function formatDate(value) {
   if (!value) {
@@ -35,7 +37,7 @@ function formatDate(value) {
 }
 
 function request(path, options) {
-  return fetch(path, options).then(async (response) => {
+  return fetch(`${apiBase}${path}`, options).then(async (response) => {
     if (!response.ok) {
       throw new Error(`HTTP ${response.status}`);
     }
