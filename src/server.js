@@ -266,7 +266,7 @@ function serializePublicCasesPayload(payload = {}) {
         }))
       : [],
     categoryRelaxed: Boolean(payload.categoryRelaxed),
-    relaxedCategory: payload.categoryRelaxed ? "tro" : null,
+    relaxedCategory: payload.relaxedCategory || null,
     liveImported: payload.liveImported
       ? {
           imported: Number(payload.liveImported.imported || 0),
@@ -313,8 +313,20 @@ function serializePublicStatus(status = {}) {
   };
 }
 
+function looksLikeDocketFragment(value = "") {
+  return /^\d{4,6}$/.test(String(value || "").trim());
+}
+
+function resolveSearchCategory(search = "") {
+  if (docketLooksLike(search) || looksLikeDocketFragment(search)) {
+    return "all";
+  }
+
+  return "watchlist";
+}
+
 function findRelaxedPayload(store, filters) {
-  for (const category of ["seller_watch", "all"]) {
+  for (const category of ["watchlist", "seller_watch", "tro", "schedule_a", "all"]) {
     if (category === filters.category) {
       continue;
     }
@@ -352,7 +364,7 @@ async function handleApi(request, response, pathname, searchParams) {
   if (request.method === "GET" && pathname === "/api/cases") {
     const filters = {
       startDate: config.sync.startDate,
-      category: "tro",
+      category: resolveSearchCategory(searchParams.get("search") || ""),
       search: searchParams.get("search") || "",
       court: searchParams.get("court") || "",
       page: Number(searchParams.get("page") || 1),
@@ -360,7 +372,7 @@ async function handleApi(request, response, pathname, searchParams) {
     };
 
     let payload = store.listCases(filters);
-    const isDirectDocketLookup = docketLooksLike(filters.search);
+    const isDirectDocketLookup = docketLooksLike(filters.search) || looksLikeDocketFragment(filters.search);
 
     if (filters.search && payload.total === 0 && isDirectDocketLookup) {
       const relaxedPayload = findRelaxedPayload(store, filters);

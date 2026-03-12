@@ -892,6 +892,10 @@ export class Store {
       return true;
     }
 
+    if (category === "watchlist") {
+      return Boolean(row.insights?.is_tro_case || row.insights?.is_schedule_a_case || row.insights?.is_seller_case);
+    }
+
     if (category === "tro") {
       return Boolean(row.insights?.is_tro_case);
     }
