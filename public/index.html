@@ -14,13 +14,13 @@
       href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@500;700;800&family=Noto+Sans+SC:wght@400;500;700;900&family=Noto+Serif+SC:wght@500;700&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="/styles.css?v=20260311e" />
+    <link rel="stylesheet" href="/styles.css?v=20260312e" />
   </head>
   <body>
     <div class="page-shell">
       <header class="topbar">
         <div class="brand-block">
-          <span class="brand-mark">TD</span>
+          <img class="brand-mark" src="/assets/brand-logo.jpeg" alt="TRO稻草人 logo" />
           <div>
             <strong>TRO稻草人 Docket</strong>
             <p>跨境电商 TRO / Schedule A 站内检索台</p>
@@ -63,8 +63,13 @@
               />
               <button class="action-button" type="submit">查 Docket</button>
             </form>
-            <div class="lookup-hint" id="lookup-hint">
-              支持案号兜底实时导入。即使本地库还没回填到，也会尝试现场补抓公开案件。
+            <div class="search-tools">
+              <label class="tool-field">
+                <span>法院筛选</span>
+                <select name="court" id="court-filter">
+                  <option value="">全部法院</option>
+                </select>
+              </label>
             </div>
             <div class="hero-stats" id="hero-stats"></div>
           </div>
@@ -72,25 +77,10 @@
           <aside class="contact-card">
             <div class="panel-head">
               <h2>TRO稻草人团队</h2>
-              <p>微信、公众号和邮箱入口都放在这里，方便卖家直接联系。</p>
             </div>
             <div class="contact-methods">
-              <a
-                class="contact-chip"
-                href="https://www.uspto.gov/trademarks/search"
-                target="_blank"
-                rel="noreferrer"
-                >查商标</a
-              >
-              <a
-                class="contact-chip"
-                href="https://www.uspto.gov/patents/search/patent-public-search"
-                target="_blank"
-                rel="noreferrer"
-                >查专利</a
-              >
-              <span class="contact-chip">微信：mylearnedfriend</span>
-              <span class="contact-chip">邮箱：599214243@qq.com</span>
+              <button class="contact-chip" id="copy-wechat-button" type="button">点击添加微信</button>
+              <a class="contact-chip" href="mailto:599214243@qq.com">点击发邮件</a>
             </div>
             <div class="contact-grid">
               <article class="qr-card">
@@ -99,7 +89,6 @@
                   src="/assets/wechat-qr.png"
                   alt="TRO稻草人团队微信二维码"
                 />
-                <h3>微信二维码</h3>
                 <p>微信：mylearnedfriend</p>
               </article>
               <article class="qr-card">
@@ -108,40 +97,11 @@
                   src="/assets/official-account-qr.png"
                   alt="TRO稻草人公众号二维码"
                 />
-                <h3>公众号二维码</h3>
                 <p>公众号：TRO稻草人</p>
-                <p>邮箱：599214243@qq.com</p>
               </article>
             </div>
-            <p class="contact-note">扫码即可联系 TRO稻草人团队。</p>
+            <p class="contact-note">扫码或点击按钮联系律师团队</p>
           </aside>
-        </section>
-
-        <section class="control-grid">
-          <article class="panel controls-panel">
-            <div class="panel-head">
-              <h2>TRO诉讼案件检索</h2>
-              <p>默认只显示 2025-01-01 以来的 TRO 相关案件。</p>
-            </div>
-            <form id="filters-form" class="filters-form">
-              <label>
-                <span>法院</span>
-                <select name="court" id="court-filter">
-                  <option value="">全部法院</option>
-                </select>
-              </label>
-              <label class="search-field">
-                <span>关键词</span>
-                <input
-                  name="search"
-                  id="filters-search"
-                  type="search"
-                  placeholder="案号、原告、品牌、律所"
-                />
-              </label>
-              <button class="action-button secondary" type="submit">搜索 TRO诉讼案件</button>
-            </form>
-          </article>
         </section>
 
         <section class="content-grid">
@@ -175,6 +135,6 @@
       </main>
     </div>
 
-    <script src="/app.js?v=20260311d" type="module"></script>
+    <script src="/app.js?v=20260312e" type="module"></script>
   </body>
   </html>

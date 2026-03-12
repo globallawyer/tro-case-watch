@@ -14,14 +14,13 @@ const heroStats = document.querySelector("#hero-stats");
 const casesSummary = document.querySelector("#cases-summary");
 const pageIndicator = document.querySelector("#page-indicator");
 const courtFilter = document.querySelector("#court-filter");
-const filtersForm = document.querySelector("#filters-form");
 const lookupForm = document.querySelector("#lookup-form");
 const lookupInput = document.querySelector("#lookup-input");
-const filtersSearch = document.querySelector("#filters-search");
-const lookupHint = document.querySelector("#lookup-hint");
 const prevPageButton = document.querySelector("#prev-page");
 const nextPageButton = document.querySelector("#next-page");
 const refreshButton = document.querySelector("#refresh-button");
+const contentGrid = document.querySelector(".content-grid");
+const copyWechatButton = document.querySelector("#copy-wechat-button");
 
 function formatDate(value) {
   if (!value) {
@@ -61,9 +60,8 @@ function renderHero(status) {
   const totals = status.dashboard?.totals || {};
   const recentSync = status.dashboard?.recentSync;
   const cards = [
-    heroCard("TRO诉讼案件", totals.tro_cases || 0),
+    heroCard("TRO诉讼/Schedule A案件数", `${totals.tro_cases || 0} / ${totals.schedule_a_cases || 0}`),
     heroCard("卖家相关", totals.seller_cases || 0),
-    heroCard("Schedule A", totals.schedule_a_cases || 0),
     heroCard(
       "最近同步",
       recentSync?.finished_at
@@ -75,6 +73,20 @@ function renderHero(status) {
   ];
 
   heroStats.innerHTML = cards.join("");
+}
+
+function revealResultsIfNeeded() {
+  if (!contentGrid) {
+    return;
+  }
+
+  const top = contentGrid.getBoundingClientRect().top;
+  if (top > window.innerHeight * 0.68) {
+    contentGrid.scrollIntoView({
+      behavior: "smooth",
+      block: "start"
+    });
+  }
 }
 
 function renderCourtOptions(courts) {
@@ -356,7 +368,7 @@ function renderDetail(item) {
                     ${signals ? `<div class="tag-row timeline-tags">${signals}</div>` : ""}
                     <p>${entry.description || "无可显示文本"}</p>
                     ${entry.description_zh ? `<p class="timeline-zh">${entry.description_zh}</p>` : ""}
-                    <p class="timeline-source-note">来源已归档到本站，当前视图以站内阅读为主。</p>
+                    <p class="timeline-source-note">来源已归档到本站，如需转换成中文，请在Chrome浏览器右键点击翻译</p>
                   </article>
                 `;
                 }
@@ -383,7 +395,6 @@ async function loadStatus() {
 }
 
 async function loadCases() {
-  filtersSearch.value = state.search;
   lookupInput.value = state.search;
 
   const params = new URLSearchParams({
@@ -396,16 +407,6 @@ async function loadCases() {
 
   const payload = await request(`/api/cases?${params.toString()}`);
   renderCases(payload);
-
-  if (payload.liveImported?.imported) {
-    lookupHint.textContent = `已实时导入 ${payload.liveImported.imported} 个匹配案件，请从列表中选择。`;
-  } else if (payload.categoryRelaxed) {
-    lookupHint.textContent = "已优先返回精确案号匹配结果。";
-  } else if (payload.lookupError) {
-    lookupHint.textContent = `实时导入失败：${payload.lookupError}`;
-  } else {
-    lookupHint.textContent = "支持案号兜底实时导入。即使本地库还没回填到，也会尝试现场补抓公开案件。";
-  }
 }
 
 async function loadCaseDetail(caseId) {
@@ -417,18 +418,13 @@ lookupForm.addEventListener("submit", (event) => {
   event.preventDefault();
   state.search = lookupInput.value.trim();
   state.page = 1;
-  filtersSearch.value = state.search;
-  loadCases();
+  loadCases().then(revealResultsIfNeeded).catch(console.error);
 });
 
-filtersForm.addEventListener("submit", (event) => {
-  event.preventDefault();
-  const formData = new FormData(filtersForm);
-  state.court = String(formData.get("court") || "");
-  state.search = String(formData.get("search") || "").trim();
+courtFilter.addEventListener("change", (event) => {
+  state.court = String(event.target.value || "");
   state.page = 1;
-  lookupInput.value = state.search;
-  loadCases();
+  loadCases().then(revealResultsIfNeeded).catch(console.error);
 });
 
 prevPageButton.addEventListener("click", () => {
@@ -464,6 +460,23 @@ refreshButton.addEventListener("click", async () => {
     refreshButton.textContent = "立即刷新";
   }
 });
+
+if (copyWechatButton) {
+  copyWechatButton.addEventListener("click", async () => {
+    const defaultLabel = "点击添加微信";
+
+    try {
+      await navigator.clipboard.writeText("mylearnedfriend");
+      copyWechatButton.textContent = "微信号已复制";
+    } catch (error) {
+      copyWechatButton.textContent = "微信号：mylearnedfriend";
+    }
+
+    window.setTimeout(() => {
+      copyWechatButton.textContent = defaultLabel;
+    }, 1800);
+  });
+}
 
 async function boot() {
   await Promise.all([loadStatus(), loadCases()]);

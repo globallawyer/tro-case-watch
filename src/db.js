@@ -82,16 +82,18 @@ function dedupeEntries(entries) {
   const deduped = new Map();
 
   for (const entry of entries) {
-    const key = normalizeText(
+    const orderKey = normalizedEntryOrderKey(entry);
+    const fallbackKey = normalizeText(
       [entry.filed_at, String(entry.description || "").replace(/[^\w]+/g, " ").trim().slice(0, 240)].join("|")
     );
+    const key = orderKey ? `order:${orderKey}` : fallbackKey;
 
     if (!key) {
       continue;
     }
 
     const existing = deduped.get(key);
-    if (!existing || String(entry.description || "").length > String(existing.description || "").length) {
+    if (!existing || compareEntriesForCanonicalRow(entry, existing) < 0) {
       deduped.set(key, entry);
     }
   }
@@ -99,17 +101,29 @@ function dedupeEntries(entries) {
   return [...deduped.values()].sort(compareEntriesForTimeline);
 }
 
+function normalizeOrderText(value) {
+  const text = String(value || "").trim();
+  if (!text) {
+    return "";
+  }
+
+  return text.replace(/,+/g, "").replace(/\.0+$/, "");
+}
+
+function normalizedEntryOrderKey(entry) {
+  return normalizeOrderText(entry.document_number) || normalizeOrderText(entry.entry_number) || "";
+}
+
 function parseEntryOrderValue(entry) {
   const candidates = [entry.document_number, entry.entry_number];
 
   for (const rawValue of candidates) {
-    const text = String(rawValue || "").trim();
+    const text = normalizeOrderText(rawValue);
     if (!text) {
       continue;
     }
 
-    const normalized = text.replace(/,+/g, "");
-    const numeric = Number.parseFloat(normalized);
+    const numeric = Number.parseFloat(text);
     if (Number.isFinite(numeric)) {
       return numeric;
     }
@@ -130,12 +144,49 @@ function entrySourceRank(entry) {
   return 0;
 }
 
-function compareEntriesForTimeline(left, right) {
+function entryContentRank(entry) {
+  const type = normalizeText(entry.document_type);
+
+  if (type.includes("docket entry")) {
+    return 3;
+  }
+
+  if (type.includes("docket document")) {
+    return 2;
+  }
+
+  if (type.includes("entry")) {
+    return 1;
+  }
+
+  return 0;
+}
+
+function compareEntriesForCanonicalRow(left, right) {
+  const contentCompare = entryContentRank(right) - entryContentRank(left);
+  if (contentCompare !== 0) {
+    return contentCompare;
+  }
+
+  const descriptionCompare = String(right.description || "").length - String(left.description || "").length;
+  if (descriptionCompare !== 0) {
+    return descriptionCompare;
+  }
+
+  const sourceCompare = entrySourceRank(right) - entrySourceRank(left);
+  if (sourceCompare !== 0) {
+    return sourceCompare;
+  }
+
   const dateCompare = String(right.filed_at || right.created_at).localeCompare(String(left.filed_at || left.created_at));
   if (dateCompare !== 0) {
     return dateCompare;
   }
 
+  return Number(right.id || 0) - Number(left.id || 0);
+}
+
+function compareEntriesForTimeline(left, right) {
   const leftOrder = parseEntryOrderValue(left);
   const rightOrder = parseEntryOrderValue(right);
   if (leftOrder !== null || rightOrder !== null) {
@@ -143,6 +194,11 @@ function compareEntriesForTimeline(left, right) {
     if (numericCompare !== 0) {
       return numericCompare;
     }
+  }
+
+  const dateCompare = String(right.filed_at || right.created_at).localeCompare(String(left.filed_at || left.created_at));
+  if (dateCompare !== 0) {
+    return dateCompare;
   }
 
   const sourceCompare = entrySourceRank(right) - entrySourceRank(left);
