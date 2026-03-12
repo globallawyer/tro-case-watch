@@ -99,6 +99,7 @@ function buildApiHeaders(origin = "") {
   };
 
   const allowedOrigins = new Set([
+    "https://trotracker.com",
     "https://www.trotracker.com",
     "https://tro-case-watch-production.up.railway.app",
     "http://localhost:4127"
@@ -112,6 +113,26 @@ function buildApiHeaders(origin = "") {
   }
 
   return headers;
+}
+
+function normalizeHostHeader(value = "") {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/:\d+$/, "");
+}
+
+function shouldRedirectToWww(hostname) {
+  return hostname === "trotracker.com";
+}
+
+function redirectToWww(request, response) {
+  const target = `https://www.trotracker.com${request.url || "/"}`;
+  response.writeHead(301, {
+    location: target,
+    "cache-control": "public, max-age=300"
+  });
+  response.end();
 }
 
 async function readRequestBody(request) {
@@ -453,6 +474,12 @@ function serveStatic(response, pathname) {
 
 const server = http.createServer(async (request, response) => {
   try {
+    const hostname = normalizeHostHeader(request.headers.host);
+    if (shouldRedirectToWww(hostname)) {
+      redirectToWww(request, response);
+      return;
+    }
+
     const url = new URL(request.url, `http://${request.headers.host}`);
     if (url.pathname.startsWith("/api/")) {
       response.setHeader("access-control-allow-origin", buildApiHeaders(request.headers.origin || "")["access-control-allow-origin"] || "");
