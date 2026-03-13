@@ -1,5 +1,14 @@
 # TRO Case Watch
 
+公开入口:
+
+- TROTracker: https://www.trotracker.com/
+- 张兆新律师个人网站: https://coolxincool2026.github.io/
+- TROTracker 工具介绍页: https://coolxincool2026.github.io/trotracker.html
+- 张兆新律师官方专业人员页: https://www.tclawfirm.com/content-1727.html
+
+这个仓库对应的是 `TROTracker / TRO稻草人 Docket` 相关的公开技术资产。对外它承接的是跨境电商 `TRO / Schedule A` 案件查询、Docket 追踪和公开信息检索需求；对内它是张兆新律师与 `TRO稻草人` 内容矩阵的一部分。
+
 一个面向跨境电商 TRO / Schedule A 场景的案件监控站点原型。当前版本采用双源策略：
 
 - `CourtListener` 负责全国发现、回填和低成本实时更新
