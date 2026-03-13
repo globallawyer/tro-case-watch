@@ -336,6 +336,47 @@ export class CaseSyncService {
   async syncSingleWorldtroCase(caseRow) {
     const payload = await this.worldtro.enrichCase(caseRow);
     if (!payload || !payload.entries.length) {
+      const timestamp = new Date().toISOString();
+      const mergedRaw = {
+        ...(caseRow.raw || {}),
+        worldtro: {
+          ...(caseRow.raw?.worldtro || {}),
+          syncedAt: timestamp,
+          rowCount: 0,
+          missing: true
+        }
+      };
+
+      this.store.upsertCase({
+        source_case_key: caseRow.source_case_key,
+        primary_source: caseRow.primary_source,
+        source_case_id: caseRow.source_case_id,
+        courtlistener_docket_id: caseRow.courtlistener_docket_id,
+        pacer_case_id: caseRow.pacer_case_id,
+        court_id: caseRow.court_id,
+        court_name: caseRow.court_name,
+        case_name: caseRow.case_name,
+        docket_number: caseRow.docket_number,
+        date_filed: caseRow.date_filed,
+        date_terminated: caseRow.date_terminated,
+        cause: caseRow.cause,
+        nature_of_suit: caseRow.nature_of_suit,
+        status: caseRow.status,
+        tags_marker: caseRow.tags_marker,
+        docket_url: caseRow.docket_url,
+        source_urls: caseRow.source_urls || [],
+        plaintiffs: caseRow.plaintiffs || [],
+        defendants: caseRow.defendants || [],
+        recent_activity_summary: caseRow.recent_activity_summary,
+        latest_docket_filed_at: caseRow.latest_docket_filed_at,
+        latest_docket_number: caseRow.latest_docket_number,
+        docket_count: caseRow.docket_count || 0,
+        last_seen_at: caseRow.last_seen_at || timestamp,
+        last_synced_at: timestamp,
+        last_docket_sync_at: caseRow.last_docket_sync_at,
+        raw: mergedRaw
+      });
+
       return { enriched: false, reason: "not-found" };
     }
 

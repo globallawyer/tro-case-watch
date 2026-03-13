@@ -224,6 +224,39 @@ function sanitizeTimelineLabel(entry = {}) {
   return "Docket 时间线";
 }
 
+function hasWorldtroCoverage(item = {}) {
+  if (Number(item.raw?.worldtro?.rowCount || 0) > 0) {
+    return true;
+  }
+
+  if (Array.isArray(item.source_urls) && item.source_urls.some((url) => String(url || "").includes("worldtro.com"))) {
+    return true;
+  }
+
+  return Array.isArray(item.entries) && item.entries.some((entry) => entry.primary_source === "worldtro");
+}
+
+function shouldHydrateWorldtroOnDemand(item = {}) {
+  if (!config.worldtro.enabled || !item.insights?.is_seller_case) {
+    return false;
+  }
+
+  const entryCount = Number(item.entries?.length || 0);
+  const worldtroRowCount = Number(item.raw?.worldtro?.rowCount || 0);
+  const minimumExpectedEntries = Math.max(12, Number(item.docket_count || 0), 6);
+
+  if (!hasWorldtroCoverage(item)) {
+    return entryCount < minimumExpectedEntries;
+  }
+
+  return worldtroRowCount > 0 && entryCount < worldtroRowCount;
+}
+
+function shouldForceWorldtroRefresh(item = {}) {
+  const worldtroRowCount = Number(item.raw?.worldtro?.rowCount || 0);
+  return worldtroRowCount > 0 && Number(item.entries?.length || 0) < worldtroRowCount;
+}
+
 function serializePublicEntry(entry = {}) {
   return {
     id: entry.id,
@@ -422,10 +455,15 @@ async function handleApi(request, response, pathname, searchParams) {
       return sendJson(response, 404, { error: "Case not found" });
     }
 
-    if (item.insights?.is_seller_case && (item.entries?.length || 0) < 12) {
-      setTimeout(() => {
-        syncService.enrichCaseWithWorldtro(caseId).catch(() => {});
-      }, 0);
+    if (shouldHydrateWorldtroOnDemand(item)) {
+      try {
+        await syncService.enrichCaseWithWorldtro(caseId, {
+          force: shouldForceWorldtroRefresh(item)
+        });
+        item = store.getCase(caseId) || item;
+      } catch {
+        // Fall back to the best data already in the local store.
+      }
     }
 
     return sendJson(response, 200, serializePublicCaseDetail(item));
