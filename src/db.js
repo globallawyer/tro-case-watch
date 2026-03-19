@@ -1049,11 +1049,13 @@ export class Store {
     {
       staleAfterHours = 24,
       blockedRetryAfterHours = 12,
+      notFoundRetryAfterHours = 6,
       recentWindowDays = 45
     } = {}
   ) {
     const staleBefore = Date.now() - staleAfterHours * 60 * 60 * 1000;
     const blockedBefore = Date.now() - blockedRetryAfterHours * 60 * 60 * 1000;
+    const notFoundBefore = Date.now() - notFoundRetryAfterHours * 60 * 60 * 1000;
     const recentCutoff = Date.now() - recentWindowDays * 24 * 60 * 60 * 1000;
     const recentCutoffIso = new Date(recentCutoff).toISOString();
     const candidatePoolSize = Math.max(limit * 80, 240);
@@ -1101,7 +1103,13 @@ export class Store {
           (state === "challenge" || state === "rate_limited") &&
           syncedAt &&
           syncedAt >= blockedBefore;
-        const isFresh = syncedAt && syncedAt >= staleBefore;
+        const freshnessCutoff =
+          state === "challenge" || state === "rate_limited"
+            ? blockedBefore
+            : state === "not_found"
+              ? notFoundBefore
+              : staleBefore;
+        const isFresh = syncedAt && syncedAt >= freshnessCutoff;
         const needsWorldtroLevelCompletion =
           worldtroRowCount > 0 && coverage.totalEntries < worldtroRowCount;
         const needsBasicCompletion = coverage.totalEntries < expectedEntries;

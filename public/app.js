@@ -13,6 +13,7 @@ const detailCacheTtlMs = 2 * 60 * 1000;
 let currentCasesPayload = null;
 let detailRequestToken = 0;
 let casesRequestToken = 0;
+let detailRefreshTimer = null;
 const inflightDetailRequests = new Map();
 const caseRoutePattern = /^\/case\/(\d+)\/?$/;
 
@@ -378,6 +379,7 @@ function timelineSourceSummary(entries) {
 function renderDetail(item) {
   const insights = item.insights || {};
   const entries = item.entries || [];
+  const hydrationPending = item.hydration_pending?.pending;
   const timelineSummary = entries.length ? timelineSourceSummary(entries) : "当前只有案件级摘要";
   const summaryCards = [
     { label: "原告/品牌", value: insights.brand_name || insights.plaintiff_name || "待识别" },
@@ -422,6 +424,7 @@ function renderDetail(item) {
         <div class="timeline-toolbar-copy">
           <strong>站内直接查看案件时间线</strong>
           <p>以下 docket 已同步展示在本站，默认不要求跳转到外部来源才能看进展。</p>
+          ${hydrationPending ? '<p class="focus-text">当前条目还在后台继续补抓，页面会自动刷新补进来的 docket。</p>' : ""}
         </div>
         <div class="timeline-toolbar-stats">
           <span class="tag-pill">最近节点 ${formatDate(item.latest_docket_filed_at || item.date_filed)}</span>
@@ -524,6 +527,17 @@ function shouldCacheDetail(item) {
   return !(item.insights?.badges || []).includes("跨境卖家相关") || entriesCount >= 12;
 }
 
+function shouldRefreshIncompleteDetail(item) {
+  return Boolean(item?.hydration_pending?.pending);
+}
+
+function clearDetailRefreshTimer() {
+  if (detailRefreshTimer) {
+    window.clearTimeout(detailRefreshTimer);
+    detailRefreshTimer = null;
+  }
+}
+
 function cacheDetailItem(caseId, item) {
   if (shouldCacheDetail(item)) {
     detailCache.set(caseId, {
@@ -536,8 +550,8 @@ function cacheDetailItem(caseId, item) {
   detailCache.delete(caseId);
 }
 
-async function fetchCaseDetail(caseId) {
-  const cached = getCachedDetail(caseId);
+async function fetchCaseDetail(caseId, { force = false } = {}) {
+  const cached = force ? null : getCachedDetail(caseId);
   if (cached) {
     return cached;
   }
@@ -565,6 +579,35 @@ function prefetchCaseDetail(caseId) {
   }
 
   fetchCaseDetail(caseId).catch(() => {});
+}
+
+function scheduleIncompleteDetailRefresh(caseId, requestToken, attempt = 0) {
+  const delays = [2500, 6000, 12000];
+  if (attempt >= delays.length) {
+    return;
+  }
+
+  clearDetailRefreshTimer();
+  detailRefreshTimer = window.setTimeout(async () => {
+    if (requestToken !== detailRequestToken || state.selectedCaseId !== caseId) {
+      return;
+    }
+
+    try {
+      detailCache.delete(caseId);
+      const item = await fetchCaseDetail(caseId, { force: true });
+      if (requestToken !== detailRequestToken || state.selectedCaseId !== caseId) {
+        return;
+      }
+
+      renderDetail(item);
+      if (shouldRefreshIncompleteDetail(item)) {
+        scheduleIncompleteDetailRefresh(caseId, requestToken, attempt + 1);
+      }
+    } catch {
+      scheduleIncompleteDetailRefresh(caseId, requestToken, attempt + 1);
+    }
+  }, delays[attempt]);
 }
 
 function prefetchVisibleCaseDetails(items = []) {
@@ -605,6 +648,7 @@ async function loadCases({ autoSelectFirst = false, preserveSelection = true } =
 
 async function loadCaseDetail(caseId, { summaryItem = null, focus = false, updateRoute = false } = {}) {
   const requestToken = ++detailRequestToken;
+  clearDetailRefreshTimer();
   const cached = getCachedDetail(caseId);
 
   if (summaryItem) {
@@ -632,6 +676,9 @@ async function loadCaseDetail(caseId, { summaryItem = null, focus = false, updat
   }
 
   renderDetail(item);
+  if (shouldRefreshIncompleteDetail(item)) {
+    scheduleIncompleteDetailRefresh(caseId, requestToken);
+  }
 }
 
 lookupForm.addEventListener("submit", (event) => {

@@ -44,6 +44,7 @@ const syncService = new CaseSyncService({
   pacer,
   translator
 });
+const backgroundCaseHydrations = new Map();
 
 function ensureSeedDatabase() {
   if (!config.seedDbArchivePath || !fs.existsSync(config.seedDbArchivePath)) {
@@ -390,6 +391,8 @@ function shouldHydratePacerMonitorOnDemand(item = {}) {
   const retryHours =
     state === "challenge" || state === "rate_limited"
       ? config.pacerMonitor.blockedRetryAfterHours
+      : state === "not_found"
+        ? config.pacerMonitor.notFoundRetryAfterHours
       : config.pacerMonitor.staleAfterHours;
 
   if (syncedAt && Date.now() - syncedAt < retryHours * 60 * 60 * 1000) {
@@ -397,6 +400,57 @@ function shouldHydratePacerMonitorOnDemand(item = {}) {
   }
 
   return true;
+}
+
+function buildCaseHydrationPlan(item = {}) {
+  const worldtro = shouldHydrateWorldtroOnDemand(item);
+  const pacermonitor = shouldHydratePacerMonitorOnDemand(item);
+  return {
+    pending: worldtro || pacermonitor,
+    worldtro,
+    pacermonitor
+  };
+}
+
+function queueCaseHydration(caseId, initialItem) {
+  const plan = buildCaseHydrationPlan(initialItem);
+  if (!plan.pending) {
+    return plan;
+  }
+
+  if (backgroundCaseHydrations.has(caseId)) {
+    return plan;
+  }
+
+  const task = (async () => {
+    let current = store.getCase(caseId) || initialItem;
+
+    if (plan.worldtro && shouldHydrateWorldtroOnDemand(current)) {
+      try {
+        await syncService.enrichCaseWithWorldtro(caseId, {
+          force: shouldForceWorldtroRefresh(current)
+        });
+        current = store.getCase(caseId) || current;
+      } catch {
+        current = store.getCase(caseId) || current;
+      }
+    }
+
+    if (shouldHydratePacerMonitorOnDemand(current)) {
+      try {
+        await syncService.enrichCaseWithPacerMonitor(caseId);
+      } catch {
+        // Keep the existing detail payload available even when the fallback source misses.
+      }
+    }
+  })()
+    .catch(() => {})
+    .finally(() => {
+      backgroundCaseHydrations.delete(caseId);
+    });
+
+  backgroundCaseHydrations.set(caseId, task);
+  return plan;
 }
 
 function serializePublicEntry(entry = {}) {
@@ -435,6 +489,13 @@ function serializePublicCaseSummary(item = {}) {
 function serializePublicCaseDetail(item = {}) {
   return {
     ...serializePublicCaseSummary(item),
+    hydration_pending: item.hydration_pending
+      ? {
+          pending: Boolean(item.hydration_pending.pending),
+          worldtro: Boolean(item.hydration_pending.worldtro),
+          pacermonitor: Boolean(item.hydration_pending.pacermonitor)
+        }
+      : null,
     entries: Array.isArray(item.entries) ? item.entries.map(serializePublicEntry) : []
   };
 }
@@ -604,27 +665,11 @@ async function handleApi(request, response, pathname, searchParams) {
       return sendJson(response, 404, { error: "Case not found" });
     }
 
-    if (shouldHydrateWorldtroOnDemand(item)) {
-      try {
-        await syncService.enrichCaseWithWorldtro(caseId, {
-          force: shouldForceWorldtroRefresh(item)
-        });
-        item = store.getCase(caseId) || item;
-      } catch {
-        // Fall back to the best data already in the local store.
-      }
-    }
-
-    if (shouldHydratePacerMonitorOnDemand(item)) {
-      try {
-        await syncService.enrichCaseWithPacerMonitor(caseId);
-        item = store.getCase(caseId) || item;
-      } catch {
-        // Fall back to the best data already in the local store.
-      }
-    }
-
-    return sendJson(response, 200, serializePublicCaseDetail(item));
+    const hydrationPlan = queueCaseHydration(caseId, item);
+    return sendJson(response, 200, serializePublicCaseDetail({
+      ...item,
+      hydration_pending: hydrationPlan
+    }));
   }
 
   if (request.method === "GET" && pathname === "/api/sync/status") {

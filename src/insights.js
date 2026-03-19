@@ -82,20 +82,36 @@ function normalizedKey(value) {
   return normalizeText(value).replace(/[^\w]+/g, " ").replace(/\s+/g, " ").trim();
 }
 
-function pullPlaintiffName(caseLike) {
+function pullPlaintiffNames(caseLike) {
   const title = normalize(caseLike.case_name);
-  if (title) {
-    const pieces = title.split(/\s(v\.|vs\.)\s/i);
-    if (pieces[0]) {
-      return pieces[0];
+  const titlePieces = title.split(/\s(?:v\.|vs\.)\s/i);
+  const plaintiffFromCaption = titlePieces[0] || "";
+  const defendantFromCaption = titlePieces.slice(1).join(" v. ").trim();
+  const parties = Array.isArray(caseLike.raw?.party) ? uniqueStrings(caseLike.raw.party) : [];
+
+  if (defendantFromCaption && parties.length) {
+    const defendantKey = normalizedKey(defendantFromCaption);
+    const defendantIndex = parties.findIndex((party) => normalizedKey(party) === defendantKey);
+    if (defendantIndex > 0) {
+      return uniqueStrings(parties.slice(0, defendantIndex));
     }
   }
 
   if (Array.isArray(caseLike.plaintiffs) && caseLike.plaintiffs.length) {
-    return caseLike.plaintiffs[0];
+    return uniqueStrings(caseLike.plaintiffs);
   }
 
-  return "";
+  if (title) {
+    if (plaintiffFromCaption) {
+      return [plaintiffFromCaption];
+    }
+  }
+
+  return parties[0] ? [parties[0]] : [];
+}
+
+function pullPlaintiffName(caseLike) {
+  return pullPlaintiffNames(caseLike)[0] || "";
 }
 
 function pullLawFirms(caseLike) {
@@ -147,8 +163,12 @@ function includesOne(text, patterns) {
   return patterns.some((pattern) => text.includes(pattern));
 }
 
-function sanitizeDefendants(caseLike, plaintiffName) {
-  const plaintiffKey = normalizedKey(plaintiffName);
+function sanitizeDefendants(caseLike, plaintiffNames = []) {
+  const plaintiffKeys = new Set(
+    (Array.isArray(plaintiffNames) ? plaintiffNames : [plaintiffNames])
+      .map((value) => normalizedKey(value))
+      .filter(Boolean)
+  );
   const unique = new Map();
 
   for (const rawValue of caseLike.defendants || []) {
@@ -158,7 +178,7 @@ function sanitizeDefendants(caseLike, plaintiffName) {
     }
 
     const key = normalizedKey(value);
-    if (!key || key === plaintiffKey) {
+    if (!key || plaintiffKeys.has(key)) {
       continue;
     }
 
@@ -172,7 +192,7 @@ function sanitizeDefendants(caseLike, plaintiffName) {
   if (pieces.length >= 2) {
     const captionDefendant = normalize(pieces.slice(1).join(" v. "));
     const captionKey = normalizedKey(captionDefendant);
-    if (captionKey && captionKey !== plaintiffKey && !unique.has(captionKey)) {
+    if (captionKey && !plaintiffKeys.has(captionKey) && !unique.has(captionKey)) {
       unique.set(captionKey, captionDefendant);
     }
   }
@@ -338,8 +358,12 @@ function buildNarrative({ status, sellerRelevant, isScheduleACase, isTroCase, de
 
 export function deriveCaseInsights(caseLike) {
   const text = normalizeText(collectTexts(caseLike));
-  const plaintiffName = pullPlaintiffName(caseLike);
-  const defendants = sanitizeDefendants(caseLike, plaintiffName);
+  const plaintiffNames = pullPlaintiffNames(caseLike);
+  const plaintiffName = plaintiffNames[0] || "";
+  const defendants = sanitizeDefendants(
+    caseLike,
+    plaintiffNames.length ? plaintiffNames : [plaintiffName]
+  );
   const lawFirms = pullLawFirms(caseLike);
   const tags = Array.isArray(caseLike.tags) ? caseLike.tags : [];
   const ipHits = countMatches(text, IP_TERMS);

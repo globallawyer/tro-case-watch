@@ -116,6 +116,7 @@ export const config = {
     backfillMaxCasesPerRun: envInt("PACERMONITOR_BACKFILL_MAX_CASES_PER_RUN", 6),
     staleAfterHours: envInt("PACERMONITOR_STALE_AFTER_HOURS", 24),
     blockedRetryAfterHours: envInt("PACERMONITOR_BLOCKED_RETRY_AFTER_HOURS", 12),
+    notFoundRetryAfterHours: envInt("PACERMONITOR_NOT_FOUND_RETRY_AFTER_HOURS", 6),
     recentWindowDays: envInt("PACERMONITOR_RECENT_WINDOW_DAYS", 45),
     maxSearchQueries: envInt("PACERMONITOR_MAX_SEARCH_QUERIES", 5)
   }

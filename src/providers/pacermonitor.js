@@ -56,13 +56,37 @@ function decodeDuckResultUrl(value) {
   }
 }
 
+const DISTRICT_DIRECTION_MAP = {
+  N: "Northern",
+  S: "Southern",
+  E: "Eastern",
+  W: "Western",
+  C: "Central",
+  M: "Middle"
+};
+
+function expandCourtAbbreviations(value) {
+  return String(value || "")
+    .replace(/\b([NSEWCM])\s*\.?\s*D\.?\s+([A-Za-z][A-Za-z .-]+)/gi, (_, direction, place) => {
+      const prefix = DISTRICT_DIRECTION_MAP[String(direction || "").toUpperCase()] || direction;
+      return `${prefix} District of ${String(place || "").trim()}`;
+    })
+    .replace(/\bD\.?\s+([A-Za-z][A-Za-z .-]+)/gi, (_, place) => `District of ${String(place || "").trim()}`)
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function buildCourtSearchText(caseRow) {
   const courtName = String(caseRow.court_name || "").trim();
   if (!courtName) {
     return "";
   }
 
-  return courtName
+  return expandCourtAbbreviations(
+    courtName
+      .replace(/\bDist\.?\b/gi, "District")
+      .replace(/\bCt\.?\b/gi, "Court")
+  )
     .replace(/\bU\.?S\.?\b/gi, "United States")
     .replace(/[.]+/g, " ")
     .replace(/\s+/g, " ")
@@ -77,6 +101,7 @@ function buildCourtSearchVariants(caseRow) {
 
   const variants = new Set([courtName]);
   const simplified = courtName
+    .replace(/\bDistrict Court,?\s*/gi, "")
     .replace(/\bDistrict Court for the\b/gi, "")
     .replace(/\bUnited States\b/gi, "")
     .replace(/[.]+/g, " ")
@@ -104,6 +129,20 @@ function buildPlaintiffSearchText(caseRow) {
   return String(plaintiff || "").replace(/\s+/g, " ").trim();
 }
 
+function buildPartySearchTerms(caseRow) {
+  const parties = Array.isArray(caseRow.raw?.party) ? caseRow.raw.party : [];
+  const terms = new Set();
+
+  for (const value of [buildPlaintiffSearchText(caseRow), ...(caseRow.plaintiffs || []), ...parties]) {
+    const term = String(value || "").replace(/\s+/g, " ").trim();
+    if (term) {
+      terms.add(term);
+    }
+  }
+
+  return [...terms];
+}
+
 function buildCaseNameSearchText(caseRow) {
   return String(caseRow.case_name || "").replace(/\s+/g, " ").trim();
 }
@@ -119,6 +158,107 @@ function normalizePublicCaseUrl(value) {
   } catch {
     return null;
   }
+}
+
+function normalizePublicCaseLink(value) {
+  const raw = String(value || "").trim();
+  if (!raw) {
+    return null;
+  }
+
+  if (raw.startsWith("/public/case/")) {
+    return normalizePublicCaseUrl(`https://www.pacermonitor.com${raw}`);
+  }
+
+  return normalizePublicCaseUrl(raw);
+}
+
+function extractPublicCaseUrls(html) {
+  const links = new Set();
+  for (const match of String(html || "").matchAll(/href="([^"]*\/public\/case\/[^"]+)"/gi)) {
+    const normalized = normalizePublicCaseLink(match[1]);
+    if (normalized) {
+      links.add(normalized);
+    }
+  }
+
+  return [...links];
+}
+
+function pickBestPublicCaseUrl(links, docketNumber = "") {
+  if (!links.length) {
+    return null;
+  }
+
+  const docketNeedle = normalizeDocket(docketNumber);
+  if (docketNeedle) {
+    const exact = links.find((link) => normalizeText(link).includes(docketNeedle));
+    if (exact) {
+      return exact;
+    }
+  }
+
+  return links[0] || null;
+}
+
+function extractCsrfToken(html) {
+  return String(html || "").match(/name="_csrf" value="([^"]+)"/i)?.[1] || null;
+}
+
+function firstCookieHeader(setCookie) {
+  const raw = String(setCookie || "").trim();
+  if (!raw) {
+    return "";
+  }
+
+  return raw.split(",").map((value) => value.trim().split(";")[0]).filter(Boolean).join("; ");
+}
+
+function lookupBlockedState(page) {
+  if (!page) {
+    return null;
+  }
+
+  if (page.status === 429) {
+    return "rate_limited";
+  }
+
+  if (page.status === 403 || page.status === 401 || /captcha|recaptcha/i.test(String(page.text || ""))) {
+    return "challenge";
+  }
+
+  return null;
+}
+
+function buildSiteSearchTerms(caseRow) {
+  const docketNumber = String(caseRow.docket_number || "").trim();
+  const normalizedDocket = normalizeDocket(docketNumber);
+  const caseName = buildCaseNameSearchText(caseRow);
+  return [...new Set([docketNumber, normalizedDocket, caseName, ...buildPartySearchTerms(caseRow)].filter(Boolean))];
+}
+
+function buildSearchQueries(caseRow) {
+  const docketNumber = String(caseRow.docket_number || "").trim();
+  const normalizedDocket = normalizeDocket(docketNumber);
+  const courtVariants = buildCourtSearchVariants(caseRow);
+  const caseName = buildCaseNameSearchText(caseRow);
+  const partyTerms = buildPartySearchTerms(caseRow).slice(0, 3);
+  const queries = [
+    ...courtVariants.flatMap((courtName) => [
+      `site:pacermonitor.com/public/case "${docketNumber}" "${courtName}"`,
+      normalizedDocket ? `site:pacermonitor.com/public/case "${normalizedDocket}" "${courtName}"` : ""
+    ]),
+    ...partyTerms.flatMap((party) => [
+      `site:pacermonitor.com/public/case "${docketNumber}" "${party}"`,
+      normalizedDocket ? `site:pacermonitor.com/public/case "${normalizedDocket}" "${party}"` : ""
+    ]),
+    caseName ? `site:pacermonitor.com/public/case "${docketNumber}" "${caseName}"` : "",
+    caseName && normalizedDocket ? `site:pacermonitor.com/public/case "${normalizedDocket}" "${caseName}"` : "",
+    `site:pacermonitor.com/public/case "${docketNumber}" pacermonitor`,
+    normalizedDocket ? `site:pacermonitor.com/public/case "${normalizedDocket}" pacermonitor` : ""
+  ];
+
+  return [...new Set(queries.map((query) => query.trim()).filter(Boolean))];
 }
 
 export class PacerMonitorAdapter {
@@ -168,10 +308,10 @@ export class PacerMonitorAdapter {
       return null;
     }
 
-    const caseUrl = await this.lookupCaseUrl(caseRow);
-    if (!caseUrl) {
+    const lookup = await this.lookupCase(caseRow);
+    if (!lookup?.url) {
       return {
-        state: "not_found",
+        state: lookup?.state || "not_found",
         url: null,
         title: null,
         entries: [],
@@ -179,6 +319,7 @@ export class PacerMonitorAdapter {
       };
     }
 
+    const caseUrl = lookup.url;
     const page = await this.fetchPage(caseUrl);
     const text = page.text || "";
     if (page.status === 429 || this.isChallengePage(text)) {
@@ -199,7 +340,7 @@ export class PacerMonitorAdapter {
     };
   }
 
-  async lookupCaseUrl(caseRow) {
+  async lookupCase(caseRow) {
     const existing = [
       caseRow.raw?.pacermonitor?.caseUrl,
       ...(Array.isArray(caseRow.source_urls) ? caseRow.source_urls : [])
@@ -208,39 +349,41 @@ export class PacerMonitorAdapter {
       .filter(Boolean);
 
     if (existing.length) {
-      return existing[0];
+      return {
+        state: "ok",
+        url: existing[0]
+      };
     }
 
-    const queries = this.buildSearchQueries(caseRow);
-    for (const query of queries.slice(0, this.maxSearchQueries)) {
-      const url = await this.searchPublicCaseUrl(query, caseRow.docket_number);
-      if (url) {
-        return url;
+    let blockedState = null;
+
+    for (const term of buildSiteSearchTerms(caseRow).slice(0, Math.min(3, this.maxSearchQueries))) {
+      const result = await this.searchPublicCaseUrlViaSite(term, caseRow.docket_number);
+      if (result.url) {
+        return result;
+      }
+
+      if (result.state === "challenge" || result.state === "rate_limited") {
+        blockedState = blockedState || result.state;
       }
     }
 
-    return null;
-  }
+    const queries = buildSearchQueries(caseRow);
+    for (const query of queries.slice(0, this.maxSearchQueries)) {
+      const result = await this.searchPublicCaseUrl(query, caseRow.docket_number);
+      if (result.url) {
+        return result;
+      }
 
-  buildSearchQueries(caseRow) {
-    const docketNumber = String(caseRow.docket_number || "").trim();
-    const normalizedDocket = normalizeDocket(docketNumber);
-    const courtVariants = buildCourtSearchVariants(caseRow);
-    const plaintiff = buildPlaintiffSearchText(caseRow);
-    const caseName = buildCaseNameSearchText(caseRow);
-    const queries = [
-      ...courtVariants.flatMap((courtName) => [
-        `site:pacermonitor.com/public/case "${docketNumber}" "${courtName}"`,
-        normalizedDocket ? `site:pacermonitor.com/public/case "${normalizedDocket}" "${courtName}"` : ""
-      ]),
-      caseName ? `site:pacermonitor.com/public/case "${docketNumber}" "${caseName}"` : "",
-      caseName && normalizedDocket ? `site:pacermonitor.com/public/case "${normalizedDocket}" "${caseName}"` : "",
-      plaintiff ? `site:pacermonitor.com/public/case "${docketNumber}" "${plaintiff}"` : "",
-      plaintiff && normalizedDocket ? `site:pacermonitor.com/public/case "${normalizedDocket}" "${plaintiff}"` : "",
-      `site:pacermonitor.com/public/case "${docketNumber}" pacermonitor`
-    ];
+      if (result.state === "challenge" || result.state === "rate_limited") {
+        blockedState = blockedState || result.state;
+      }
+    }
 
-    return [...new Set(queries.map((query) => query.trim()).filter(Boolean))];
+    return {
+      state: blockedState || "not_found",
+      url: null
+    };
   }
 
   async searchPublicCaseUrl(query, docketNumber = "") {
@@ -248,13 +391,69 @@ export class PacerMonitorAdapter {
     url.searchParams.set("q", query);
 
     const page = await this.fetchPage(url.toString());
-    const links = [...page.text.matchAll(/class="result__a" href="([^"]+)"/g)]
+    const blockedState = lookupBlockedState(page);
+    if (blockedState) {
+      return {
+        state: blockedState,
+        url: null
+      };
+    }
+
+    const links = [...String(page.text || "").matchAll(/class="result__a" href="([^"]+)"/g)]
       .map((match) => decodeDuckResultUrl(match[1]))
       .filter((value) => normalizePublicCaseUrl(value));
+    return {
+      state: links.length ? "ok" : "not_found",
+      url: pickBestPublicCaseUrl(links, docketNumber)
+    };
+  }
 
-    const docketNeedle = normalizeDocket(docketNumber);
-    const exact = links.find((link) => normalizeText(link).includes(docketNeedle));
-    return exact || links[0] || null;
+  async searchPublicCaseUrlViaSite(term, docketNumber = "") {
+    const homePage = await this.fetchPage(this.baseUrl);
+    const blockedState = lookupBlockedState(homePage);
+    if (blockedState) {
+      return {
+        state: blockedState,
+        url: null
+      };
+    }
+
+    const csrf = extractCsrfToken(homePage.text);
+    if (!csrf) {
+      return {
+        state: "not_found",
+        url: null
+      };
+    }
+
+    const body = new URLSearchParams({
+      _csrf: csrf,
+      querystring: term
+    });
+    const page = await this.fetchPage(`${this.baseUrl}/search`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        origin: this.baseUrl,
+        referer: `${this.baseUrl}/`,
+        cookie: firstCookieHeader(homePage.setCookie)
+      },
+      body
+    });
+
+    const pageBlockedState = lookupBlockedState(page);
+    if (pageBlockedState) {
+      return {
+        state: pageBlockedState,
+        url: null
+      };
+    }
+
+    const links = extractPublicCaseUrls(page.text);
+    return {
+      state: links.length ? "ok" : "not_found",
+      url: pickBestPublicCaseUrl(links, docketNumber)
+    };
   }
 
   parseCasePage(html, pageUrl, caseRow) {
@@ -345,7 +544,8 @@ export class PacerMonitorAdapter {
       return {
         status: response.status,
         url: response.url || url,
-        text
+        text,
+        setCookie: response.headers.get("set-cookie") || ""
       };
     } finally {
       clearTimeout(timeout);

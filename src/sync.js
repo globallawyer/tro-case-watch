@@ -36,18 +36,38 @@ function deriveParties(result) {
   const plaintiffFromCaption = captionPieces[0]?.trim() || "";
   const defendantFromCaption = captionPieces.slice(1).join(" v. ").trim();
   const plaintiffKey = normalizeText(plaintiffFromCaption).replace(/[^\w]+/g, " ").replace(/\s+/g, " ").trim();
+  const defendantKey = normalizeText(defendantFromCaption).replace(/[^\w]+/g, " ").replace(/\s+/g, " ").trim();
 
-  const plaintiffs = uniqueByNormalized([plaintiffFromCaption || parties[0]].filter(Boolean));
-  const defendants = uniqueByNormalized(
-    [defendantFromCaption, ...parties.filter((party) => {
+  let plaintiffs = [plaintiffFromCaption || parties[0]].filter(Boolean);
+  let defendants = [defendantFromCaption].filter(Boolean);
+
+  if (defendantKey && parties.length) {
+    const defendantIndex = parties.findIndex((party) => {
       const partyKey = normalizeText(party).replace(/[^\w]+/g, " ").replace(/\s+/g, " ").trim();
-      return partyKey && partyKey !== plaintiffKey;
-    })].filter(Boolean)
-  );
+      return partyKey === defendantKey;
+    });
+
+    if (defendantIndex >= 0) {
+      plaintiffs = [
+        ...parties.slice(0, defendantIndex),
+        plaintiffFromCaption
+      ].filter(Boolean);
+      defendants = [
+        defendantFromCaption,
+        ...parties.slice(defendantIndex)
+      ].filter(Boolean);
+    }
+  }
 
   return {
-    plaintiffs,
-    defendants
+    plaintiffs: uniqueByNormalized(plaintiffs),
+    defendants: uniqueByNormalized([
+      ...defendants,
+      ...parties.filter((party) => {
+        const partyKey = normalizeText(party).replace(/[^\w]+/g, " ").replace(/\s+/g, " ").trim();
+        return partyKey && partyKey !== plaintiffKey;
+      })
+    ])
   };
 }
 
@@ -308,6 +328,8 @@ export class CaseSyncService {
     const retryHours =
       state === "challenge" || state === "rate_limited"
         ? this.config.pacerMonitor.blockedRetryAfterHours
+        : state === "not_found"
+          ? this.config.pacerMonitor.notFoundRetryAfterHours
         : this.config.pacerMonitor.staleAfterHours;
     const staleAfterMs = retryHours * 60 * 60 * 1000;
 
@@ -371,6 +393,7 @@ export class CaseSyncService {
     const candidates = this.store.getCasesNeedingPacerMonitorSync(maxCases, {
       staleAfterHours: this.config.pacerMonitor.staleAfterHours,
       blockedRetryAfterHours: this.config.pacerMonitor.blockedRetryAfterHours,
+      notFoundRetryAfterHours: this.config.pacerMonitor.notFoundRetryAfterHours,
       recentWindowDays: this.config.pacerMonitor.recentWindowDays
     });
 
