@@ -7,7 +7,7 @@ services:
     env_file:
       - ../../.env
     volumes:
-      - ../../data:/app/data
+      - ${APP_DATA_DIR:-/var/lib/tro-case-watch/data}:/app/data
     healthcheck:
       test:
         [

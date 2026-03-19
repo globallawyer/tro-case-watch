@@ -100,6 +100,14 @@ git clone https://github.com/coolxincool2026/tro-case-watch.git
 cd tro-case-watch
 ```
 
+Google 生产环境的数据目录不要继续放在代码目录里。当前部署脚本会默认把 `SQLite` 挂到：
+
+```bash
+/var/lib/tro-case-watch/data
+```
+
+这样后面你更新 `/opt/tro-case-watch` 代码时，不会把线上数据库一起删掉。
+
 ### 3. 安装 Docker
 
 ```bash
@@ -134,6 +142,8 @@ cp .env.example .env
 cd /opt/tro-case-watch
 bash deploy/gcp/deploy.sh
 ```
+
+如果这是第一次从旧版本迁移，脚本会自动尝试把旧的 `/opt/tro-case-watch/data` 迁到新的持久目录。
 
 ### 6. 配置域名
 
