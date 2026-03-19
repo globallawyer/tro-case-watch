@@ -9,6 +9,7 @@
     "dev": "node --watch src/server.js",
     "sync:recent": "node src/server.js --sync-only recent",
     "sync:backfill": "node src/server.js --sync-only backfill",
-    "sync:worldtro": "node src/server.js --sync-only worldtro"
+    "sync:worldtro": "node src/server.js --sync-only worldtro",
+    "sync:courts": "node src/server.js --sync-only courtfeeds"
   }
 }

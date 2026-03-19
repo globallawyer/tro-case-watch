@@ -53,6 +53,18 @@ function envFloat(name, fallback) {
   return Number.isFinite(value) ? value : fallback;
 }
 
+function envList(name, fallback = []) {
+  const value = env(name, "");
+  if (!String(value || "").trim()) {
+    return [...fallback];
+  }
+
+  return String(value)
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
 export const config = {
   projectRoot,
   dataDir,
@@ -91,6 +103,30 @@ export const config = {
     maxCasesPerRun: envInt("WORLDTRO_MAX_CASES_PER_RUN", 3),
     backfillMaxCasesPerRun: envInt("WORLDTRO_BACKFILL_MAX_CASES_PER_RUN", 30),
     staleAfterHours: envInt("WORLDTRO_STALE_AFTER_HOURS", 12)
+  },
+  courtFeeds: {
+    enabled: envBool("COURT_FEEDS_ENABLED", true),
+    timeoutMs: envInt("COURT_FEEDS_TIMEOUT_MS", 15000),
+    minIntervalMs: envInt("COURT_FEEDS_MIN_INTERVAL_MS", 1000),
+    maxItemsPerFeed: envInt("COURT_FEEDS_MAX_ITEMS_PER_FEED", 80),
+    maxLookupsPerRun: envInt("COURT_FEEDS_MAX_LOOKUPS_PER_RUN", 12),
+    courts: envList("COURT_FEEDS_TARGETS", [
+      "ilnd",
+      "flsd",
+      "cacd",
+      "cand",
+      "casd",
+      "gand",
+      "gasd",
+      "paed",
+      "mdpa",
+      "pawd",
+      "tned",
+      "tnmd",
+      "tnwd",
+      "waed",
+      "wawd"
+    ])
   },
   translation: {
     provider: env("TRANSLATION_PROVIDER", "openai"),

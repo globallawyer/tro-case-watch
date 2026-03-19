@@ -7,6 +7,7 @@ import { URL } from "node:url";
 import { config } from "./config.js";
 import { Store } from "./db.js";
 import { CourtListenerClient } from "./providers/courtlistener.js";
+import { CourtFeedClient } from "./providers/courtfeed.js";
 import { WorldtroClient } from "./providers/worldtro.js";
 import { PacerAdapter } from "./providers/pacer.js";
 import { PacerMonitorAdapter } from "./providers/pacermonitor.js";
@@ -31,6 +32,7 @@ ensureSeedDatabase();
 
 const store = createStoreWithRecovery();
 const courtListener = new CourtListenerClient(config.courtListener);
+const courtFeeds = new CourtFeedClient(config.courtFeeds);
 const worldtro = new WorldtroClient(config.worldtro);
 const pacerMonitor = new PacerMonitorAdapter(config.pacerMonitor);
 const pacer = new PacerAdapter(config.pacer, store);
@@ -38,6 +40,7 @@ const translator = new TranslationService(config.translation, store);
 const syncService = new CaseSyncService({
   config,
   store,
+  courtFeeds,
   courtListener,
   worldtro,
   pacerMonitor,
@@ -709,6 +712,21 @@ async function handleApi(request, response, pathname, searchParams) {
     });
   }
 
+  if (request.method === "POST" && pathname === "/api/admin/court-feed-sync") {
+    if (!authorize(request)) {
+      return sendJson(response, 401, { error: "Unauthorized" });
+    }
+
+    syncService
+      .syncCourtFeedsRecent("recent")
+      .catch((error) => console.error("[court-feed-sync]", error.message, error.body || ""));
+
+    return sendJson(response, 202, {
+      accepted: true,
+      mode: "court-feed-sync"
+    });
+  }
+
   sendJson(response, 404, { error: "Not found" });
 }
 
@@ -768,6 +786,12 @@ async function main() {
     if (rawMode === "worldtro") {
       const result = await syncService.syncWorldtroRecent("backfill");
       console.log(`[sync] completed worldtro ${JSON.stringify(result)}`);
+      process.exit(0);
+    }
+
+    if (rawMode === "courtfeeds") {
+      const result = await syncService.syncCourtFeedsRecent("recent");
+      console.log(`[sync] completed courtfeeds ${JSON.stringify(result)}`);
       process.exit(0);
     }
 

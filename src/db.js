@@ -56,6 +56,31 @@ function compareIsoDesc(left, right) {
   return String(right || "").localeCompare(String(left || ""));
 }
 
+function normalizeLookupText(value) {
+  return normalizeText(value).replace(/[^\w]+/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function buildCaseIdentityKeys(caseLike) {
+  const docketKey = normalizeDocket(caseLike?.docket_number);
+  if (!docketKey) {
+    return [];
+  }
+
+  const keys = new Set();
+  const courtIdKey = normalizeLookupText(caseLike?.court_id);
+  const courtNameKey = normalizeLookupText(caseLike?.court_name);
+
+  if (courtIdKey) {
+    keys.add(`${courtIdKey}|${docketKey}`);
+  }
+
+  if (courtNameKey) {
+    keys.add(`${courtNameKey}|${docketKey}`);
+  }
+
+  return [...keys];
+}
+
 const shanghaiDateFormatter = new Intl.DateTimeFormat("en-CA", {
   timeZone: "Asia/Shanghai",
   year: "numeric",
@@ -309,6 +334,7 @@ export class Store {
     this.caseDetailCache = new Map();
     this.listPayloadCache = new Map();
     this.dashboardStatsCache = null;
+    this.caseIdentityCache = null;
     this.db.exec(`
       PRAGMA journal_mode = WAL;
       PRAGMA synchronous = NORMAL;
@@ -418,6 +444,53 @@ export class Store {
     this.caseDetailCache.clear();
     this.listPayloadCache.clear();
     this.dashboardStatsCache = null;
+    this.caseIdentityCache = null;
+  }
+
+  getCaseIdentityIndex(startDate = "2025-01-01") {
+    const cacheKey = String(startDate || "2025-01-01");
+    if (this.caseIdentityCache?.version === this.caseCacheVersion && this.caseIdentityCache?.cacheKey === cacheKey) {
+      return this.caseIdentityCache.index;
+    }
+
+    const index = new Map();
+    for (const row of this.getHydratedCases(cacheKey)) {
+      for (const key of buildCaseIdentityKeys(row)) {
+        if (!index.has(key)) {
+          index.set(key, row);
+        }
+      }
+    }
+
+    this.caseIdentityCache = {
+      version: this.caseCacheVersion,
+      cacheKey,
+      index
+    };
+
+    return index;
+  }
+
+  findCaseByCourtAndDocket({ courtId = "", courtName = "", docketNumber = "", startDate = "2025-01-01" } = {}) {
+    const docketKey = normalizeDocket(docketNumber);
+    if (!docketKey) {
+      return null;
+    }
+
+    const index = this.getCaseIdentityIndex(startDate);
+    const candidateKeys = [
+      `${normalizeLookupText(courtId)}|${docketKey}`,
+      `${normalizeLookupText(courtName)}|${docketKey}`
+    ].filter((value) => !value.startsWith("|"));
+
+    for (const key of candidateKeys) {
+      const row = index.get(key);
+      if (row) {
+        return row;
+      }
+    }
+
+    return null;
   }
 
   getHydratedCases(startDate = "2025-01-01") {
