@@ -145,6 +145,15 @@ bash deploy/gcp/deploy.sh
 
 如果这是第一次从旧版本迁移，脚本会自动尝试把旧的 `/opt/tro-case-watch/data` 迁到新的持久目录。
 
+如果你需要把服务器数据库直接切换到仓库自带的最新种子快照，可在服务器上执行：
+
+```bash
+cd /opt/tro-case-watch
+FORCE_SEED_RESTORE=1 bash deploy/gcp/deploy.sh
+```
+
+这会用仓库里的 `seed/tro-watch.sqlite.gz` 直接覆盖 `/var/lib/tro-case-watch/data/tro-watch.sqlite`。
+
 ### 6. 配置域名
 
 假设 `create-vm.sh` 输出的静态 IP 是 `X.X.X.X`，DNS 建议这样配：
