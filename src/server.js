@@ -55,7 +55,18 @@ function ensureSeedDatabase() {
     return;
   }
 
-  restoreSeedDatabase(shouldRestore.reason);
+  try {
+    restoreSeedDatabase(shouldRestore.reason);
+  } catch (error) {
+    if (!isNoSpaceError(error) || !switchToFallbackDbPath()) {
+      throw error;
+    }
+
+    const fallbackRestore = needsSeedRestore();
+    if (fallbackRestore.restore) {
+      restoreSeedDatabase(`${shouldRestore.reason}:fallback-enospc`);
+    }
+  }
 }
 
 function createStoreWithRecovery() {
@@ -67,7 +78,15 @@ function createStoreWithRecovery() {
     }
 
     console.error(`[bootstrap-db] store open failed, attempting seed restore (${error.message})`);
-    restoreSeedDatabase(`store-open-failed:${error.code || "unknown"}`);
+    try {
+      restoreSeedDatabase(`store-open-failed:${error.code || "unknown"}`);
+    } catch (restoreError) {
+      if (!isNoSpaceError(restoreError) || !switchToFallbackDbPath()) {
+        throw restoreError;
+      }
+
+      restoreSeedDatabase(`store-open-failed:${error.code || "unknown"}:fallback-enospc`);
+    }
     return new Store(config.dbPath);
   }
 }
@@ -80,16 +99,28 @@ function isRecoverableSqliteError(error) {
   );
 }
 
+function isNoSpaceError(error) {
+  return error?.code === "ENOSPC" || String(error?.message || "").toLowerCase().includes("no space left on device");
+}
+
+function switchToFallbackDbPath() {
+  const nextDbPath = String(config.fallbackDbPath || "").trim();
+  if (!nextDbPath || nextDbPath === config.dbPath) {
+    return false;
+  }
+
+  console.warn(`[bootstrap-db] primary db path is full, switching to fallback path ${nextDbPath}`);
+  config.dbPath = nextDbPath;
+  return true;
+}
+
 function restoreSeedDatabase(reason = "manual") {
   fs.mkdirSync(path.dirname(config.dbPath), { recursive: true });
   cleanupDatabaseFiles(config.dbPath, { includePrimary: true });
 
   const archive = fs.readFileSync(config.seedDbArchivePath);
   const dbBuffer = zlib.gunzipSync(archive);
-  const tempPath = `${config.dbPath}.restore-${Date.now()}.tmp`;
-  fs.writeFileSync(tempPath, dbBuffer);
-  verifyDatabase(tempPath, config.seedDbMinimumCases);
-  fs.renameSync(tempPath, config.dbPath);
+  fs.writeFileSync(config.dbPath, dbBuffer);
   cleanupDatabaseFiles(config.dbPath, { includePrimary: false });
   verifyDatabase(config.dbPath, config.seedDbMinimumCases);
   console.log(`[bootstrap-db] restored seed database from ${config.seedDbArchivePath} (${reason})`);
@@ -98,6 +129,15 @@ function restoreSeedDatabase(reason = "manual") {
 function cleanupDatabaseFiles(dbPath, { includePrimary = false } = {}) {
   const targets = includePrimary ? [dbPath] : [];
   targets.push(`${dbPath}-wal`, `${dbPath}-shm`, `${dbPath}-journal`);
+  const directory = path.dirname(dbPath);
+  if (fs.existsSync(directory)) {
+    targets.push(
+      ...fs
+        .readdirSync(directory, { withFileTypes: true })
+        .filter((entry) => entry.isFile() && entry.name.startsWith(`${path.basename(dbPath)}.restore-`))
+        .map((entry) => path.join(directory, entry.name))
+    );
+  }
 
   for (const target of targets) {
     try {
@@ -113,9 +153,10 @@ function cleanupDatabaseFiles(dbPath, { includePrimary = false } = {}) {
 function verifyDatabase(dbPath, minimumCases = 0) {
   const db = new DatabaseSync(dbPath, { readOnly: true });
   try {
-    const integrity = db.prepare("PRAGMA integrity_check").get();
-    if (String(integrity?.integrity_check || "").toLowerCase() !== "ok") {
-      throw new Error(`seed-integrity-failed:${integrity?.integrity_check || "unknown"}`);
+    const quickCheck = db.prepare("PRAGMA quick_check").get();
+    const quickCheckValue = String(quickCheck?.quick_check || "").toLowerCase();
+    if (quickCheckValue !== "ok") {
+      throw new Error(`seed-integrity-failed:${quickCheck?.quick_check || "unknown"}`);
     }
 
     if (minimumCases > 0) {
@@ -142,10 +183,10 @@ function needsSeedRestore() {
 
   try {
     const db = new DatabaseSync(config.dbPath, { readOnly: true });
-    const integrity = db.prepare("PRAGMA integrity_check").get();
-    if (String(integrity?.integrity_check || "").toLowerCase() !== "ok") {
+    const quickCheck = db.prepare("PRAGMA quick_check").get();
+    if (String(quickCheck?.quick_check || "").toLowerCase() !== "ok") {
       db.close();
-      return { restore: true, reason: `db-integrity:${integrity?.integrity_check || "unknown"}` };
+      return { restore: true, reason: `db-integrity:${quickCheck?.quick_check || "unknown"}` };
     }
 
     const row = db.prepare("SELECT COUNT(*) AS total FROM cases").get();
@@ -518,7 +559,14 @@ async function handleApi(request, response, pathname, searchParams) {
     return sendJson(response, 200, {
       ok: true,
       startDate: config.sync.startDate,
-      status: serializePublicStatus(syncService.getPublicStatus())
+      runtime: {
+        dbPath: config.dbPath,
+        isRunning: syncService.state.isRunning,
+        currentMode: syncService.state.currentMode,
+        lastStartedAt: syncService.state.lastStartedAt,
+        lastFinishedAt: syncService.state.lastFinishedAt,
+        lastError: syncService.state.lastError
+      }
     });
   }
 

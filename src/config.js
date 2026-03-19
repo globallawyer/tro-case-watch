@@ -57,7 +57,8 @@ export const config = {
   projectRoot,
   dataDir,
   publicDir: path.join(projectRoot, "public"),
-  dbPath: path.join(dataDir, "tro-watch.sqlite"),
+  dbPath: env("DB_PATH", path.join(dataDir, "tro-watch.sqlite")),
+  fallbackDbPath: env("FALLBACK_DB_PATH", path.join(env("TMPDIR", "/tmp"), "tro-watch.sqlite")),
   seedDbArchivePath: env("SEED_DB_ARCHIVE_PATH", path.join(projectRoot, "seed", "tro-watch.sqlite.gz")),
   seedDbMinimumCases: envInt("SEED_DB_MIN_CASES", 40000),
   server: {
