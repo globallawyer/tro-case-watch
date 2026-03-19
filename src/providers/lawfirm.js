@@ -1,0 +1,643 @@
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function stripTags(value) {
+  return String(value || "").replace(/<[^>]+>/g, " ");
+}
+
+function decodeHtml(value) {
+  return String(value || "")
+    .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(Number(code)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, code) => String.fromCharCode(Number.parseInt(code, 16)))
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'");
+}
+
+function cleanText(value) {
+  return decodeHtml(stripTags(value)).replace(/\s+/g, " ").trim();
+}
+
+function absoluteUrl(value, baseUrl) {
+  const raw = String(value || "").trim();
+  if (!raw) {
+    return null;
+  }
+
+  try {
+    return new URL(raw, baseUrl).toString();
+  } catch {
+    return null;
+  }
+}
+
+function normalizePdfTitle(value) {
+  return decodeURIComponent(String(value || ""))
+    .replace(/\+/g, " ")
+    .replace(/[_-]+/g, " ")
+    .replace(/\.pdf$/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function parseUsDate(value) {
+  const match = String(value || "").match(/\b(\d{1,2})\/(\d{1,2})\/(\d{4})\b/);
+  if (!match) {
+    return null;
+  }
+
+  return `${match[3]}-${match[1].padStart(2, "0")}-${match[2].padStart(2, "0")}`;
+}
+
+function normalizePageUrl(value) {
+  const raw = String(value || "").trim();
+  if (!raw) {
+    return null;
+  }
+
+  try {
+    const url = new URL(raw);
+    url.hash = "";
+    if (url.hostname.includes("dropbox.com")) {
+      url.search = "";
+    }
+    return url.toString();
+  } catch {
+    return raw;
+  }
+}
+
+function parseDocketNumber(value) {
+  const match = String(value || "").match(/\b(?:\d+:)?\d{2}-cv-\d{3,6}\b/i);
+  return match ? match[0].trim() : "";
+}
+
+function cleanCaseName(value) {
+  return cleanText(String(value || "").replace(/\s*(?:-|–|—)?\s*Case No\.?:?\s*(?:\d+:)?\d{2}-cv-\d{3,6}.*$/i, ""));
+}
+
+const DISTRICT_DIRECTION_MAP = {
+  N: "Northern",
+  S: "Southern",
+  E: "Eastern",
+  W: "Western",
+  C: "Central",
+  M: "Middle"
+};
+
+const STATE_CODE_TO_NAME = {
+  CA: "California",
+  FL: "Florida",
+  GA: "Georgia",
+  IL: "Illinois",
+  NY: "New York",
+  PA: "Pennsylvania",
+  TN: "Tennessee",
+  TX: "Texas",
+  WA: "Washington"
+};
+
+const COURT_CODE_TO_ID = {
+  CACD: "cacd",
+  CAND: "cand",
+  CASD: "casd",
+  FLSD: "flsd",
+  GAND: "gand",
+  GASD: "gasd",
+  ILND: "ilnd",
+  NYSD: "nysd",
+  NYED: "nyed",
+  PAED: "paed",
+  MDPA: "mdpa",
+  PAWD: "pawd",
+  TNED: "tned",
+  TNMD: "tnmd",
+  TNWD: "tnwd",
+  TXSD: "txsd",
+  WAED: "waed",
+  WAWD: "wawd"
+};
+
+function courtCodeToName(value) {
+  const code = String(value || "").trim().toUpperCase().replace(/[^A-Z]/g, "");
+  if (!code) {
+    return "";
+  }
+
+  const directionalMatch = code.match(/^([NSEWCM])D([A-Z]{2})$/);
+  if (directionalMatch) {
+    const direction = DISTRICT_DIRECTION_MAP[directionalMatch[1]];
+    const stateName = STATE_CODE_TO_NAME[directionalMatch[2]];
+    if (direction && stateName) {
+      return `${direction} District of ${stateName}`;
+    }
+  }
+
+  const districtMatch = code.match(/^D([A-Z]{2})$/);
+  if (districtMatch) {
+    const stateName = STATE_CODE_TO_NAME[districtMatch[1]];
+    if (stateName) {
+      return `District of ${stateName}`;
+    }
+  }
+
+  return code;
+}
+
+function courtCodeToId(value) {
+  const code = String(value || "").trim().toUpperCase().replace(/[^A-Z]/g, "");
+  return COURT_CODE_TO_ID[code] || null;
+}
+
+const DEFAULT_LAW_FIRM_SOURCES = [
+  {
+    id: "sriplaw",
+    label: "SRIPLAW",
+    lawFirm: "SRipLaw",
+    baseUrl: "https://sriplaw.com",
+    strategy: "sriplaw-notice",
+    discoveryUrl: "https://sriplaw.com/notice/"
+  },
+  {
+    id: "gbc",
+    label: "GBC",
+    lawFirm: "Greer, Burns & Crain, Ltd.",
+    baseUrl: "https://gbc.law",
+    strategy: "gbc-pages",
+    discoveryUrl:
+      "https://gbc.law/wp-json/wp/v2/pages?per_page=100&_fields=id,link,slug,title,modified,content.rendered"
+  },
+  {
+    id: "whitewood",
+    label: "Whitewood",
+    lawFirm: "Whitewood Law",
+    baseUrl: "https://whitewoodlaw.com",
+    strategy: "sitemap-probe",
+    discoveryUrl: "https://whitewoodlaw.com/page-sitemap.xml"
+  },
+  {
+    id: "jiangip",
+    label: "Keith / JiangIP",
+    lawFirm: "Keith A. Vogt PLLC",
+    baseUrl: "https://jiangip.com",
+    strategy: "page-probe",
+    discoveryUrl: "https://jiangip.com/"
+  }
+];
+
+function extractSitemapLocs(xml) {
+  return [...String(xml || "").matchAll(/<loc>(.*?)<\/loc>/gi)]
+    .map((match) => cleanText(match[1]))
+    .filter(Boolean);
+}
+
+function extractSameDomainLinks(html, baseUrl) {
+  const links = new Set();
+  for (const match of String(html || "").matchAll(/href=['"]([^'"]+)['"]/gi)) {
+    const normalized = absoluteUrl(match[1], baseUrl);
+    if (!normalized) {
+      continue;
+    }
+
+    try {
+      const url = new URL(normalized);
+      if (url.origin === new URL(baseUrl).origin) {
+        links.add(normalizePageUrl(normalized));
+      }
+    } catch {
+      continue;
+    }
+  }
+
+  return [...links];
+}
+
+function looksLikeStructuredCaseLink(url) {
+  return /\/case\//i.test(url) || /\/case-no-/i.test(url) || /\/caseno-/i.test(url);
+}
+
+function parseSriplawNoticeRows(html, baseUrl) {
+  const table = String(html || "").match(/<table id="tablepress-[^"]+"[\s\S]*?<\/table>/i)?.[0] || "";
+  const rows = [];
+  for (const match of table.matchAll(/<tr class="row-\d+">([\s\S]*?)<\/tr>/gi)) {
+    const rowHtml = match[1];
+    if (!/<td\b/i.test(rowHtml)) {
+      continue;
+    }
+
+    const columns = [...rowHtml.matchAll(/<td class="column-\d+">([\s\S]*?)<\/td>/gi)].map((item) => item[1]);
+    if (columns.length < 5) {
+      continue;
+    }
+
+    const caseUrl = absoluteUrl(columns[0].match(/href=['"]([^'"]+)['"]/i)?.[1] || "", baseUrl);
+    const caseName = cleanText(columns[0]);
+    const courtCode = cleanText(columns[1]).toUpperCase();
+    const docketNumber = cleanText(columns[2]);
+    const matterId = cleanText(columns[3]);
+    const dateFiled = parseUsDate(columns[4]);
+
+    if (!caseUrl || !docketNumber) {
+      continue;
+    }
+
+    rows.push({
+      caseUrl,
+      caseName,
+      courtCode,
+      courtId: courtCodeToId(courtCode),
+      courtName: courtCodeToName(courtCode),
+      docketNumber,
+      matterId,
+      dateFiled
+    });
+  }
+
+  return rows;
+}
+
+function parseSriplawEntries(html, baseUrl) {
+  const table = String(html || "").match(/<table id="tablepress-[^"]+"[\s\S]*?<\/table>/i)?.[0] || "";
+  const entries = [];
+  for (const match of table.matchAll(/<tr class="row-\d+">([\s\S]*?)<\/tr>/gi)) {
+    const rowHtml = match[1];
+    if (!/<td\b/i.test(rowHtml)) {
+      continue;
+    }
+
+    const columns = [...rowHtml.matchAll(/<td class="column-\d+">([\s\S]*?)<\/td>/gi)].map((item) => item[1]);
+    if (columns.length < 3) {
+      continue;
+    }
+
+    const entryNumber = cleanText(columns[0]);
+    const documentUrl = absoluteUrl(columns[1].match(/href=['"]([^'"]+)['"]/i)?.[1] || "", baseUrl);
+    const description = cleanText(columns[1]);
+    const filedAt = parseUsDate(columns[2]);
+    if (!entryNumber || !description) {
+      continue;
+    }
+
+    entries.push({
+      sourceEntryId: entryNumber,
+      entryNumber,
+      documentNumber: entryNumber,
+      documentType: "Docket Entry",
+      description,
+      filedAt,
+      absoluteUrl: documentUrl
+    });
+  }
+
+  return entries;
+}
+
+function parseSriplawCasePage(html, row, source) {
+  const title = cleanText(String(html || "").match(/<title>([\s\S]*?)<\/title>/i)?.[1] || row.caseName);
+  const entries = parseSriplawEntries(html, source.baseUrl);
+  const latestEntry = entries[entries.length - 1] || null;
+
+  return {
+    sourceId: source.id,
+    sourceLabel: source.label,
+    lawFirm: source.lawFirm,
+    sourceCaseId: row.matterId || row.docketNumber || row.caseUrl,
+    caseUrl: normalizePageUrl(row.caseUrl),
+    title,
+    caseName: row.caseName || cleanCaseName(title),
+    docketNumber: row.docketNumber || parseDocketNumber(title),
+    courtCode: row.courtCode || "",
+    courtId: row.courtId || null,
+    courtName: row.courtName || "",
+    dateFiled: row.dateFiled || null,
+    summary: latestEntry?.description || title,
+    latestDocketNumber: latestEntry?.documentNumber || null,
+    entries,
+    syncedAt: new Date().toISOString(),
+    rawMeta: {
+      matterId: row.matterId || null,
+      discoveryUrl: source.discoveryUrl,
+      rowCount: entries.length
+    }
+  };
+}
+
+function extractCourtNameFromGbc(content) {
+  const match = String(content || "").match(/United States District Court(?: for the)? ([A-Za-z ,]+?District of [A-Za-z ]+)/i);
+  if (!match) {
+    return "";
+  }
+
+  return cleanText(match[1]).replace(/,\s*(Eastern|Western|Northern|Southern|Central|Middle)\s+Division$/i, "");
+}
+
+function parseGbcEntries(content, caseUrl) {
+  const entries = [];
+  const strongPattern = /<p[^>]*>\s*<strong>([\s\S]*?)<\/strong>[\s\S]*?<a href="([^"]+\.pdf)"/gi;
+  for (const match of String(content || "").matchAll(strongPattern)) {
+    const title = cleanText(match[1]);
+    const documentUrl = absoluteUrl(match[2], caseUrl);
+    if (!title || !documentUrl) {
+      continue;
+    }
+
+    entries.push({
+      sourceEntryId: normalizePdfTitle(documentUrl.split("/").pop()),
+      entryNumber: null,
+      documentNumber: null,
+      documentType: "Docket Document",
+      description: title,
+      filedAt: null,
+      absoluteUrl: normalizePageUrl(documentUrl)
+    });
+  }
+
+  if (entries.length) {
+    return entries;
+  }
+
+  for (const match of String(content || "").matchAll(/href="([^"]+\.pdf)"/gi)) {
+    const documentUrl = absoluteUrl(match[1], caseUrl);
+    if (!documentUrl) {
+      continue;
+    }
+
+    entries.push({
+      sourceEntryId: normalizePdfTitle(documentUrl.split("/").pop()),
+      entryNumber: null,
+      documentNumber: null,
+      documentType: "Docket Document",
+      description: normalizePdfTitle(documentUrl.split("/").pop()),
+      filedAt: null,
+      absoluteUrl: normalizePageUrl(documentUrl)
+    });
+  }
+
+  return entries;
+}
+
+function parseGbcCasePage(page, source) {
+  const content = String(page.content?.rendered || "");
+  const title = cleanText(page.title?.rendered || "");
+  const docketNumber = parseDocketNumber(title || page.link || page.slug);
+  const caseName = cleanCaseName(title) || cleanCaseName(content.match(/<h[1-4][^>]*>([\s\S]*?)<\/h[1-4]>/i)?.[1] || "");
+  const courtName = extractCourtNameFromGbc(content);
+  const entries = parseGbcEntries(content, page.link);
+
+  return {
+    sourceId: source.id,
+    sourceLabel: source.label,
+    lawFirm: source.lawFirm,
+    sourceCaseId: String(page.id || page.link),
+    caseUrl: normalizePageUrl(page.link),
+    title,
+    caseName,
+    docketNumber,
+    courtCode: "",
+    courtId: null,
+    courtName,
+    dateFiled: null,
+    summary: entries[entries.length - 1]?.description || title,
+    latestDocketNumber: null,
+    entries,
+    syncedAt: new Date().toISOString(),
+    rawMeta: {
+      modifiedAt: page.modified || null,
+      discoveryUrl: source.discoveryUrl,
+      rowCount: entries.length
+    }
+  };
+}
+
+function parseGenericCasePage(html, url, source) {
+  const title = cleanText(String(html || "").match(/<title>([\s\S]*?)<\/title>/i)?.[1] || "");
+  const docketNumber = parseDocketNumber(title || html);
+  if (!docketNumber) {
+    return null;
+  }
+
+  const caseName = cleanCaseName(title) || cleanText(String(html || "").match(/<h1[^>]*>([\s\S]*?)<\/h1>/i)?.[1] || "");
+  const entries = [];
+  for (const match of String(html || "").matchAll(/href=['"]([^'"]+\.pdf)['"]/gi)) {
+    const documentUrl = absoluteUrl(match[1], url);
+    if (!documentUrl) {
+      continue;
+    }
+
+    entries.push({
+      sourceEntryId: normalizePdfTitle(documentUrl.split("/").pop()),
+      entryNumber: null,
+      documentNumber: null,
+      documentType: "Docket Document",
+      description: normalizePdfTitle(documentUrl.split("/").pop()),
+      filedAt: null,
+      absoluteUrl: normalizePageUrl(documentUrl)
+    });
+  }
+
+  return {
+    sourceId: source.id,
+    sourceLabel: source.label,
+    lawFirm: source.lawFirm,
+    sourceCaseId: url,
+    caseUrl: normalizePageUrl(url),
+    title,
+    caseName: caseName || title,
+    docketNumber,
+    courtCode: "",
+    courtId: null,
+    courtName: "",
+    dateFiled: null,
+    summary: entries[entries.length - 1]?.description || title,
+    latestDocketNumber: null,
+    entries,
+    syncedAt: new Date().toISOString(),
+    rawMeta: {
+      discoveryUrl: source.discoveryUrl,
+      rowCount: entries.length
+    }
+  };
+}
+
+export class LawFirmClient {
+  constructor(config) {
+    this.enabled = Boolean(config.enabled);
+    this.timeoutMs = Number(config.timeoutMs || 15000);
+    this.minIntervalMs = Number(config.minIntervalMs || 1000);
+    this.maxCasesPerSource = Number(config.maxCasesPerSource || 20);
+    this.maxLookupsPerRun = Number(config.maxLookupsPerRun || 8);
+    const selectedIds = new Set((config.sources || []).map((item) => String(item || "").trim().toLowerCase()).filter(Boolean));
+    this.sources = DEFAULT_LAW_FIRM_SOURCES.filter((source) => !selectedIds.size || selectedIds.has(source.id));
+    this.lastRequestAt = 0;
+  }
+
+  getStatus() {
+    return {
+      enabled: this.enabled,
+      trackedSources: this.sources.length,
+      sources: this.sources.map((source) => ({
+        id: source.id,
+        label: source.label,
+        law_firm: source.lawFirm,
+        strategy: source.strategy
+      }))
+    };
+  }
+
+  listSources() {
+    return this.sources.map((source) => ({ ...source }));
+  }
+
+  async fetchRecentForSource(source) {
+    if (!this.enabled) {
+      return { source, items: [], note: "律所官网补源已关闭。" };
+    }
+
+    if (source.strategy === "sriplaw-notice") {
+      return this.fetchSriplawSource(source);
+    }
+
+    if (source.strategy === "gbc-pages") {
+      return this.fetchGbcSource(source);
+    }
+
+    return this.fetchProbeSource(source);
+  }
+
+  async fetchSriplawSource(source) {
+    const html = await this.fetchText(source.discoveryUrl);
+    const rows = parseSriplawNoticeRows(html, source.baseUrl).slice(0, this.maxCasesPerSource);
+    const items = [];
+    let failedItems = 0;
+
+    for (const row of rows) {
+      try {
+        const pageHtml = await this.fetchText(row.caseUrl);
+        items.push(parseSriplawCasePage(pageHtml, row, source));
+      } catch {
+        failedItems += 1;
+      }
+    }
+
+    return {
+      source,
+      items,
+      totalCandidates: rows.length,
+      failedItems,
+      note: items.length
+        ? `SRIPLAW 官网本轮复核 ${rows.length} 个公开案件页${failedItems ? `，${failedItems} 个页面待重试` : ""}。`
+        : "SRIPLAW 官网本轮没有抓到可用案件页。"
+    };
+  }
+
+  async fetchGbcSource(source) {
+    const pages = await this.fetchJson(source.discoveryUrl);
+    const candidates = (Array.isArray(pages) ? pages : [])
+      .filter((page) => /\/case-no-|\/caseno-/i.test(String(page.link || "")) || /case-no|caseno/i.test(String(page.slug || "")))
+      .sort((left, right) => String(right.modified || "").localeCompare(String(left.modified || "")))
+      .slice(0, this.maxCasesPerSource);
+
+    return {
+      source,
+      items: candidates.map((page) => parseGbcCasePage(page, source)).filter((item) => item.docketNumber),
+      totalCandidates: candidates.length,
+      failedItems: 0,
+      note: candidates.length
+        ? `GBC 官网本轮复核 ${candidates.length} 个公开案件页。`
+        : "GBC 官网当前没有识别到公开案件页。"
+    };
+  }
+
+  async fetchProbeSource(source) {
+    const body = await this.fetchText(source.discoveryUrl);
+    const links = source.discoveryUrl.endsWith(".xml")
+      ? extractSitemapLocs(body)
+      : extractSameDomainLinks(body, source.baseUrl);
+    const candidates = [...new Set(links.filter((link) => looksLikeStructuredCaseLink(link)))].slice(0, this.maxCasesPerSource);
+    const items = [];
+    let failedItems = 0;
+
+    for (const link of candidates) {
+      try {
+        const html = await this.fetchText(link);
+        const item = parseGenericCasePage(html, link, source);
+        if (item?.docketNumber) {
+          items.push(item);
+        }
+      } catch {
+        failedItems += 1;
+      }
+    }
+
+    return {
+      source,
+      items,
+      totalCandidates: candidates.length,
+      failedItems,
+      note: candidates.length
+        ? `${source.label} 官网探测到 ${candidates.length} 个疑似案件页${failedItems ? `，${failedItems} 个页面待重试` : ""}。`
+        : `${source.label} 官网当前未暴露可稳定抓取的公开案件页。`
+    };
+  }
+
+  async fetchJson(url, options = {}) {
+    const text = await this.fetchText(url, options);
+    return text ? JSON.parse(text) : {};
+  }
+
+  async fetchText(url, options = {}, attempt = 0) {
+    const now = Date.now();
+    const waitMs = Math.max(0, this.minIntervalMs - (now - this.lastRequestAt));
+    if (waitMs > 0) {
+      await wait(waitMs);
+    }
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+    this.lastRequestAt = Date.now();
+
+    try {
+      const response = await fetch(url, {
+        ...options,
+        signal: controller.signal,
+        headers: {
+          "user-agent": "Mozilla/5.0 (compatible; TroTrackerBot/1.0; +https://www.trotracker.com)",
+          accept: "text/html,application/xhtml+xml,application/xml;q=0.9,application/json;q=0.8,*/*;q=0.7",
+          ...(options.headers || {})
+        }
+      });
+
+      if (response.status === 404) {
+        return "";
+      }
+
+      if ([408, 409, 425, 429, 500, 502, 503, 504].includes(response.status)) {
+        if (attempt >= 2) {
+          throw new Error(`LawFirm fetch failed (${response.status})`);
+        }
+
+        await wait((attempt + 1) * 1000);
+        return this.fetchText(url, options, attempt + 1);
+      }
+
+      if (!response.ok) {
+        throw new Error(`LawFirm fetch failed (${response.status})`);
+      }
+
+      return await response.text();
+    } catch (error) {
+      if (attempt < 2 && (error.name === "AbortError" || error.cause || /fetch/i.test(String(error.message || "")))) {
+        await wait((attempt + 1) * 1000);
+        return this.fetchText(url, options, attempt + 1);
+      }
+
+      throw error;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+}

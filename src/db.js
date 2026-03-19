@@ -35,7 +35,15 @@ function normalizeSourceUrl(value) {
 
   try {
     const url = new URL(raw);
-    if (url.hostname.includes("worldtro.com") || url.hostname.includes("pacermonitor.com")) {
+    if (
+      url.hostname.includes("worldtro.com") ||
+      url.hostname.includes("pacermonitor.com") ||
+      url.hostname.includes("sriplaw.com") ||
+      url.hostname.includes("gbc.law") ||
+      url.hostname.includes("whitewoodlaw.com") ||
+      url.hostname.includes("jiangip.com") ||
+      url.hostname.includes("dropbox.com")
+    ) {
       url.search = "";
       url.hash = "";
       return url.toString();
@@ -223,7 +231,15 @@ function entrySourceRank(entry) {
     return 3;
   }
 
+  if (entry.primary_source === "sriplaw") {
+    return 3;
+  }
+
   if (entry.primary_source === "worldtro") {
+    return 2;
+  }
+
+  if (entry.primary_source === "gbc") {
     return 2;
   }
 
@@ -491,6 +507,20 @@ export class Store {
     }
 
     return null;
+  }
+
+  findCaseByDocketNumber(docketNumber, startDate = "2025-01-01") {
+    const docketKey = normalizeDocket(docketNumber);
+    if (!docketKey) {
+      return null;
+    }
+
+    const matches = this.getHydratedCases(startDate).filter((row) => normalizeDocket(row.docket_number) === docketKey);
+    if (matches.length !== 1) {
+      return null;
+    }
+
+    return matches[0];
   }
 
   getHydratedCases(startDate = "2025-01-01") {

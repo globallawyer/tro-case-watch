@@ -8,6 +8,7 @@ import { config } from "./config.js";
 import { Store } from "./db.js";
 import { CourtListenerClient } from "./providers/courtlistener.js";
 import { CourtFeedClient } from "./providers/courtfeed.js";
+import { LawFirmClient } from "./providers/lawfirm.js";
 import { WorldtroClient } from "./providers/worldtro.js";
 import { PacerAdapter } from "./providers/pacer.js";
 import { PacerMonitorAdapter } from "./providers/pacermonitor.js";
@@ -33,6 +34,7 @@ ensureSeedDatabase();
 const store = createStoreWithRecovery();
 const courtListener = new CourtListenerClient(config.courtListener);
 const courtFeeds = new CourtFeedClient(config.courtFeeds);
+const lawFirms = new LawFirmClient(config.lawFirms);
 const worldtro = new WorldtroClient(config.worldtro);
 const pacerMonitor = new PacerMonitorAdapter(config.pacerMonitor);
 const pacer = new PacerAdapter(config.pacer, store);
@@ -41,6 +43,7 @@ const syncService = new CaseSyncService({
   config,
   store,
   courtFeeds,
+  lawFirms,
   courtListener,
   worldtro,
   pacerMonitor,
@@ -562,6 +565,15 @@ function serializePublicStatus(status = {}) {
             finished_at: recentSync.finished_at || null
           }
         : null
+    },
+    providers: {
+      courtfeeds: status.providers?.courtfeeds || null,
+      lawfirms: status.providers?.lawfirms || null,
+      worldtro: status.providers?.worldtro || null,
+      pacermonitor: status.providers?.pacermonitor || null,
+      pacer: status.providers?.pacer || null,
+      courtlistener: status.providers?.courtlistener || null,
+      translation: status.providers?.translation || null
     }
   };
 }
@@ -727,6 +739,21 @@ async function handleApi(request, response, pathname, searchParams) {
     });
   }
 
+  if (request.method === "POST" && pathname === "/api/admin/law-firm-sync") {
+    if (!authorize(request)) {
+      return sendJson(response, 401, { error: "Unauthorized" });
+    }
+
+    syncService
+      .syncLawFirmRecent("recent")
+      .catch((error) => console.error("[law-firm-sync]", error.message, error.body || ""));
+
+    return sendJson(response, 202, {
+      accepted: true,
+      mode: "law-firm-sync"
+    });
+  }
+
   sendJson(response, 404, { error: "Not found" });
 }
 
@@ -792,6 +819,12 @@ async function main() {
     if (rawMode === "courtfeeds") {
       const result = await syncService.syncCourtFeedsRecent("recent");
       console.log(`[sync] completed courtfeeds ${JSON.stringify(result)}`);
+      process.exit(0);
+    }
+
+    if (rawMode === "lawfirms") {
+      const result = await syncService.syncLawFirmRecent("recent");
+      console.log(`[sync] completed lawfirms ${JSON.stringify(result)}`);
       process.exit(0);
     }
 

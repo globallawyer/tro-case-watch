@@ -128,6 +128,14 @@ export const config = {
       "wawd"
     ])
   },
+  lawFirms: {
+    enabled: envBool("LAW_FIRM_SITES_ENABLED", true),
+    timeoutMs: envInt("LAW_FIRM_SITES_TIMEOUT_MS", 15000),
+    minIntervalMs: envInt("LAW_FIRM_SITES_MIN_INTERVAL_MS", 1000),
+    maxCasesPerSource: envInt("LAW_FIRM_SITES_MAX_CASES_PER_SOURCE", 20),
+    maxLookupsPerRun: envInt("LAW_FIRM_SITES_MAX_LOOKUPS_PER_RUN", 8),
+    sources: envList("LAW_FIRM_SITES_TARGETS", ["sriplaw", "gbc", "whitewood", "jiangip"])
+  },
   translation: {
     provider: env("TRANSLATION_PROVIDER", "openai"),
     baseUrl: env("OPENAI_BASE_URL", "https://api.openai.com/v1"),
