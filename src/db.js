@@ -278,6 +278,20 @@ function compareCaseActivityDesc(left, right) {
   return String(right || "").localeCompare(String(left || ""));
 }
 
+function shanghaiDayBounds(date = new Date()) {
+  const key = formatShanghaiDateKey(date);
+  if (!key) {
+    return { startIso: "", endIso: "" };
+  }
+
+  const startDate = new Date(`${key}T00:00:00+08:00`);
+  const endDate = new Date(startDate.getTime() + 24 * 60 * 60 * 1000);
+  return {
+    startIso: startDate.toISOString(),
+    endIso: endDate.toISOString()
+  };
+}
+
 function cloneListPayload(payload = {}) {
   return {
     ...payload,
@@ -704,6 +718,78 @@ export class Store {
       .map(buildCaseView);
   }
 
+  buildCategoryWhereClause(category) {
+    if (category === "watchlist") {
+      return "(tags_marker LIKE '%|tro|%' OR tags_marker LIKE '%|schedule_a|%' OR tags_marker LIKE '%|seller_tro|%')";
+    }
+
+    if (category === "tro") {
+      return "tags_marker LIKE '%|tro|%'";
+    }
+
+    if (category === "schedule_a") {
+      return "tags_marker LIKE '%|schedule_a|%'";
+    }
+
+    if (category === "seller_watch") {
+      return "tags_marker LIKE '%|seller_tro|%'";
+    }
+
+    return "1 = 1";
+  }
+
+  listCasesBySql({ startDate, pageSize, page, category, selectedCourt }) {
+    const categoryClause = this.buildCategoryWhereClause(category);
+    const baseWhere = [`date(date_filed) >= date(?)`, `(${categoryClause})`];
+    const baseParams = [startDate];
+
+    if (selectedCourt) {
+      baseWhere.push(`court_id = ?`);
+      baseParams.push(selectedCourt);
+    }
+
+    const whereSql = baseWhere.join(" AND ");
+    const total = Number(
+      this.db.prepare(`SELECT COUNT(*) AS total FROM cases WHERE ${whereSql}`).get(...baseParams)?.total || 0
+    );
+    const offset = (page - 1) * pageSize;
+    const items = this.db
+      .prepare(`
+        SELECT *
+        FROM cases
+        WHERE ${whereSql}
+        ORDER BY COALESCE(latest_docket_filed_at, date_filed, updated_at) DESC, updated_at DESC
+        LIMIT ?
+        OFFSET ?
+      `)
+      .all(...baseParams, pageSize, offset)
+      .map(buildCaseView);
+    const courts = this.db
+      .prepare(`
+        SELECT court_id, court_name, COUNT(*) AS total
+        FROM cases
+        WHERE date(date_filed) >= date(?)
+          AND (${categoryClause})
+        GROUP BY court_id, court_name
+        ORDER BY total DESC, court_name ASC
+      `)
+      .all(startDate)
+      .map((row) => ({
+        court_id: row.court_id,
+        court_name: row.court_name,
+        total: Number(row.total || 0)
+      }));
+
+    return {
+      items,
+      total,
+      page,
+      pageSize,
+      pageCount: Math.max(1, Math.ceil(total / pageSize)),
+      courts
+    };
+  }
+
   listCases(filters = {}) {
     const startDate = filters.startDate || "2025-01-01";
     const pageSize = Math.min(Number(filters.pageSize || 25), 100);
@@ -724,6 +810,23 @@ export class Store {
     const cached = this.listPayloadCache.get(cacheKey);
     if (cached && cached.version === this.caseCacheVersion) {
       return cloneListPayload(cached.value);
+    }
+
+    if (!searchTerm) {
+      const payload = this.listCasesBySql({
+        startDate,
+        pageSize,
+        page,
+        category,
+        selectedCourt
+      });
+
+      this.listPayloadCache.set(cacheKey, {
+        version: this.caseCacheVersion,
+        value: payload
+      });
+
+      return cloneListPayload(payload);
     }
 
     const rows = looksLikeDocketSearch(rawSearch)
@@ -1047,19 +1150,36 @@ export class Store {
       return this.dashboardStatsCache.value;
     }
 
-    const rows = this.getHydratedCases("2025-01-01");
-    const todayKey = formatShanghaiDateKey(new Date());
-
+    const todayBounds = shanghaiDayBounds(new Date());
+    const totalsRow = this.db
+      .prepare(`
+        SELECT
+          COUNT(*) AS total_cases,
+          SUM(CASE WHEN tags_marker LIKE '%|tro|%' THEN 1 ELSE 0 END) AS tro_cases,
+          SUM(CASE WHEN tags_marker LIKE '%|schedule_a|%' THEN 1 ELSE 0 END) AS schedule_a_cases,
+          SUM(CASE WHEN tags_marker LIKE '%|seller_tro|%' THEN 1 ELSE 0 END) AS seller_cases,
+          SUM(
+            CASE
+              WHEN created_at >= ? AND created_at < ?
+               AND (
+                 tags_marker LIKE '%|tro|%'
+                 OR tags_marker LIKE '%|schedule_a|%'
+                 OR tags_marker LIKE '%|seller_tro|%'
+               )
+              THEN 1
+              ELSE 0
+            END
+          ) AS today_added_watchlist
+        FROM cases
+        WHERE date(date_filed) >= date(?)
+      `)
+      .get(todayBounds.startIso, todayBounds.endIso, "2025-01-01");
     const totals = {
-      total_cases: rows.length,
-      tro_cases: rows.filter((row) => row.insights?.is_tro_case).length,
-      schedule_a_cases: rows.filter((row) => row.insights?.is_schedule_a_case).length,
-      seller_cases: rows.filter((row) => row.insights?.is_seller_case).length,
-      today_added_watchlist: rows.filter(
-        (row) =>
-          formatShanghaiDateKey(row.created_at) === todayKey &&
-          (row.insights?.is_tro_case || row.insights?.is_schedule_a_case || row.insights?.is_seller_case)
-      ).length
+      total_cases: Number(totalsRow?.total_cases || 0),
+      tro_cases: Number(totalsRow?.tro_cases || 0),
+      schedule_a_cases: Number(totalsRow?.schedule_a_cases || 0),
+      seller_cases: Number(totalsRow?.seller_cases || 0),
+      today_added_watchlist: Number(totalsRow?.today_added_watchlist || 0)
     };
 
     const latestCase = this.db
