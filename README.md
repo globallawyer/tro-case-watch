@@ -49,6 +49,114 @@ npm start
 
 打开 `http://localhost:4127`。
 
+## Google Cloud Compute Engine 部署
+
+这套项目当前最适合部署到 `Google Compute Engine VM`，而不是 `Cloud Run`。原因很直接：
+
+- 当前应用依赖本地 `SQLite`
+- 应用内有常驻定时同步
+- 还需要稳定的磁盘持久化
+
+仓库已经带好一套适合 `Google Compute Engine + Docker Compose + Caddy` 的部署文件：
+
+- `Dockerfile`
+- `deploy/gcp/create-vm.sh`
+- `deploy/gcp/compose.yml`
+- `deploy/gcp/Caddyfile`
+- `deploy/gcp/install-docker.sh`
+- `deploy/gcp/deploy.sh`
+
+### 1. 创建一台 Google Cloud VM
+
+如果你已经在本机装好了 `gcloud CLI`，可以直接用：
+
+```bash
+cd /Users/serendipitypku/Documents/Playground/tro-case-watch
+PROJECT_ID=your-project-id ZONE=us-central1-a bash deploy/gcp/create-vm.sh
+```
+
+如果你更习惯控制台，建议选：
+
+- `Compute Engine`
+- `Ubuntu`
+- `e2-standard-2`
+- 系统盘至少 `50GB`
+- 保留一个静态公网 IP
+- 放通 `22`、`80`、`443`
+
+### 2. 登录 VM 并拉代码
+
+```bash
+gcloud compute ssh trotracker-prod --zone=us-central1-a
+```
+
+服务器里建议放在：
+
+```bash
+sudo mkdir -p /opt
+sudo chown "$USER":"$USER" /opt
+cd /opt
+git clone https://github.com/coolxincool2026/tro-case-watch.git
+cd tro-case-watch
+```
+
+### 3. 安装 Docker
+
+```bash
+cd /opt/tro-case-watch
+bash deploy/gcp/install-docker.sh
+```
+
+执行完后重新登录一次，让 `docker` 用户组生效。
+
+### 4. 准备生产环境变量
+
+```bash
+cd /opt/tro-case-watch
+cp .env.example .env
+```
+
+至少填这些值：
+
+- `COURTLISTENER_API_TOKEN`
+- `ADMIN_TOKEN`
+
+建议同步把这几个值显式写进 `.env`：
+
+- `PACER_ENABLED=false`
+- `PACERMONITOR_PUBLIC_ENABLED=true`
+- `ENABLE_SCHEDULER=true`
+- `ENABLE_BACKFILL_SCHEDULER=true`
+
+### 5. 启动站点
+
+```bash
+cd /opt/tro-case-watch
+bash deploy/gcp/deploy.sh
+```
+
+### 6. 配置域名
+
+假设 `create-vm.sh` 输出的静态 IP 是 `X.X.X.X`，DNS 建议这样配：
+
+- `A` 记录：`trotracker.com -> X.X.X.X`
+- `A` 记录：`www.trotracker.com -> X.X.X.X`
+
+当前 `deploy/gcp/Caddyfile` 已经内置：
+
+- `trotracker.com` 永久重定向到 `https://www.trotracker.com`
+- `www.trotracker.com` 反向代理到应用容器
+
+### 7. 验证
+
+```bash
+curl http://X.X.X.X/api/health
+curl https://www.trotracker.com/api/health
+docker compose -f deploy/gcp/compose.yml ps
+docker compose -f deploy/gcp/compose.yml logs -f app
+docker compose -f deploy/gcp/compose.yml logs -f caddy
+```
+
 ## Oracle Cloud Always Free 部署
 
 这个项目依赖常驻 Node 进程、定时同步和本地 `SQLite`，不适合部署到会休眠或临时磁盘的免费 PaaS。当前仓库已经带好一套适合 `Oracle Cloud Always Free VM` 的部署文件：

@@ -1,0 +1,16 @@
+trotracker.com {
+  redir https://www.trotracker.com{uri} permanent
+}
+
+www.trotracker.com {
+  encode zstd gzip
+
+  header {
+    Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+    Referrer-Policy strict-origin-when-cross-origin
+    X-Content-Type-Options nosniff
+    X-Frame-Options SAMEORIGIN
+  }
+
+  reverse_proxy app:4127
+}
