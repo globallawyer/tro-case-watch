@@ -62,12 +62,50 @@ function buildCourtSearchText(caseRow) {
     return "";
   }
 
-  return courtName.replace(/\bU\.?S\.?\b/gi, "United States").replace(/\s+/g, " ").trim();
+  return courtName
+    .replace(/\bU\.?S\.?\b/gi, "United States")
+    .replace(/[.]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function buildCourtSearchVariants(caseRow) {
+  const courtName = buildCourtSearchText(caseRow);
+  if (!courtName) {
+    return [];
+  }
+
+  const variants = new Set([courtName]);
+  const simplified = courtName
+    .replace(/\bDistrict Court for the\b/gi, "")
+    .replace(/\bUnited States\b/gi, "")
+    .replace(/[.]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (simplified) {
+    variants.add(simplified);
+  }
+
+  const districtMatch = simplified.match(/\b(?:Northern|Southern|Eastern|Western|Central|Middle)\s+District\s+of\s+[A-Za-z .-]+\b/i);
+  if (districtMatch?.[0]) {
+    variants.add(districtMatch[0].trim());
+  }
+
+  const stateMatch = simplified.match(/\bDistrict\s+of\s+[A-Za-z .-]+\b/i);
+  if (stateMatch?.[0]) {
+    variants.add(stateMatch[0].trim());
+  }
+
+  return [...variants].filter(Boolean);
 }
 
 function buildPlaintiffSearchText(caseRow) {
   const plaintiff = caseRow.plaintiffs?.[0] || caseRow.case_name?.split(/\s+v\.?\s+/i)?.[0];
   return String(plaintiff || "").replace(/\s+/g, " ").trim();
+}
+
+function buildCaseNameSearchText(caseRow) {
+  return String(caseRow.case_name || "").replace(/\s+/g, " ").trim();
 }
 
 function normalizePublicCaseUrl(value) {
@@ -107,7 +145,7 @@ export class PacerMonitorAdapter {
     return {
       enabled: true,
       state: "public-exact-lookup",
-      note: "仅在详情页按精确案号尝试公开补全，不参与全国发现；遇到验证码或限流会缓存跳过。"
+      note: "以精确案号做低频补充，不参与全国发现；详情页和后台补缺口都会尝试，遇到验证码或限流会缓存跳过。"
     };
   }
 
@@ -116,7 +154,7 @@ export class PacerMonitorAdapter {
       provider: "pacermonitor",
       ...this.getStatus(),
       syncedCases: 0,
-      note: "PACERMonitor 仅在详情页按精确案号尝试补全，不参与全国发现或定时扫库。"
+      note: "PACERMonitor 仅做精确案号补充，不参与全国发现。"
     };
   }
 
@@ -187,12 +225,18 @@ export class PacerMonitorAdapter {
   buildSearchQueries(caseRow) {
     const docketNumber = String(caseRow.docket_number || "").trim();
     const normalizedDocket = normalizeDocket(docketNumber);
-    const courtName = buildCourtSearchText(caseRow);
+    const courtVariants = buildCourtSearchVariants(caseRow);
     const plaintiff = buildPlaintiffSearchText(caseRow);
+    const caseName = buildCaseNameSearchText(caseRow);
     const queries = [
-      `site:pacermonitor.com/public/case "${docketNumber}" "${courtName}"`,
-      normalizedDocket ? `site:pacermonitor.com/public/case "${normalizedDocket}" "${courtName}"` : "",
+      ...courtVariants.flatMap((courtName) => [
+        `site:pacermonitor.com/public/case "${docketNumber}" "${courtName}"`,
+        normalizedDocket ? `site:pacermonitor.com/public/case "${normalizedDocket}" "${courtName}"` : ""
+      ]),
+      caseName ? `site:pacermonitor.com/public/case "${docketNumber}" "${caseName}"` : "",
+      caseName && normalizedDocket ? `site:pacermonitor.com/public/case "${normalizedDocket}" "${caseName}"` : "",
       plaintiff ? `site:pacermonitor.com/public/case "${docketNumber}" "${plaintiff}"` : "",
+      plaintiff && normalizedDocket ? `site:pacermonitor.com/public/case "${normalizedDocket}" "${plaintiff}"` : "",
       `site:pacermonitor.com/public/case "${docketNumber}" pacermonitor`
     ];
 

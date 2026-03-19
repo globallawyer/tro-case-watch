@@ -174,17 +174,19 @@ export class CaseSyncService {
       }
 
       try {
+        const pacerMonitorResult = await this.syncPacerMonitorRecent(mode);
+        if (pacerMonitorResult.note) {
+          stats.notes.push(pacerMonitorResult.note);
+        }
+      } catch (error) {
+        stats.notes.push(`PACERMonitor 补源跳过：${error.message}`);
+      }
+
+      try {
         const translationResult = await this.translator.translatePending();
         stats.translationsApplied += translationResult.translated || 0;
       } catch (error) {
         stats.notes.push(`翻译链路跳过：${error.message}`);
-      }
-
-      try {
-        const pacerMonitorResult = await this.pacerMonitor.syncRecent();
-        stats.notes.push(pacerMonitorResult.note);
-      } catch (error) {
-        stats.notes.push(`PACERMonitor 跳过：${error.message}`);
       }
 
       try {
@@ -351,6 +353,70 @@ export class CaseSyncService {
         : failedCases
           ? `WorldTRO 本轮没有补齐成功，${failedCases} 个案件待重试。`
           : "WorldTRO 本轮没有待补源案件。"
+    };
+  }
+
+  async syncPacerMonitorRecent(mode = "recent") {
+    if (!this.pacerMonitor.enabled) {
+      return {
+        syncedCases: 0,
+        note: "PACERMonitor 精确补充链路已关闭。"
+      };
+    }
+
+    const maxCases =
+      mode === "backfill"
+        ? this.config.pacerMonitor.backfillMaxCasesPerRun
+        : this.config.pacerMonitor.maxCasesPerRun;
+    const candidates = this.store.getCasesNeedingPacerMonitorSync(maxCases, {
+      staleAfterHours: this.config.pacerMonitor.staleAfterHours,
+      blockedRetryAfterHours: this.config.pacerMonitor.blockedRetryAfterHours,
+      recentWindowDays: this.config.pacerMonitor.recentWindowDays
+    });
+
+    let syncedCases = 0;
+    let notFoundCases = 0;
+    let blockedCases = 0;
+    let emptyCases = 0;
+    let failedCases = 0;
+
+    for (const caseRow of candidates) {
+      try {
+        const result = await this.syncSinglePacerMonitorCase(caseRow);
+        if (result.enriched) {
+          syncedCases += 1;
+          continue;
+        }
+
+        if (result.reason === "not_found") {
+          notFoundCases += 1;
+        } else if (result.reason === "challenge" || result.reason === "rate_limited") {
+          blockedCases += 1;
+        } else if (result.reason === "empty") {
+          emptyCases += 1;
+        }
+      } catch {
+        failedCases += 1;
+      }
+    }
+
+    if (syncedCases) {
+      return {
+        syncedCases,
+        note: `PACERMonitor 本轮补齐 ${syncedCases} 个案件的缺口${blockedCases ? `，${blockedCases} 个案件触发验证或限流稍后再试` : ""}${notFoundCases ? `，${notFoundCases} 个案件暂未找到公开页` : ""}${failedCases ? `，${failedCases} 个案件待重试` : ""}。`
+      };
+    }
+
+    if (blockedCases || notFoundCases || emptyCases || failedCases) {
+      return {
+        syncedCases: 0,
+        note: `PACERMonitor 本轮未补齐成功${blockedCases ? `，${blockedCases} 个案件触发验证或限流` : ""}${notFoundCases ? `，${notFoundCases} 个案件暂未找到公开页` : ""}${emptyCases ? `，${emptyCases} 个案件公开页暂无时间线` : ""}${failedCases ? `，${failedCases} 个案件待重试` : ""}。`
+      };
+    }
+
+    return {
+      syncedCases: 0,
+      note: "PACERMonitor 本轮没有需要补齐的案件。"
     };
   }
 

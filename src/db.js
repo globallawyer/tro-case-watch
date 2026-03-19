@@ -937,29 +937,55 @@ export class Store {
       .map(hydrateCase);
   }
 
-  getCasesNeedingWorldtroSync(limit, staleAfterHours = 12) {
-    const staleBefore = Date.now() - staleAfterHours * 60 * 60 * 1000;
-    const entryCounts = new Map(
+  getEntryCoverageForCaseIds(caseIds = []) {
+    const ids = [...new Set(caseIds.map((value) => Number(value)).filter((value) => Number.isFinite(value) && value > 0))];
+    if (!ids.length) {
+      return new Map();
+    }
+
+    const placeholders = ids.map(() => "?").join(", ");
+    return new Map(
       this.db
         .prepare(`
           SELECT
             case_id,
             COUNT(*) AS total_entries,
-            SUM(CASE WHEN primary_source = 'worldtro' THEN 1 ELSE 0 END) AS worldtro_entries
+            SUM(CASE WHEN primary_source = 'worldtro' THEN 1 ELSE 0 END) AS worldtro_entries,
+            SUM(CASE WHEN primary_source = 'pacermonitor' THEN 1 ELSE 0 END) AS pacermonitor_entries
           FROM docket_entries
+          WHERE case_id IN (${placeholders})
           GROUP BY case_id
         `)
-        .all()
+        .all(...ids)
         .map((row) => [
           Number(row.case_id),
           {
             totalEntries: Number(row.total_entries || 0),
-            worldtroEntries: Number(row.worldtro_entries || 0)
+            worldtroEntries: Number(row.worldtro_entries || 0),
+            pacermonitorEntries: Number(row.pacermonitor_entries || 0)
           }
         ])
     );
+  }
 
-    const rows = this.getHydratedCases("2025-01-01")
+  getCasesNeedingWorldtroSync(limit, staleAfterHours = 12) {
+    const staleBefore = Date.now() - staleAfterHours * 60 * 60 * 1000;
+    const candidatePoolSize = Math.max(limit * 120, 400);
+
+    const candidateRows = this.db
+      .prepare(`
+        SELECT *
+        FROM cases
+        WHERE date(date_filed) >= date('2025-01-01')
+          AND tags_marker LIKE '%|seller_tro|%'
+        ORDER BY COALESCE(latest_docket_filed_at, date_filed, updated_at) DESC
+        LIMIT ?
+      `)
+      .all(candidatePoolSize)
+      .map(buildCaseView);
+    const entryCounts = this.getEntryCoverageForCaseIds(candidateRows.map((row) => row.id));
+
+    const rows = candidateRows
       .map((row) => {
         const coverage = entryCounts.get(Number(row.id)) || {
           totalEntries: 0,
@@ -1016,6 +1042,114 @@ export class Store {
       .map((item) => item.row);
 
     return rows;
+  }
+
+  getCasesNeedingPacerMonitorSync(
+    limit,
+    {
+      staleAfterHours = 24,
+      blockedRetryAfterHours = 12,
+      recentWindowDays = 45
+    } = {}
+  ) {
+    const staleBefore = Date.now() - staleAfterHours * 60 * 60 * 1000;
+    const blockedBefore = Date.now() - blockedRetryAfterHours * 60 * 60 * 1000;
+    const recentCutoff = Date.now() - recentWindowDays * 24 * 60 * 60 * 1000;
+    const recentCutoffIso = new Date(recentCutoff).toISOString();
+    const candidatePoolSize = Math.max(limit * 80, 240);
+
+    const candidateRows = this.db
+      .prepare(`
+        SELECT *
+        FROM cases
+        WHERE date(date_filed) >= date('2025-01-01')
+          AND docket_number IS NOT NULL
+          AND TRIM(docket_number) <> ''
+          AND (
+            tags_marker LIKE '%|seller_tro|%'
+            OR COALESCE(latest_docket_filed_at, date_filed, updated_at) >= ?
+          )
+        ORDER BY COALESCE(latest_docket_filed_at, date_filed, updated_at) DESC
+        LIMIT ?
+      `)
+      .all(recentCutoffIso, candidatePoolSize)
+      .map(buildCaseView);
+    const entryCounts = this.getEntryCoverageForCaseIds(candidateRows.map((row) => row.id));
+
+    return candidateRows
+      .map((row) => {
+        const coverage = entryCounts.get(Number(row.id)) || {
+          totalEntries: 0,
+          worldtroEntries: 0,
+          pacermonitorEntries: 0
+        };
+        const hasCivilDocketNumber = /\b\d{2}-cv-\d{3,6}\b/i.test(String(row.docket_number || ""));
+        const activityAtRaw = row.latest_docket_filed_at || row.date_filed || row.updated_at;
+        const activityAtMs = Number.isFinite(Date.parse(activityAtRaw || "")) ? Date.parse(activityAtRaw || "") : 0;
+        const isRecentCase = activityAtMs >= recentCutoff;
+        const worldtroRowCount = Number(row.raw?.worldtro?.rowCount || 0);
+        const expectedEntries = Math.max(
+          row.insights?.is_seller_case ? 12 : 8,
+          isRecentCase ? 10 : 0,
+          Number(row.docket_count || 0),
+          worldtroRowCount
+        );
+        const gap = Math.max(0, expectedEntries - coverage.totalEntries);
+        const syncedAt = row.raw?.pacermonitor?.syncedAt ? Date.parse(row.raw.pacermonitor.syncedAt) : 0;
+        const state = String(row.raw?.pacermonitor?.state || "").toLowerCase();
+        const isBlockedFresh =
+          (state === "challenge" || state === "rate_limited") &&
+          syncedAt &&
+          syncedAt >= blockedBefore;
+        const isFresh = syncedAt && syncedAt >= staleBefore;
+        const needsWorldtroLevelCompletion =
+          worldtroRowCount > 0 && coverage.totalEntries < worldtroRowCount;
+        const needsBasicCompletion = coverage.totalEntries < expectedEntries;
+        const shouldSync =
+          hasCivilDocketNumber &&
+          (row.insights?.is_seller_case || isRecentCase) &&
+          (needsWorldtroLevelCompletion || needsBasicCompletion) &&
+          !isBlockedFresh &&
+          !isFresh;
+
+        const priority = needsWorldtroLevelCompletion
+          ? 0
+          : row.insights?.is_seller_case
+            ? 1
+            : 2;
+
+        return {
+          row,
+          priority,
+          gap,
+          activityAtRaw,
+          totalEntries: coverage.totalEntries,
+          shouldSync
+        };
+      })
+      .filter((item) => item.shouldSync)
+      .sort((left, right) => {
+        if (left.priority !== right.priority) {
+          return left.priority - right.priority;
+        }
+
+        if (left.gap !== right.gap) {
+          return right.gap - left.gap;
+        }
+
+        const activityCompare = compareCaseActivityDesc(left.activityAtRaw, right.activityAtRaw);
+        if (activityCompare !== 0) {
+          return activityCompare;
+        }
+
+        if (left.totalEntries !== right.totalEntries) {
+          return left.totalEntries - right.totalEntries;
+        }
+
+        return Number(right.row.id || 0) - Number(left.row.id || 0);
+      })
+      .slice(0, limit)
+      .map((item) => item.row);
   }
 
   getPendingCaseTranslations(limit) {
