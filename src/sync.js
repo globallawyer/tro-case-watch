@@ -265,6 +265,7 @@ export class CaseSyncService {
     };
 
     try {
+      return await this.store.batchMutations(async () => {
       let discoverySourceAvailable = false;
       try {
         const courtFeedResult = await this.syncCourtFeedsRecent(mode);
@@ -361,6 +362,7 @@ export class CaseSyncService {
       this.state.lastFinishedAt = new Date().toISOString();
       this.state.lastStats = stats;
       return this.getPublicStatus();
+      });
     } catch (error) {
       this.state.lastError = error.message;
       this.store.finishSyncRun(runId, "failed", stats, `${error.message}\n${error.body || ""}`.trim());
@@ -952,319 +954,333 @@ export class CaseSyncService {
   }
 
   async syncCourtFeedsRecent(mode = "recent") {
-    if (!this.courtFeeds.enabled) {
-      return {
-        successfulFeeds: 0,
-        failedFeeds: 0,
-        casesUpserted: 0,
-        docketEntriesUpserted: 0,
-        lookupsTriggered: 0,
-        note: "官方法院 RSS 发现层已关闭。"
-      };
-    }
-
-    const caseIndex = this.buildCourtFeedCaseIndex();
-    const lookupCandidates = new Map();
-    let successfulFeeds = 0;
-    let failedFeeds = 0;
-    let casesUpserted = 0;
-    let docketEntriesUpserted = 0;
-
-    for (const feed of this.courtFeeds.listFeeds()) {
-      const checkpointKey = `courtfeed:${feed.id}:recent`;
-      const checkpoint = this.store.getCheckpoint(checkpointKey) || {};
-      const seenGuids = new Set(Array.isArray(checkpoint.seenGuids) ? checkpoint.seenGuids : []);
-
-      try {
-        const feedResult = await this.courtFeeds.fetchFeed(feed);
-        const freshItems = (feedResult.items || []).filter((item) => item.guid && !seenGuids.has(item.guid));
-        const ingest = this.ingestCourtFeedItems(
-          {
-            ...feedResult,
-            items: freshItems
-          },
-          caseIndex
-        );
-        casesUpserted += ingest.casesUpserted;
-        docketEntriesUpserted += ingest.docketEntriesUpserted;
-
-        for (const [key, value] of ingest.lookupCandidates.entries()) {
-          if (!lookupCandidates.has(key)) {
-            lookupCandidates.set(key, value);
-          }
-        }
-
-        this.store.saveCheckpoint(checkpointKey, {
-          seenGuids: (feedResult.items || []).map((item) => item.guid).filter(Boolean).slice(0, 400),
-          lastBuildDate: feedResult.lastBuildDate,
-          updatedAt: new Date().toISOString(),
-          lastItemCount: Number(feedResult.items?.length || 0),
-          newItemCount: freshItems.length
-        });
-        successfulFeeds += 1;
-      } catch (error) {
-        failedFeeds += 1;
-        this.store.saveCheckpoint(checkpointKey, {
-          seenGuids: [...seenGuids].slice(0, 400),
-          updatedAt: new Date().toISOString(),
-          error: error.message
-        });
+    return this.store.batchMutations(async () => {
+      if (!this.courtFeeds.enabled) {
+        return {
+          successfulFeeds: 0,
+          failedFeeds: 0,
+          casesUpserted: 0,
+          docketEntriesUpserted: 0,
+          lookupsTriggered: 0,
+          note: "官方法院 RSS 发现层已关闭。"
+        };
       }
-    }
 
-    const lookupResult =
-      mode === "recent" && lookupCandidates.size
-        ? await this.lookupCourtFeedCandidates(lookupCandidates)
-        : { lookupsTriggered: 0, imported: 0, matched: 0 };
+      const caseIndex = this.buildCourtFeedCaseIndex();
+      const lookupCandidates = new Map();
+      let successfulFeeds = 0;
+      let failedFeeds = 0;
+      let casesUpserted = 0;
+      let docketEntriesUpserted = 0;
 
-    const note =
-      successfulFeeds || failedFeeds
-        ? `官方法院 RSS 本轮巡检 ${successfulFeeds} 个法院${failedFeeds ? `，${failedFeeds} 个法院源暂时失败` : ""}；补进 ${casesUpserted} 条案件更新、${docketEntriesUpserted} 条官方 docket${lookupResult.lookupsTriggered ? `，并触发 ${lookupResult.lookupsTriggered} 次 CourtListener 精确补抓` : ""}。`
-        : "官方法院 RSS 当前没有已配置法院。";
+      for (const feed of this.courtFeeds.listFeeds()) {
+        const checkpointKey = `courtfeed:${feed.id}:recent`;
+        const checkpoint = this.store.getCheckpoint(checkpointKey) || {};
+        const seenGuids = new Set(Array.isArray(checkpoint.seenGuids) ? checkpoint.seenGuids : []);
 
-    return {
-      successfulFeeds,
-      failedFeeds,
-      casesUpserted,
-      docketEntriesUpserted,
-      lookupsTriggered: lookupResult.lookupsTriggered,
-      note
-    };
+        try {
+          const feedResult = await this.courtFeeds.fetchFeed(feed);
+          const freshItems = (feedResult.items || []).filter((item) => item.guid && !seenGuids.has(item.guid));
+          const ingest = this.ingestCourtFeedItems(
+            {
+              ...feedResult,
+              items: freshItems
+            },
+            caseIndex
+          );
+          casesUpserted += ingest.casesUpserted;
+          docketEntriesUpserted += ingest.docketEntriesUpserted;
+
+          for (const [key, value] of ingest.lookupCandidates.entries()) {
+            if (!lookupCandidates.has(key)) {
+              lookupCandidates.set(key, value);
+            }
+          }
+
+          this.store.saveCheckpoint(checkpointKey, {
+            seenGuids: (feedResult.items || []).map((item) => item.guid).filter(Boolean).slice(0, 400),
+            lastBuildDate: feedResult.lastBuildDate,
+            updatedAt: new Date().toISOString(),
+            lastItemCount: Number(feedResult.items?.length || 0),
+            newItemCount: freshItems.length
+          });
+          successfulFeeds += 1;
+        } catch (error) {
+          failedFeeds += 1;
+          this.store.saveCheckpoint(checkpointKey, {
+            seenGuids: [...seenGuids].slice(0, 400),
+            updatedAt: new Date().toISOString(),
+            error: error.message
+          });
+        }
+      }
+
+      const lookupResult =
+        mode === "recent" && lookupCandidates.size
+          ? await this.lookupCourtFeedCandidates(lookupCandidates)
+          : { lookupsTriggered: 0, imported: 0, matched: 0 };
+
+      const note =
+        successfulFeeds || failedFeeds
+          ? `官方法院 RSS 本轮巡检 ${successfulFeeds} 个法院${failedFeeds ? `，${failedFeeds} 个法院源暂时失败` : ""}；补进 ${casesUpserted} 条案件更新、${docketEntriesUpserted} 条官方 docket${lookupResult.lookupsTriggered ? `，并触发 ${lookupResult.lookupsTriggered} 次 CourtListener 精确补抓` : ""}。`
+          : "官方法院 RSS 当前没有已配置法院。";
+
+      return {
+        successfulFeeds,
+        failedFeeds,
+        casesUpserted,
+        docketEntriesUpserted,
+        lookupsTriggered: lookupResult.lookupsTriggered,
+        note
+      };
+    });
   }
 
   async syncLawFirmRecent(mode = "recent") {
-    if (!this.lawFirms.enabled) {
-      return {
-        successfulSources: 0,
-        failedSources: 0,
-        casesUpserted: 0,
-        docketEntriesUpserted: 0,
-        lookupsTriggered: 0,
-        note: "律所官网补源已关闭。"
-      };
-    }
-
-    const caseIndex = this.buildCourtFeedCaseIndex();
-    const lookupCandidates = new Map();
-    let successfulSources = 0;
-    let failedSources = 0;
-    let casesUpserted = 0;
-    let docketEntriesUpserted = 0;
-
-    for (const source of this.lawFirms.listSources()) {
-      try {
-        const sourceResult = await this.lawFirms.fetchRecentForSource(source);
-        const ingest = this.ingestLawFirmItems(sourceResult, caseIndex);
-        casesUpserted += ingest.casesUpserted;
-        docketEntriesUpserted += ingest.docketEntriesUpserted;
-
-        for (const [key, value] of ingest.lookupCandidates.entries()) {
-          if (!lookupCandidates.has(key)) {
-            lookupCandidates.set(key, value);
-          }
-        }
-
-        successfulSources += 1;
-      } catch {
-        failedSources += 1;
+    return this.store.batchMutations(async () => {
+      if (!this.lawFirms.enabled) {
+        return {
+          successfulSources: 0,
+          failedSources: 0,
+          casesUpserted: 0,
+          docketEntriesUpserted: 0,
+          lookupsTriggered: 0,
+          note: "律所官网补源已关闭。"
+        };
       }
-    }
 
-    const lookupResult =
-      mode === "recent" && lookupCandidates.size
-        ? await this.lookupLawFirmCandidates(lookupCandidates)
-        : { lookupsTriggered: 0, imported: 0, matched: 0 };
+      const caseIndex = this.buildCourtFeedCaseIndex();
+      const lookupCandidates = new Map();
+      let successfulSources = 0;
+      let failedSources = 0;
+      let casesUpserted = 0;
+      let docketEntriesUpserted = 0;
 
-    const note =
-      successfulSources || failedSources
-        ? `律所官网本轮巡检 ${successfulSources} 个来源${failedSources ? `，${failedSources} 个来源暂时失败` : ""}；补进 ${casesUpserted} 条案件更新、${docketEntriesUpserted} 条律所公开文书${lookupResult.lookupsTriggered ? `，并触发 ${lookupResult.lookupsTriggered} 次 CourtListener 精确补抓` : ""}。`
-        : "律所官网当前没有已配置来源。";
+      for (const source of this.lawFirms.listSources()) {
+        try {
+          const sourceResult = await this.lawFirms.fetchRecentForSource(source);
+          const ingest = this.ingestLawFirmItems(sourceResult, caseIndex);
+          casesUpserted += ingest.casesUpserted;
+          docketEntriesUpserted += ingest.docketEntriesUpserted;
 
-    return {
-      successfulSources,
-      failedSources,
-      casesUpserted,
-      docketEntriesUpserted,
-      lookupsTriggered: lookupResult.lookupsTriggered,
-      note
-    };
+          for (const [key, value] of ingest.lookupCandidates.entries()) {
+            if (!lookupCandidates.has(key)) {
+              lookupCandidates.set(key, value);
+            }
+          }
+
+          successfulSources += 1;
+        } catch {
+          failedSources += 1;
+        }
+      }
+
+      const lookupResult =
+        mode === "recent" && lookupCandidates.size
+          ? await this.lookupLawFirmCandidates(lookupCandidates)
+          : { lookupsTriggered: 0, imported: 0, matched: 0 };
+
+      const note =
+        successfulSources || failedSources
+          ? `律所官网本轮巡检 ${successfulSources} 个来源${failedSources ? `，${failedSources} 个来源暂时失败` : ""}；补进 ${casesUpserted} 条案件更新、${docketEntriesUpserted} 条律所公开文书${lookupResult.lookupsTriggered ? `，并触发 ${lookupResult.lookupsTriggered} 次 CourtListener 精确补抓` : ""}。`
+          : "律所官网当前没有已配置来源。";
+
+      return {
+        successfulSources,
+        failedSources,
+        casesUpserted,
+        docketEntriesUpserted,
+        lookupsTriggered: lookupResult.lookupsTriggered,
+        note
+      };
+    });
   }
 
   async enrichCaseWithWorldtro(caseId, { force = false } = {}) {
-    const caseRow = this.store.getCase(caseId);
-    if (!caseRow || !this.worldtro.enabled || !caseRow.insights?.is_seller_case) {
-      return { enriched: false, reason: "not-applicable" };
-    }
+    return this.store.batchMutations(async () => {
+      const caseRow = this.store.getCase(caseId);
+      if (!caseRow || !this.worldtro.enabled || !caseRow.insights?.is_seller_case) {
+        return { enriched: false, reason: "not-applicable" };
+      }
 
-    const syncedAt = caseRow.raw?.worldtro?.syncedAt ? Date.parse(caseRow.raw.worldtro.syncedAt) : 0;
-    const staleAfterMs = this.config.worldtro.staleAfterHours * 60 * 60 * 1000;
-    if (!force && syncedAt && Date.now() - syncedAt < staleAfterMs) {
-      return { enriched: false, reason: "fresh" };
-    }
+      const syncedAt = caseRow.raw?.worldtro?.syncedAt ? Date.parse(caseRow.raw.worldtro.syncedAt) : 0;
+      const staleAfterMs = this.config.worldtro.staleAfterHours * 60 * 60 * 1000;
+      if (!force && syncedAt && Date.now() - syncedAt < staleAfterMs) {
+        return { enriched: false, reason: "fresh" };
+      }
 
-    return this.syncSingleWorldtroCase(caseRow);
+      return this.syncSingleWorldtroCase(caseRow);
+    });
   }
 
   async enrichCaseWithCourtListener(caseId, { force = false } = {}) {
-    const caseRow = this.store.getCase(caseId);
-    if (!caseRow || !this.courtListener.hasDocketAccess()) {
-      return { enriched: false, reason: "not-applicable" };
-    }
+    return this.store.batchMutations(async () => {
+      const caseRow = this.store.getCase(caseId);
+      if (!caseRow || !this.courtListener.hasDocketAccess()) {
+        return { enriched: false, reason: "not-applicable" };
+      }
 
-    const syncedAt = caseRow.last_docket_sync_at ? Date.parse(caseRow.last_docket_sync_at) : 0;
-    const staleAfterMs = 2 * 60 * 60 * 1000;
-    if (!force && syncedAt && Date.now() - syncedAt < staleAfterMs) {
-      return { enriched: false, reason: "fresh" };
-    }
+      const syncedAt = caseRow.last_docket_sync_at ? Date.parse(caseRow.last_docket_sync_at) : 0;
+      const staleAfterMs = 2 * 60 * 60 * 1000;
+      if (!force && syncedAt && Date.now() - syncedAt < staleAfterMs) {
+        return { enriched: false, reason: "fresh" };
+      }
 
-    const lookupTerm = caseRow.docket_number || caseRow.case_name;
-    if (lookupTerm) {
-      await this.importLookup(lookupTerm, {
-        courtName: caseRow.court_name,
-        caseName: caseRow.case_name
-      });
-    }
+      const lookupTerm = caseRow.docket_number || caseRow.case_name;
+      if (lookupTerm) {
+        await this.importLookup(lookupTerm, {
+          courtName: caseRow.court_name,
+          caseName: caseRow.case_name
+        });
+      }
 
-    const refreshedCase =
-      this.store.getCase(caseId) ||
-      this.store.findCaseByCourtAndDocket({
-        courtId: caseRow.court_id,
-        courtName: caseRow.court_name,
-        docketNumber: caseRow.docket_number,
-        startDate: this.config.sync.startDate
-      });
+      const refreshedCase =
+        this.store.getCase(caseId) ||
+        this.store.findCaseByCourtAndDocket({
+          courtId: caseRow.court_id,
+          courtName: caseRow.court_name,
+          docketNumber: caseRow.docket_number,
+          startDate: this.config.sync.startDate
+        });
 
-    if (!refreshedCase?.courtlistener_docket_id) {
-      return { enriched: false, reason: "not-found" };
-    }
+      if (!refreshedCase?.courtlistener_docket_id) {
+        return { enriched: false, reason: "not-found" };
+      }
 
-    return this.syncSingleCourtListenerDocket(refreshedCase);
+      return this.syncSingleCourtListenerDocket(refreshedCase);
+    });
   }
 
   async enrichCaseWithPacerMonitor(caseId, { force = false } = {}) {
-    const caseRow = this.store.getCase(caseId);
-    if (!caseRow || !this.pacerMonitor.enabled) {
-      return { enriched: false, reason: "not-applicable" };
-    }
+    return this.store.batchMutations(async () => {
+      const caseRow = this.store.getCase(caseId);
+      if (!caseRow || !this.pacerMonitor.enabled) {
+        return { enriched: false, reason: "not-applicable" };
+      }
 
-    const syncedAt = caseRow.raw?.pacermonitor?.syncedAt ? Date.parse(caseRow.raw.pacermonitor.syncedAt) : 0;
-    const state = String(caseRow.raw?.pacermonitor?.state || "").toLowerCase();
-    const retryHours =
-      state === "challenge" || state === "rate_limited"
-        ? this.config.pacerMonitor.blockedRetryAfterHours
-        : state === "not_found"
-          ? this.config.pacerMonitor.notFoundRetryAfterHours
-        : this.config.pacerMonitor.staleAfterHours;
-    const staleAfterMs = retryHours * 60 * 60 * 1000;
+      const syncedAt = caseRow.raw?.pacermonitor?.syncedAt ? Date.parse(caseRow.raw.pacermonitor.syncedAt) : 0;
+      const state = String(caseRow.raw?.pacermonitor?.state || "").toLowerCase();
+      const retryHours =
+        state === "challenge" || state === "rate_limited"
+          ? this.config.pacerMonitor.blockedRetryAfterHours
+          : state === "not_found"
+            ? this.config.pacerMonitor.notFoundRetryAfterHours
+          : this.config.pacerMonitor.staleAfterHours;
+      const staleAfterMs = retryHours * 60 * 60 * 1000;
 
-    if (!force && syncedAt && Date.now() - syncedAt < staleAfterMs) {
-      return { enriched: false, reason: "fresh" };
-    }
+      if (!force && syncedAt && Date.now() - syncedAt < staleAfterMs) {
+        return { enriched: false, reason: "fresh" };
+      }
 
-    return this.syncSinglePacerMonitorCase(caseRow);
+      return this.syncSinglePacerMonitorCase(caseRow);
+    });
   }
 
   async syncWorldtroRecent(mode = "recent") {
-    if (!this.worldtro.enabled) {
-      return {
-        syncedCases: 0,
-        note: "WorldTRO 公开补源已关闭。"
-      };
-    }
-
-    const maxCases =
-      mode === "backfill" ? this.config.worldtro.backfillMaxCasesPerRun : this.config.worldtro.maxCasesPerRun;
-    const candidates = this.store.getCasesNeedingWorldtroSync(
-      maxCases,
-      this.config.worldtro.staleAfterHours
-    );
-
-    let syncedCases = 0;
-    let failedCases = 0;
-    for (const caseRow of candidates) {
-      try {
-        const result = await this.syncSingleWorldtroCase(caseRow);
-        if (result.enriched) {
-          syncedCases += 1;
-        }
-      } catch (error) {
-        failedCases += 1;
+    return this.store.batchMutations(async () => {
+      if (!this.worldtro.enabled) {
+        return {
+          syncedCases: 0,
+          note: "WorldTRO 公开补源已关闭。"
+        };
       }
-    }
 
-    return {
-      syncedCases,
-      note: syncedCases
-        ? `WorldTRO 本轮补齐 ${syncedCases} 个案件的公开时间线${failedCases ? `，另有 ${failedCases} 个案件待重试` : ""}。`
-        : failedCases
-          ? `WorldTRO 本轮没有补齐成功，${failedCases} 个案件待重试。`
-          : "WorldTRO 本轮没有待补源案件。"
-    };
+      const maxCases =
+        mode === "backfill" ? this.config.worldtro.backfillMaxCasesPerRun : this.config.worldtro.maxCasesPerRun;
+      const candidates = this.store.getCasesNeedingWorldtroSync(
+        maxCases,
+        this.config.worldtro.staleAfterHours
+      );
+
+      let syncedCases = 0;
+      let failedCases = 0;
+      for (const caseRow of candidates) {
+        try {
+          const result = await this.syncSingleWorldtroCase(caseRow);
+          if (result.enriched) {
+            syncedCases += 1;
+          }
+        } catch (error) {
+          failedCases += 1;
+        }
+      }
+
+      return {
+        syncedCases,
+        note: syncedCases
+          ? `WorldTRO 本轮补齐 ${syncedCases} 个案件的公开时间线${failedCases ? `，另有 ${failedCases} 个案件待重试` : ""}。`
+          : failedCases
+            ? `WorldTRO 本轮没有补齐成功，${failedCases} 个案件待重试。`
+            : "WorldTRO 本轮没有待补源案件。"
+      };
+    });
   }
 
   async syncPacerMonitorRecent(mode = "recent") {
-    if (!this.pacerMonitor.enabled) {
-      return {
-        syncedCases: 0,
-        note: "PACERMonitor 精确补充链路已关闭。"
-      };
-    }
-
-    const maxCases =
-      mode === "backfill"
-        ? this.config.pacerMonitor.backfillMaxCasesPerRun
-        : this.config.pacerMonitor.maxCasesPerRun;
-    const candidates = this.store.getCasesNeedingPacerMonitorSync(maxCases, {
-      staleAfterHours: this.config.pacerMonitor.staleAfterHours,
-      blockedRetryAfterHours: this.config.pacerMonitor.blockedRetryAfterHours,
-      notFoundRetryAfterHours: this.config.pacerMonitor.notFoundRetryAfterHours,
-      recentWindowDays: this.config.pacerMonitor.recentWindowDays
-    });
-
-    let syncedCases = 0;
-    let notFoundCases = 0;
-    let blockedCases = 0;
-    let emptyCases = 0;
-    let failedCases = 0;
-
-    for (const caseRow of candidates) {
-      try {
-        const result = await this.syncSinglePacerMonitorCase(caseRow);
-        if (result.enriched) {
-          syncedCases += 1;
-          continue;
-        }
-
-        if (result.reason === "not_found") {
-          notFoundCases += 1;
-        } else if (result.reason === "challenge" || result.reason === "rate_limited") {
-          blockedCases += 1;
-        } else if (result.reason === "empty") {
-          emptyCases += 1;
-        }
-      } catch {
-        failedCases += 1;
+    return this.store.batchMutations(async () => {
+      if (!this.pacerMonitor.enabled) {
+        return {
+          syncedCases: 0,
+          note: "PACERMonitor 精确补充链路已关闭。"
+        };
       }
-    }
 
-    if (syncedCases) {
-      return {
-        syncedCases,
-        note: `PACERMonitor 本轮补齐 ${syncedCases} 个案件的缺口${blockedCases ? `，${blockedCases} 个案件触发验证或限流稍后再试` : ""}${notFoundCases ? `，${notFoundCases} 个案件暂未找到公开页` : ""}${failedCases ? `，${failedCases} 个案件待重试` : ""}。`
-      };
-    }
+      const maxCases =
+        mode === "backfill"
+          ? this.config.pacerMonitor.backfillMaxCasesPerRun
+          : this.config.pacerMonitor.maxCasesPerRun;
+      const candidates = this.store.getCasesNeedingPacerMonitorSync(maxCases, {
+        staleAfterHours: this.config.pacerMonitor.staleAfterHours,
+        blockedRetryAfterHours: this.config.pacerMonitor.blockedRetryAfterHours,
+        notFoundRetryAfterHours: this.config.pacerMonitor.notFoundRetryAfterHours,
+        recentWindowDays: this.config.pacerMonitor.recentWindowDays
+      });
 
-    if (blockedCases || notFoundCases || emptyCases || failedCases) {
+      let syncedCases = 0;
+      let notFoundCases = 0;
+      let blockedCases = 0;
+      let emptyCases = 0;
+      let failedCases = 0;
+
+      for (const caseRow of candidates) {
+        try {
+          const result = await this.syncSinglePacerMonitorCase(caseRow);
+          if (result.enriched) {
+            syncedCases += 1;
+            continue;
+          }
+
+          if (result.reason === "not_found") {
+            notFoundCases += 1;
+          } else if (result.reason === "challenge" || result.reason === "rate_limited") {
+            blockedCases += 1;
+          } else if (result.reason === "empty") {
+            emptyCases += 1;
+          }
+        } catch {
+          failedCases += 1;
+        }
+      }
+
+      if (syncedCases) {
+        return {
+          syncedCases,
+          note: `PACERMonitor 本轮补齐 ${syncedCases} 个案件的缺口${blockedCases ? `，${blockedCases} 个案件触发验证或限流稍后再试` : ""}${notFoundCases ? `，${notFoundCases} 个案件暂未找到公开页` : ""}${failedCases ? `，${failedCases} 个案件待重试` : ""}。`
+        };
+      }
+
+      if (blockedCases || notFoundCases || emptyCases || failedCases) {
+        return {
+          syncedCases: 0,
+          note: `PACERMonitor 本轮未补齐成功${blockedCases ? `，${blockedCases} 个案件触发验证或限流` : ""}${notFoundCases ? `，${notFoundCases} 个案件暂未找到公开页` : ""}${emptyCases ? `，${emptyCases} 个案件公开页暂无时间线` : ""}${failedCases ? `，${failedCases} 个案件待重试` : ""}。`
+        };
+      }
+
       return {
         syncedCases: 0,
-        note: `PACERMonitor 本轮未补齐成功${blockedCases ? `，${blockedCases} 个案件触发验证或限流` : ""}${notFoundCases ? `，${notFoundCases} 个案件暂未找到公开页` : ""}${emptyCases ? `，${emptyCases} 个案件公开页暂无时间线` : ""}${failedCases ? `，${failedCases} 个案件待重试` : ""}。`
+        note: "PACERMonitor 本轮没有需要补齐的案件。"
       };
-    }
-
-    return {
-      syncedCases: 0,
-      note: "PACERMonitor 本轮没有需要补齐的案件。"
-    };
+    });
   }
 
   async syncSingleWorldtroCase(caseRow) {
@@ -1613,42 +1629,44 @@ export class CaseSyncService {
   }
 
   async syncCourtListenerDockets() {
-    if (!this.courtListener.hasDocketAccess()) {
-      return {
-        syncedCases: 0,
-        note: "CourtListener docket API 未开启或没有 token，当前只同步公开 search 结果和嵌入式 recap 文档。"
-      };
-    }
-
-    const candidates = this.store.getCasesNeedingDocketSync(this.config.courtListener.docketMaxCasesPerRun);
-    let syncedCases = 0;
-    let metadataOnlyMode = false;
-
-    for (const caseRow of candidates) {
-      try {
-        const result = await this.syncSingleCourtListenerDocket(caseRow);
-        if (result.enriched) {
-          syncedCases += 1;
-        }
-        if (result.reason === "metadata-only") {
-          metadataOnlyMode = true;
-        }
-      } catch (error) {
+    return this.store.batchMutations(async () => {
+      if (!this.courtListener.hasDocketAccess()) {
         return {
-          syncedCases,
-          note: `CourtListener docket 拉取中止：${error.message}`
+          syncedCases: 0,
+          note: "CourtListener docket API 未开启或没有 token，当前只同步公开 search 结果和嵌入式 recap 文档。"
         };
       }
-    }
 
-    return {
-      syncedCases,
-      note: metadataOnlyMode
-        ? `CourtListener docket 元数据本轮更新 ${syncedCases} 个案件，但当前 token 无权访问 docket-entries。`
-        : syncedCases
-          ? `CourtListener docket API 本轮补齐 ${syncedCases} 个案件。`
-          : "CourtListener docket API 已启用，但本轮没有待补齐案件。"
-    };
+      const candidates = this.store.getCasesNeedingDocketSync(this.config.courtListener.docketMaxCasesPerRun);
+      let syncedCases = 0;
+      let metadataOnlyMode = false;
+
+      for (const caseRow of candidates) {
+        try {
+          const result = await this.syncSingleCourtListenerDocket(caseRow);
+          if (result.enriched) {
+            syncedCases += 1;
+          }
+          if (result.reason === "metadata-only") {
+            metadataOnlyMode = true;
+          }
+        } catch (error) {
+          return {
+            syncedCases,
+            note: `CourtListener docket 拉取中止：${error.message}`
+          };
+        }
+      }
+
+      return {
+        syncedCases,
+        note: metadataOnlyMode
+          ? `CourtListener docket 元数据本轮更新 ${syncedCases} 个案件，但当前 token 无权访问 docket-entries。`
+          : syncedCases
+            ? `CourtListener docket API 本轮补齐 ${syncedCases} 个案件。`
+            : "CourtListener docket API 已启用，但本轮没有待补齐案件。"
+      };
+    });
   }
 
   async syncSingleCourtListenerDocket(caseRow) {

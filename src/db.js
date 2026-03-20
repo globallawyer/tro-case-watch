@@ -351,6 +351,8 @@ export class Store {
     this.listPayloadCache = new Map();
     this.dashboardStatsCache = null;
     this.caseIdentityCache = null;
+    this.deferInvalidationDepth = 0;
+    this.pendingInvalidation = false;
     this.db.exec(`
       PRAGMA journal_mode = WAL;
       PRAGMA synchronous = NORMAL;
@@ -455,12 +457,30 @@ export class Store {
   }
 
   invalidateCaseViews() {
+    if (this.deferInvalidationDepth > 0) {
+      this.pendingInvalidation = true;
+      return;
+    }
+
     this.caseCacheVersion += 1;
     this.caseViewCache.clear();
     this.caseDetailCache.clear();
     this.listPayloadCache.clear();
     this.dashboardStatsCache = null;
     this.caseIdentityCache = null;
+  }
+
+  async batchMutations(task) {
+    this.deferInvalidationDepth += 1;
+    try {
+      return await task();
+    } finally {
+      this.deferInvalidationDepth = Math.max(0, this.deferInvalidationDepth - 1);
+      if (this.deferInvalidationDepth === 0 && this.pendingInvalidation) {
+        this.pendingInvalidation = false;
+        this.invalidateCaseViews();
+      }
+    }
   }
 
   getCaseIdentityIndex(startDate = "2025-01-01") {
