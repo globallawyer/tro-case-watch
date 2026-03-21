@@ -2249,6 +2249,61 @@ export class Store {
       Math.max(limit * 12, 240),
       { startDate: null, requirePriorityTags: false }
     );
+
+    if (preferKnownPriorityFeed) {
+      const entryCounts = this.getEntryCoverageForCaseIds(knownPriorityFeedRows.map((row) => row.id));
+      return knownPriorityFeedRows
+        .map((row) => {
+          const coverage = entryCounts.get(Number(row.id)) || {
+            totalEntries: 0,
+            priorityFeedEntries: 0
+          };
+          const syncedAt = getPriorityFeedSyncedAt(row) ? Date.parse(getPriorityFeedSyncedAt(row)) : 0;
+          const priorityFeedRowCount = getPriorityFeedRowCount(row);
+          const hasPriorityFeedUrl = caseHasPriorityFeedUrl(row);
+          const minimumExpectedEntries = Math.max(12, Number(row.docket_count || 0), priorityFeedRowCount, 6);
+          const missingMarked = isPriorityFeedMissing(row);
+          const isFreshlyMissing = missingMarked && syncedAt && syncedAt >= staleBefore;
+          const needsCompletion = priorityFeedRowCount > 0
+            ? coverage.totalEntries < priorityFeedRowCount
+            : hasPriorityFeedUrl
+              ? coverage.priorityFeedEntries === 0 || coverage.totalEntries < minimumExpectedEntries
+              : false;
+          const isStale = !syncedAt || syncedAt < staleBefore;
+          return {
+            row,
+            needsCompletion,
+            isStale,
+            isFreshlyMissing,
+            activityAtRaw: row.latest_docket_filed_at || row.date_filed || row.updated_at,
+            priorityFeedRowCount,
+            totalEntries: coverage.totalEntries
+          };
+        })
+        .filter((item) => item.needsCompletion || (!item.isFreshlyMissing && item.isStale))
+        .sort((left, right) => {
+          if (left.needsCompletion !== right.needsCompletion) {
+            return left.needsCompletion ? -1 : 1;
+          }
+
+          if (left.priorityFeedRowCount !== right.priorityFeedRowCount) {
+            return right.priorityFeedRowCount - left.priorityFeedRowCount;
+          }
+
+          if (left.totalEntries !== right.totalEntries) {
+            return left.totalEntries - right.totalEntries;
+          }
+
+          const activityCompare = compareCaseActivityDesc(left.activityAtRaw, right.activityAtRaw);
+          if (activityCompare !== 0) {
+            return activityCompare;
+          }
+
+          return Number(left.row.id || 0) - Number(right.row.id || 0);
+        })
+        .slice(0, limit)
+        .map((item) => item.row);
+    }
     const lawFirmBackedRows = fetchCandidateRows(
       `(${buildTrackedLawFirmSourceClause("source_urls_json")})
        AND NOT (${PRIORITY_FEED_RAW_CLAUSE})
