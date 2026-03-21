@@ -1488,6 +1488,7 @@ export class CaseSyncService {
 
       let syncedCases = 0;
       let failedCases = 0;
+      let notFoundCases = 0;
       for (const [index, caseRow] of candidates.entries()) {
         const startedAt = Date.now();
         if (progressEnabled) {
@@ -1504,6 +1505,8 @@ export class CaseSyncService {
           const result = await this.syncSinglePriorityFeedCase(caseRow);
           if (result.enriched) {
             syncedCases += 1;
+          } else if (result.reason === "not-found") {
+            notFoundCases += 1;
           }
 
           if (progressEnabled) {
@@ -1536,15 +1539,17 @@ export class CaseSyncService {
       return {
         syncedCases,
         failedCases,
+        notFoundCases,
+        candidateCount: candidates.length,
         discoveredCases: Number(discoveryResult.discoveredCases || 0),
         attachedCases: Number(discoveryResult.attachedCases || 0),
         createdCases: Number(discoveryResult.createdCases || 0),
         totalCatalogCases: Number(discoveryResult.totalCatalogCases || 0),
         discoverySkipped: Boolean(discoveryResult.skipped),
         note: syncedCases
-          ? `优先目录 本轮${discoveryResult.skipped ? "复用目录缓存" : `登记 ${discoveryResult.discoveredCases} 个公开案件`}，并补齐 ${syncedCases} 个案件的公开时间线${failedCases ? `，另有 ${failedCases} 个案件待重试` : ""}。`
-          : failedCases
-            ? `优先目录 本轮${discoveryResult.skipped ? "复用目录缓存" : `登记 ${discoveryResult.discoveredCases} 个公开案件`}，但没有补齐成功，${failedCases} 个案件待重试。`
+          ? `优先目录 本轮${discoveryResult.skipped ? "复用目录缓存" : `登记 ${discoveryResult.discoveredCases} 个公开案件`}，并补齐 ${syncedCases} 个案件的公开时间线${notFoundCases ? `，${notFoundCases} 个案件暂未找到公开页` : ""}${failedCases ? `，另有 ${failedCases} 个案件待重试` : ""}。`
+          : failedCases || notFoundCases
+            ? `优先目录 本轮尝试 ${candidates.length} 个案件，${notFoundCases ? `${notFoundCases} 个案件暂未找到公开页` : ""}${notFoundCases && failedCases ? "，" : ""}${failedCases ? `${failedCases} 个案件待重试` : ""}。`
             : discoveryResult.discoveredCases
               ? `优先目录 本轮新增登记 ${discoveryResult.discoveredCases} 个公开案件，当前没有待补源案件。`
               : discoveryResult.skipped

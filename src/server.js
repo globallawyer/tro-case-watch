@@ -1574,7 +1574,7 @@ async function main() {
         totalAttachedCases += Number(result.attachedCases || 0);
         totalCreatedCases += Number(result.createdCases || 0);
 
-        const idleRound = Number(result.syncedCases || 0) === 0 && Number(result.discoveredCases || 0) === 0;
+        const idleRound = Number(result.candidateCount || 0) === 0 && Number(result.discoveredCases || 0) === 0;
         idleStreak = idleRound ? idleStreak + 1 : 0;
 
         console.log(`[sync] catalog round ${rounds} ${JSON.stringify({
