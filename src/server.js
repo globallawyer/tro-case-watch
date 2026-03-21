@@ -82,6 +82,49 @@ function spawnDetachedTask(args = []) {
   child.unref();
 }
 
+function runSyncModeChild(mode, extraArgs = []) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(
+      process.execPath,
+      [currentScriptPath, "--sync-only", mode, "--result-json", ...extraArgs],
+      {
+        cwd: path.dirname(config.publicDir),
+        env: process.env,
+        stdio: ["ignore", "pipe", "pipe"]
+      }
+    );
+
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => {
+      stdout += String(chunk || "");
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += String(chunk || "");
+    });
+
+    child.on("error", reject);
+    child.on("close", (code, signal) => {
+      if (code !== 0) {
+        const reason = signal ? `signal ${signal}` : `exit ${code}`;
+        reject(new Error(`child sync failed (${reason})\n${stderr || stdout}`.trim()));
+        return;
+      }
+
+      const lines = stdout
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean);
+      const lastLine = lines.at(-1) || "{}";
+      try {
+        resolve(JSON.parse(lastLine));
+      } catch {
+        reject(new Error(`child sync returned non-json output\n${stdout}`.trim()));
+      }
+    });
+  });
+}
+
 function ensureSeedDatabase() {
   if (!config.seedDbArchivePath || !fs.existsSync(config.seedDbArchivePath)) {
     return;
@@ -1459,6 +1502,7 @@ async function main() {
   const syncOnlyIndex = process.argv.indexOf("--sync-only");
   if (syncOnlyIndex !== -1) {
     const rawMode = process.argv[syncOnlyIndex + 1];
+    const resultJson = process.argv.includes("--result-json");
     const normalizedMode =
       rawMode === PRIORITY_FEED_SOURCE
         ? "catalog"
@@ -1467,7 +1511,11 @@ async function main() {
           : rawMode;
     if (normalizedMode === "catalog") {
       const result = await syncService.syncPriorityFeedRecent("backfill");
-      console.log(`[sync] completed catalog ${JSON.stringify(result)}`);
+      if (resultJson) {
+        console.log(JSON.stringify(result));
+      } else {
+        console.log(`[sync] completed catalog ${JSON.stringify(result)}`);
+      }
       process.exit(0);
     }
 
@@ -1495,7 +1543,7 @@ async function main() {
 
       while (rounds < maxRounds && idleStreak < idleRounds) {
         rounds += 1;
-        const result = await syncService.syncPriorityFeedRecent("backfill");
+        const result = await runSyncModeChild("catalog");
         totalSyncedCases += Number(result.syncedCases || 0);
         totalFailedCases += Number(result.failedCases || 0);
         totalDiscoveredCases += Number(result.discoveredCases || 0);
