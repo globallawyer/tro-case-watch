@@ -126,6 +126,8 @@ const PRIORITY_FEED_DISCOVERY_STOP_WORDS = new Set([
   "al"
 ]);
 
+const FULL_CATALOG_START_DATE = "1900-01-01";
+
 function normalizeLookupText(value) {
   return normalizeText(value).replace(/[^\w]+/g, " ").replace(/\s+/g, " ").trim();
 }
@@ -1527,7 +1529,7 @@ export class CaseSyncService {
     }
 
     const listings = await this.priorityFeed.discoverCases();
-    const discoveryIndex = buildPriorityFeedDiscoveryIndex(this.store.getHydratedCases(this.config.sync.startDate));
+    const discoveryIndex = buildPriorityFeedDiscoveryIndex(this.store.getHydratedCases(FULL_CATALOG_START_DATE));
     let discoveredCases = 0;
     let attachedCases = 0;
     let createdCases = 0;

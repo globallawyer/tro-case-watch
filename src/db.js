@@ -2205,19 +2205,36 @@ export class Store {
   getCasesNeedingPriorityFeedSync(limit, staleAfterHours = 12) {
     const staleBefore = Date.now() - staleAfterHours * 60 * 60 * 1000;
     const poolSize = Math.max(limit * 40, 400);
-    const fetchCandidateRows = (whereSql, params = [], orderBySql, queryLimit = poolSize) =>
-      this.db
+    const fetchCandidateRows = (
+      whereSql,
+      params = [],
+      orderBySql,
+      queryLimit = poolSize,
+      { startDate = "2025-01-01", requirePriorityTags = true } = {}
+    ) => {
+      const clauses = [whereSql];
+      const queryParams = [];
+
+      if (startDate) {
+        clauses.unshift("date(date_filed) >= date(?)");
+        queryParams.push(startDate);
+      }
+
+      if (requirePriorityTags) {
+        clauses.unshift(buildPriorityFeedTagClause());
+      }
+
+      return this.db
         .prepare(`
           SELECT *
           FROM cases
-          WHERE date(date_filed) >= date(?)
-            AND ${buildPriorityFeedTagClause()}
-            AND ${whereSql}
+          WHERE ${clauses.join("\n            AND ")}
           ORDER BY ${orderBySql}
           LIMIT ?
         `)
-        .all("2025-01-01", ...params, queryLimit)
+        .all(...queryParams, ...params, queryLimit)
         .map(hydrateCase);
+    };
 
     const recentRows = fetchCandidateRows(
       `date(COALESCE(latest_docket_filed_at, date_filed, updated_at)) >= date('now', '-45 day')`,
@@ -2229,7 +2246,8 @@ export class Store {
       `(${PRIORITY_FEED_URL_CLAUSE} OR ${PRIORITY_FEED_RAW_CLAUSE})`,
       [],
       `COALESCE(latest_docket_filed_at, date_filed, updated_at) DESC, docket_count DESC, id ASC`,
-      Math.max(limit * 8, 120)
+      Math.max(limit * 12, 240),
+      { startDate: null, requirePriorityTags: false }
     );
     const lawFirmBackedRows = fetchCandidateRows(
       `(${buildTrackedLawFirmSourceClause("source_urls_json")})
