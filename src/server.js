@@ -82,7 +82,7 @@ function spawnDetachedTask(args = []) {
   child.unref();
 }
 
-function runSyncModeChild(mode, extraArgs = [], extraEnv = {}) {
+function runSyncModeChild(mode, extraArgs = [], extraEnv = {}, { streamLogs = false } = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(
       process.execPath,
@@ -100,10 +100,18 @@ function runSyncModeChild(mode, extraArgs = [], extraEnv = {}) {
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (chunk) => {
-      stdout += String(chunk || "");
+      const text = String(chunk || "");
+      stdout += text;
+      if (streamLogs) {
+        process.stdout.write(text);
+      }
     });
     child.stderr.on("data", (chunk) => {
-      stderr += String(chunk || "");
+      const text = String(chunk || "");
+      stderr += text;
+      if (streamLogs) {
+        process.stderr.write(text);
+      }
     });
 
     child.on("error", reject);
@@ -1554,7 +1562,11 @@ async function main() {
         const result = await runSyncModeChild(
           "catalog",
           [],
-          { PRIORITY_FEED_BACKFILL_MAX_CASES_PER_RUN: String(batchSize) }
+          {
+            PRIORITY_FEED_BACKFILL_MAX_CASES_PER_RUN: String(batchSize),
+            PRIORITY_FEED_PROGRESS: "1"
+          },
+          { streamLogs: true }
         );
         totalSyncedCases += Number(result.syncedCases || 0);
         totalFailedCases += Number(result.failedCases || 0);

@@ -1470,22 +1470,66 @@ export class CaseSyncService {
         mode === "backfill"
           ? this.config.priorityFeed.backfillMaxCasesPerRun
           : this.config.priorityFeed.maxCasesPerRun;
+      const progressEnabled = process.env.PRIORITY_FEED_PROGRESS === "1";
       const candidates = this.store.getCasesNeedingPriorityFeedSync(
         maxCases,
         this.config.priorityFeed.staleAfterHours,
         { preferKnownPriorityFeed: mode === "backfill" }
       );
 
+      if (progressEnabled) {
+        console.log(`[sync] catalog candidates ${JSON.stringify({
+          mode,
+          maxCases,
+          candidateCount: candidates.length,
+          staleAfterHours: this.config.priorityFeed.staleAfterHours
+        })}`);
+      }
+
       let syncedCases = 0;
       let failedCases = 0;
-      for (const caseRow of candidates) {
+      for (const [index, caseRow] of candidates.entries()) {
+        const startedAt = Date.now();
+        if (progressEnabled) {
+          console.log(`[sync] catalog case starting ${JSON.stringify({
+            index: index + 1,
+            total: candidates.length,
+            caseId: caseRow.id,
+            docketNumber: caseRow.docket_number,
+            court: caseRow.court_id || caseRow.court_name || null
+          })}`);
+        }
+
         try {
           const result = await this.syncSinglePriorityFeedCase(caseRow);
           if (result.enriched) {
             syncedCases += 1;
           }
+
+          if (progressEnabled) {
+            console.log(`[sync] catalog case completed ${JSON.stringify({
+              index: index + 1,
+              total: candidates.length,
+              caseId: caseRow.id,
+              docketNumber: caseRow.docket_number,
+              enriched: Boolean(result.enriched),
+              reason: result.reason || null,
+              entries: Number(result.entries || 0),
+              elapsedMs: Date.now() - startedAt
+            })}`);
+          }
         } catch (error) {
           failedCases += 1;
+          if (progressEnabled) {
+            console.log(`[sync] catalog case failed ${JSON.stringify({
+              index: index + 1,
+              total: candidates.length,
+              caseId: caseRow.id,
+              docketNumber: caseRow.docket_number,
+              elapsedMs: Date.now() - startedAt,
+              error: error.message
+            })}`);
+          }
         }
       }
 
