@@ -2202,7 +2202,7 @@ export class Store {
     return coverage;
   }
 
-  getCasesNeedingPriorityFeedSync(limit, staleAfterHours = 12) {
+  getCasesNeedingPriorityFeedSync(limit, staleAfterHours = 12, { preferKnownPriorityFeed = false } = {}) {
     const staleBefore = Date.now() - staleAfterHours * 60 * 60 * 1000;
     const poolSize = Math.max(limit * 40, 400);
     const fetchCandidateRows = (
@@ -2450,9 +2450,6 @@ export class Store {
         return compareCaseActivityDesc(left.activityAtRaw, right.activityAtRaw);
       });
 
-    const knownPriorityFeedSlots = Math.max(1, Math.min(limit, Math.ceil(limit * 0.4)));
-    const lawFirmSlots = Math.max(1, Math.min(limit, Math.ceil(limit * 0.35)));
-    const recentSlots = Math.max(1, limit - knownPriorityFeedSlots - lawFirmSlots);
     const selected = [];
     const seen = new Set();
     const appendRows = (items, maxItems = limit) => {
@@ -2466,12 +2463,24 @@ export class Store {
       }
     };
 
-    appendRows(knownPriorityFeedOrdered, knownPriorityFeedSlots);
-    appendRows(lawFirmBackedOrdered, knownPriorityFeedSlots + lawFirmSlots);
-    appendRows(recentOrdered, knownPriorityFeedSlots + lawFirmSlots + recentSlots);
-    appendRows(legacyOrdered, limit);
-    appendRows(backlogOrdered, limit);
-    appendRows(recentOrdered, limit);
+    if (preferKnownPriorityFeed) {
+      appendRows(knownPriorityFeedOrdered, limit);
+      appendRows(lawFirmBackedOrdered, limit);
+      appendRows(legacyOrdered, limit);
+      appendRows(backlogOrdered, limit);
+      appendRows(recentOrdered, limit);
+    } else {
+      const knownPriorityFeedSlots = Math.max(1, Math.min(limit, Math.ceil(limit * 0.4)));
+      const lawFirmSlots = Math.max(1, Math.min(limit, Math.ceil(limit * 0.35)));
+      const recentSlots = Math.max(1, limit - knownPriorityFeedSlots - lawFirmSlots);
+
+      appendRows(knownPriorityFeedOrdered, knownPriorityFeedSlots);
+      appendRows(lawFirmBackedOrdered, knownPriorityFeedSlots + lawFirmSlots);
+      appendRows(recentOrdered, knownPriorityFeedSlots + lawFirmSlots + recentSlots);
+      appendRows(legacyOrdered, limit);
+      appendRows(backlogOrdered, limit);
+      appendRows(recentOrdered, limit);
+    }
 
     return selected.slice(0, limit);
   }

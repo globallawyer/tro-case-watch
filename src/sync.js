@@ -1472,7 +1472,8 @@ export class CaseSyncService {
           : this.config.priorityFeed.maxCasesPerRun;
       const candidates = this.store.getCasesNeedingPriorityFeedSync(
         maxCases,
-        this.config.priorityFeed.staleAfterHours
+        this.config.priorityFeed.staleAfterHours,
+        { preferKnownPriorityFeed: mode === "backfill" }
       );
 
       let syncedCases = 0;
