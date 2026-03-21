@@ -1,4 +1,4 @@
-import { PRIORITY_FEED_BASE_URL, PRIORITY_FEED_PUBLIC_LABEL } from "../priority-feed.js";
+import { PRIORITY_FEED_BASE_URL, PRIORITY_FEED_PUBLIC_LABEL, getPriorityFeedRaw, sourceUrlUsesPriorityFeed } from "../priority-feed.js";
 
 function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -174,6 +174,37 @@ function parseCatalogCasePath(value) {
   };
 }
 
+function getKnownCatalogUrl(caseRow) {
+  const rawUrl = getPriorityFeedRaw(caseRow)?.url;
+  if (rawUrl && sourceUrlUsesPriorityFeed(rawUrl)) {
+    try {
+      const parsed = new URL(rawUrl);
+      parsed.search = "";
+      parsed.hash = "";
+      return parsed.toString();
+    } catch {
+      return rawUrl;
+    }
+  }
+
+  for (const value of Array.isArray(caseRow?.source_urls) ? caseRow.source_urls : []) {
+    if (!sourceUrlUsesPriorityFeed(value)) {
+      continue;
+    }
+
+    try {
+      const parsed = new URL(String(value || "").trim());
+      parsed.search = "";
+      parsed.hash = "";
+      return parsed.toString();
+    } catch {
+      return String(value || "").trim();
+    }
+  }
+
+  return "";
+}
+
 function parseIsoDateMs(value) {
   const ms = Date.parse(String(value || ""));
   return Number.isFinite(ms) ? ms : null;
@@ -260,17 +291,21 @@ export class CatalogClient {
       return null;
     }
 
-    const pagePath = await this.lookupCasePath({
-      stateCode,
-      year: docket.year,
-      serial: docket.serial
-    });
+    let pageUrl = getKnownCatalogUrl(caseRow);
+    if (!pageUrl) {
+      const pagePath = await this.lookupCasePath({
+        stateCode,
+        year: docket.year,
+        serial: docket.serial
+      });
 
-    if (!pagePath) {
-      return null;
+      if (!pagePath) {
+        return null;
+      }
+
+      pageUrl = new URL(pagePath, `${this.baseUrl}/`).toString();
     }
 
-    const pageUrl = new URL(pagePath, `${this.baseUrl}/`).toString();
     const html = await this.fetchText(pageUrl);
     const payload = this.parseCasePage(html, pageUrl, {
       stateCode,
