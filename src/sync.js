@@ -1330,6 +1330,8 @@ export class CaseSyncService {
       return { enriched: false, reason: "not-found" };
     }
 
+    this.store.deleteDocketEntriesBySource(caseRow.id, "worldtro");
+
     const mergedRaw = {
       ...(caseRow.raw || {}),
       worldtro: {
@@ -1341,6 +1343,7 @@ export class CaseSyncService {
         stateCode: payload.stateCode,
         year: payload.year,
         serial: payload.serial,
+        matchQuality: payload.matchQuality || null,
         syncedAt: payload.syncedAt
       }
     };
@@ -1368,7 +1371,8 @@ export class CaseSyncService {
       recent_activity_summary: payload.entries[0]?.description || caseRow.recent_activity_summary,
       latest_docket_filed_at: payload.entries[0]?.filed_at || caseRow.latest_docket_filed_at,
       latest_docket_number: payload.entries[0]?.row_number || caseRow.latest_docket_number,
-      docket_count: Math.max(caseRow.docket_count || 0, payload.entries.length),
+      docket_count: payload.entries.length,
+      docket_count_exact: true,
       last_seen_at: new Date().toISOString(),
       last_synced_at: new Date().toISOString(),
       last_docket_sync_at: caseRow.last_docket_sync_at,

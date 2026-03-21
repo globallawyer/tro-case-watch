@@ -212,7 +212,7 @@ function formatShanghaiDateKey(value) {
 }
 
 function buildCaseView(row) {
-  const hydrated = hydrateCase(row);
+  const hydrated = applyAuthoritativeDocketPreference(hydrateCase(row));
   const insights = deriveCaseInsights(hydrated);
   return {
     ...hydrated,
@@ -262,6 +262,12 @@ function caseSourceRank(caseLike = {}) {
 }
 
 function compareCaseRowsForCanonicalChoice(left, right) {
+  const leftWorldtro = getWorldtroRowCount(left) > 0 ? 1 : 0;
+  const rightWorldtro = getWorldtroRowCount(right) > 0 ? 1 : 0;
+  if (leftWorldtro !== rightWorldtro) {
+    return rightWorldtro - leftWorldtro;
+  }
+
   const leftTroScore =
     (left.insights?.is_tro_case ? 4 : 0) +
     (left.insights?.is_schedule_a_case ? 3 : 0) +
@@ -372,28 +378,29 @@ function mergeDuplicateCaseGroup(group) {
     docket_count: Math.max(...ordered.map((item) => Number(item.docket_count || 0)), Number(canonical.docket_count || 0))
   };
 
-  merged.insights = deriveCaseInsights(merged);
-  merged._search_blob = normalizeText([
-    merged.case_name,
-    merged.case_name_zh,
-    merged.docket_number,
-    normalizeDocket(merged.docket_number),
-    merged.court_name,
-    merged.recent_activity_summary,
-    merged.recent_activity_summary_zh,
-    merged.insights?.brand_name,
-    merged.insights?.lead_law_firm,
-    ...(merged.plaintiffs || []),
-    ...(merged.defendants || [])
+  const displayMerged = applyAuthoritativeDocketPreference(merged, merged.entries);
+  displayMerged.insights = deriveCaseInsights(displayMerged);
+  displayMerged._search_blob = normalizeText([
+    displayMerged.case_name,
+    displayMerged.case_name_zh,
+    displayMerged.docket_number,
+    normalizeDocket(displayMerged.docket_number),
+    displayMerged.court_name,
+    displayMerged.recent_activity_summary,
+    displayMerged.recent_activity_summary_zh,
+    displayMerged.insights?.brand_name,
+    displayMerged.insights?.lead_law_firm,
+    ...(displayMerged.plaintiffs || []),
+    ...(displayMerged.defendants || [])
   ].join(" | "));
-  merged._label_blob = normalizeText([
-    merged.case_name,
-    merged.insights?.brand_name,
-    merged.insights?.lead_law_firm,
-    ...(merged.plaintiffs || []),
-    ...(merged.defendants || [])
+  displayMerged._label_blob = normalizeText([
+    displayMerged.case_name,
+    displayMerged.insights?.brand_name,
+    displayMerged.insights?.lead_law_firm,
+    ...(displayMerged.plaintiffs || []),
+    ...(displayMerged.defendants || [])
   ].join(" | "));
-  return merged;
+  return displayMerged;
 }
 
 function collapseDuplicateCases(rows) {
@@ -953,6 +960,63 @@ function compareEntriesForTimeline(left, right) {
   return Number(right.id || 0) - Number(left.id || 0);
 }
 
+function getWorldtroRowCount(caseLike = {}) {
+  return Math.max(0, Number(caseLike?.raw?.worldtro?.rowCount || 0));
+}
+
+function getWorldtroEntries(entries = []) {
+  return entries
+    .filter((entry) => String(entry?.primary_source || "") === "worldtro")
+    .sort(compareEntriesForTimeline);
+}
+
+function hasWorldtroAuthority(caseLike, entries = []) {
+  return getWorldtroRowCount(caseLike) > 0 || getWorldtroEntries(entries).length > 0;
+}
+
+function applyAuthoritativeDocketPreference(caseLike, entries = null) {
+  if (!caseLike) {
+    return caseLike;
+  }
+
+  const worldtroRowCount = getWorldtroRowCount(caseLike);
+  const worldtroEntries = Array.isArray(entries) ? getWorldtroEntries(entries) : null;
+  const hasWorldtroRecord = Array.isArray(entries)
+    ? hasWorldtroAuthority(caseLike, entries)
+    : worldtroRowCount > 0;
+
+  if (!hasWorldtroRecord) {
+    if (Array.isArray(entries)) {
+      return {
+        ...caseLike,
+        entries
+      };
+    }
+    return caseLike;
+  }
+
+  const newestEntry = worldtroEntries?.[0] || null;
+  const preferred = {
+    ...caseLike,
+    primary_source: "worldtro",
+    source_urls: mergeArraysNormalized(
+      ...(caseLike.source_urls ? [caseLike.source_urls] : []),
+      caseLike.raw?.worldtro?.url ? [[caseLike.raw.worldtro.url]] : []
+    ),
+    recent_activity_summary: newestEntry?.description || caseLike.recent_activity_summary,
+    latest_docket_filed_at: newestEntry?.filed_at || caseLike.latest_docket_filed_at,
+    latest_docket_number: newestEntry?.row_number || newestEntry?.document_number || newestEntry?.entry_number ||
+      (worldtroRowCount > 0 ? String(worldtroRowCount) : caseLike.latest_docket_number),
+    docket_count: worldtroEntries?.length || worldtroRowCount || Number(caseLike.docket_count || 0)
+  };
+
+  if (Array.isArray(entries)) {
+    preferred.entries = worldtroEntries;
+  }
+
+  return preferred;
+}
+
 function compareCaseActivityDesc(left, right) {
   return String(right || "").localeCompare(String(left || ""));
 }
@@ -1489,6 +1553,12 @@ export class Store {
         timestamp
       );
 
+    if (record.docket_count_exact === true) {
+      this.db
+        .prepare("UPDATE cases SET docket_count = ?, updated_at = ? WHERE source_case_key = ?")
+        .run(record.docket_count ?? 0, timestamp, record.source_case_key);
+    }
+
     this.invalidateCaseViews();
 
     return hydrateCase(
@@ -1516,6 +1586,13 @@ export class Store {
     this.db
       .prepare("UPDATE cases SET last_docket_sync_at = ?, updated_at = ? WHERE id = ?")
       .run(nowIso(), nowIso(), caseId);
+    this.invalidateCaseViews();
+  }
+
+  deleteDocketEntriesBySource(caseId, primarySource) {
+    this.db
+      .prepare("DELETE FROM docket_entries WHERE case_id = ? AND primary_source = ?")
+      .run(caseId, primarySource);
     this.invalidateCaseViews();
   }
 
@@ -1856,15 +1933,19 @@ export class Store {
       .map(hydrateEntry);
 
     const uniqueEntries = dedupeEntries(entries);
+    const displayEntries = hasWorldtroAuthority(canonicalRow, entries)
+      ? getWorldtroEntries(entries)
+      : uniqueEntries;
 
-    const detail = {
+    const detail = applyAuthoritativeDocketPreference({
       ...canonicalRow,
-      entries: uniqueEntries,
+      entries: displayEntries,
       insights: deriveCaseInsights({
         ...canonicalRow,
-        entries: uniqueEntries
+        entries: displayEntries
       })
-    };
+    }, displayEntries);
+    detail.insights = deriveCaseInsights(detail);
 
     this.caseDetailCache.set(cacheKey, {
       version: this.caseCacheVersion,

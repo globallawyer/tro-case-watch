@@ -229,9 +229,7 @@ export class WorldtroClient {
       serial: docket.serial
     });
 
-    if (!this.isPlausiblePayload(caseRow, payload)) {
-      return null;
-    }
+    payload.matchQuality = this.isPlausiblePayload(caseRow, payload) ? "plausible" : "unverified";
 
     return payload;
   }
