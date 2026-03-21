@@ -38,6 +38,85 @@ const DISTRICT_DIRECTION_MAP = {
   M: "Middle"
 };
 
+const STATE_CODE_TO_NAME = new Map([
+  ["AL", "alabama"],
+  ["AK", "alaska"],
+  ["AZ", "arizona"],
+  ["AR", "arkansas"],
+  ["CA", "california"],
+  ["CO", "colorado"],
+  ["CT", "connecticut"],
+  ["DC", "district of columbia"],
+  ["DE", "delaware"],
+  ["FL", "florida"],
+  ["GA", "georgia"],
+  ["HI", "hawaii"],
+  ["IA", "iowa"],
+  ["ID", "idaho"],
+  ["IL", "illinois"],
+  ["IN", "indiana"],
+  ["KS", "kansas"],
+  ["KY", "kentucky"],
+  ["LA", "louisiana"],
+  ["MA", "massachusetts"],
+  ["MD", "maryland"],
+  ["ME", "maine"],
+  ["MI", "michigan"],
+  ["MN", "minnesota"],
+  ["MO", "missouri"],
+  ["MS", "mississippi"],
+  ["MT", "montana"],
+  ["NC", "north carolina"],
+  ["ND", "north dakota"],
+  ["NE", "nebraska"],
+  ["NH", "new hampshire"],
+  ["NJ", "new jersey"],
+  ["NM", "new mexico"],
+  ["NV", "nevada"],
+  ["NY", "new york"],
+  ["OH", "ohio"],
+  ["OK", "oklahoma"],
+  ["OR", "oregon"],
+  ["PA", "pennsylvania"],
+  ["RI", "rhode island"],
+  ["SC", "south carolina"],
+  ["SD", "south dakota"],
+  ["TN", "tennessee"],
+  ["TX", "texas"],
+  ["UT", "utah"],
+  ["VA", "virginia"],
+  ["VT", "vermont"],
+  ["WA", "washington"],
+  ["WI", "wisconsin"],
+  ["WV", "west virginia"],
+  ["WY", "wyoming"]
+]);
+
+const WORLDTRO_LAW_FIRM_PATTERNS = [
+  { needle: /sriplaw/i, pattern: "sriplaw.com" },
+  { needle: /\bgbc\b|greer\s*burns/i, pattern: "gbc.law" },
+  { needle: /whitewood/i, pattern: "whitewoodlaw.com" },
+  { needle: /jiang|keith/i, pattern: "jiangip.com" }
+];
+
+const WORLDTRO_DISCOVERY_STOP_WORDS = new Set([
+  "and",
+  "the",
+  "llc",
+  "inc",
+  "ltd",
+  "co",
+  "company",
+  "corp",
+  "corporation",
+  "plaintiff",
+  "plaintiffs",
+  "defendant",
+  "defendants",
+  "et",
+  "al"
+]);
+
 function normalizeLookupText(value) {
   return normalizeText(value).replace(/[^\w]+/g, " ").replace(/\s+/g, " ").trim();
 }
@@ -61,6 +140,195 @@ function normalizeCourtLookupText(value) {
       .replace(/\bDistrict Court for the\b/gi, "")
       .replace(/\bUnited States\b/gi, "")
   );
+}
+
+function normalizeWorldtroCaseUrl(value) {
+  const raw = String(value || "").trim();
+  if (!raw || !/worldtro\.com/i.test(raw)) {
+    return "";
+  }
+
+  try {
+    const url = new URL(raw);
+    url.search = "";
+    url.hash = "";
+    return url.toString();
+  } catch {
+    return raw;
+  }
+}
+
+function deriveStateCodeFromCase(caseLike = {}) {
+  const courtId = String(caseLike.court_id || "").trim().toLowerCase();
+  if (courtId.length >= 2 && /^[a-z]{2}/.test(courtId)) {
+    return courtId.slice(0, 2).toUpperCase();
+  }
+
+  const normalizedCourt = normalizeLookupText(caseLike.court_name);
+  for (const [code, stateName] of STATE_CODE_TO_NAME) {
+    if (normalizedCourt.includes(stateName)) {
+      return code;
+    }
+  }
+
+  return "";
+}
+
+function detectWorldtroLawFirmPattern(value) {
+  const text = String(value || "").trim();
+  if (!text) {
+    return "";
+  }
+
+  const match = WORLDTRO_LAW_FIRM_PATTERNS.find((item) => item.needle.test(text));
+  return match?.pattern || "";
+}
+
+function extractDistinctiveTokens(value, minLength = 3) {
+  return [...new Set(
+    normalizeLookupText(value)
+      .split(" ")
+      .map((item) => item.trim())
+      .filter((item) => item.length >= minLength && !WORLDTRO_DISCOVERY_STOP_WORDS.has(item))
+  )];
+}
+
+function countTokenHits(tokens, haystack) {
+  const text = normalizeLookupText(haystack);
+  if (!text) {
+    return 0;
+  }
+
+  return tokens.filter((token) => text.includes(token)).length;
+}
+
+function scoreWorldtroDiscoveryCandidate(item, row) {
+  let score = 0;
+  const normalizedWorldtroUrl = normalizeWorldtroCaseUrl(item.caseUrl);
+  const candidateUrls = asArray(row.source_urls)
+    .map(normalizeWorldtroCaseUrl)
+    .filter(Boolean);
+
+  if (normalizedWorldtroUrl && candidateUrls.includes(normalizedWorldtroUrl)) {
+    score += 1000;
+  }
+
+  if (normalizeWorldtroCaseUrl(row.raw?.worldtro?.url) === normalizedWorldtroUrl) {
+    score += 1000;
+  }
+
+  const candidateStateCode = deriveStateCodeFromCase(row);
+  if (candidateStateCode && item.stateCode) {
+    score += candidateStateCode === item.stateCode ? 260 : -260;
+  }
+
+  if (courtNamesLikelyMatch(item.courtName, row.court_name)) {
+    score += 80;
+  }
+
+  const candidateText = [
+    row.case_name,
+    ...(row.plaintiffs || []),
+    ...(row.defendants || []),
+    row.insights?.brand_name,
+    row.insights?.lead_law_firm
+  ].join(" ");
+  const plaintiffTokens = extractDistinctiveTokens(item.plaintiff, 3);
+  const brandTokens = extractDistinctiveTokens(item.brand, 4);
+  const plaintiffHitCount = countTokenHits(plaintiffTokens, candidateText);
+  const brandHitCount = countTokenHits(brandTokens, candidateText);
+  score += plaintiffHitCount * 45;
+  score += brandHitCount * 35;
+
+  const lawFirmPattern = detectWorldtroLawFirmPattern(item.lawFirm);
+  if (lawFirmPattern && asArray(row.source_urls).some((url) => String(url || "").includes(lawFirmPattern))) {
+    score += 200;
+  }
+
+  if (item.lawFirm && normalizeLookupText(row.insights?.lead_law_firm).includes(normalizeLookupText(item.lawFirm))) {
+    score += 140;
+  }
+
+  if (row.insights?.is_tro_case || row.insights?.is_schedule_a_case || row.insights?.is_seller_case) {
+    score += 40;
+  }
+
+  if (row.primary_source === "worldtro") {
+    score += 120;
+  }
+
+  if (Number(row.docket_count || 0) > 0) {
+    score += Math.min(30, Number(row.docket_count || 0));
+  }
+
+  return score;
+}
+
+function buildWorldtroDiscoveryIndex(rows = []) {
+  const byDocket = new Map();
+  const byWorldtroUrl = new Map();
+
+  for (const row of rows) {
+    const docketKey = normalizeDocket(row.docket_number);
+    if (docketKey) {
+      if (!byDocket.has(docketKey)) {
+        byDocket.set(docketKey, []);
+      }
+      byDocket.get(docketKey).push(row);
+    }
+
+    const urls = [
+      ...asArray(row.source_urls),
+      row.raw?.worldtro?.url
+    ]
+      .map(normalizeWorldtroCaseUrl)
+      .filter(Boolean);
+
+    for (const url of urls) {
+      if (!byWorldtroUrl.has(url)) {
+        byWorldtroUrl.set(url, row);
+      }
+    }
+  }
+
+  return {
+    byDocket,
+    byWorldtroUrl
+  };
+}
+
+function findBestWorldtroDiscoveryCase(item, index) {
+  const normalizedUrl = normalizeWorldtroCaseUrl(item.caseUrl);
+  if (normalizedUrl && index.byWorldtroUrl.has(normalizedUrl)) {
+    return index.byWorldtroUrl.get(normalizedUrl);
+  }
+
+  const docketKey = normalizeDocket(item.docketNumber);
+  if (!docketKey) {
+    return null;
+  }
+
+  const candidates = index.byDocket.get(docketKey) || [];
+  if (!candidates.length) {
+    return null;
+  }
+
+  const scored = candidates
+    .map((row) => ({ row, score: scoreWorldtroDiscoveryCandidate(item, row) }))
+    .sort((left, right) => {
+      if (left.score !== right.score) {
+        return right.score - left.score;
+      }
+
+      return Number(right.row.docket_count || 0) - Number(left.row.docket_count || 0);
+    });
+
+  const best = scored[0];
+  if (!best || best.score < 220) {
+    return null;
+  }
+
+  return best.row;
 }
 
 function courtNamesLikelyMatch(expected, actual) {
@@ -1185,6 +1453,8 @@ export class CaseSyncService {
         };
       }
 
+      const discoveryResult = await this.syncWorldtroDiscovery();
+
       const maxCases =
         mode === "backfill" ? this.config.worldtro.backfillMaxCasesPerRun : this.config.worldtro.maxCasesPerRun;
       const candidates = this.store.getCasesNeedingWorldtroSync(
@@ -1208,12 +1478,116 @@ export class CaseSyncService {
       return {
         syncedCases,
         note: syncedCases
-          ? `WorldTRO 本轮补齐 ${syncedCases} 个案件的公开时间线${failedCases ? `，另有 ${failedCases} 个案件待重试` : ""}。`
+          ? `WorldTRO 本轮${discoveryResult.skipped ? "复用目录缓存" : `登记 ${discoveryResult.discoveredCases} 个公开案件`}，并补齐 ${syncedCases} 个案件的公开时间线${failedCases ? `，另有 ${failedCases} 个案件待重试` : ""}。`
           : failedCases
-            ? `WorldTRO 本轮没有补齐成功，${failedCases} 个案件待重试。`
-            : "WorldTRO 本轮没有待补源案件。"
+            ? `WorldTRO 本轮${discoveryResult.skipped ? "复用目录缓存" : `登记 ${discoveryResult.discoveredCases} 个公开案件`}，但没有补齐成功，${failedCases} 个案件待重试。`
+            : discoveryResult.discoveredCases
+              ? `WorldTRO 本轮新增登记 ${discoveryResult.discoveredCases} 个公开案件，当前没有待补源案件。`
+              : discoveryResult.skipped
+                ? `WorldTRO 目录缓存仍有效（共 ${discoveryResult.totalCatalogCases || 0} 个公开案件），当前没有待补源案件。`
+                : "WorldTRO 本轮没有待补源案件。"
       };
     });
+  }
+
+  async syncWorldtroDiscovery() {
+    if (!this.worldtro.enabled) {
+      return { discoveredCases: 0 };
+    }
+
+    const checkpointKey = "worldtro:discovery";
+    const staleAfterMs = Number(this.config.worldtro.discoveryStaleAfterHours || 0) * 60 * 60 * 1000;
+    const checkpoint = this.store.getCheckpoint(checkpointKey) || {};
+    const lastCatalogSyncMs = checkpoint.lastSyncedAt ? Date.parse(checkpoint.lastSyncedAt) : 0;
+    if (staleAfterMs > 0 && lastCatalogSyncMs && Date.now() - lastCatalogSyncMs < staleAfterMs) {
+      return {
+        discoveredCases: 0,
+        attachedCases: Number(checkpoint.attachedCases || 0),
+        createdCases: Number(checkpoint.createdCases || 0),
+        totalCatalogCases: Number(checkpoint.totalCatalogCases || 0),
+        skipped: true
+      };
+    }
+
+    const listings = await this.worldtro.discoverCases();
+    const discoveryIndex = buildWorldtroDiscoveryIndex(this.store.getHydratedCases(this.config.sync.startDate));
+    let discoveredCases = 0;
+    let attachedCases = 0;
+    let createdCases = 0;
+
+    for (const item of listings) {
+      const existingCase = findBestWorldtroDiscoveryCase(item, discoveryIndex) || null;
+      const timestamp = new Date().toISOString();
+      const sourceCaseKey = existingCase?.source_case_key || `worldtro:${item.stateCode}:${item.year}:${item.serial}`;
+      const savedCase = this.store.upsertCase({
+        source_case_key: sourceCaseKey,
+        primary_source: existingCase?.primary_source || "worldtro",
+        source_case_id: existingCase?.source_case_id || item.pageId || `${item.stateCode}-${item.year}-${item.serial}`,
+        courtlistener_docket_id: existingCase?.courtlistener_docket_id ?? null,
+        pacer_case_id: existingCase?.pacer_case_id ?? null,
+        court_id: existingCase?.court_id || item.stateCode.toLowerCase() || null,
+        court_name: existingCase?.court_name || item.courtName || null,
+        case_name: existingCase?.case_name || item.plaintiff || null,
+        docket_number: existingCase?.docket_number || item.docketNumber,
+        date_filed: existingCase?.date_filed || item.dateFiled || null,
+        date_terminated: existingCase?.date_terminated || null,
+        cause: existingCase?.cause || null,
+        nature_of_suit: existingCase?.nature_of_suit || null,
+        status: existingCase?.status || "open",
+        tags_marker: buildTagsMarker([...(existingCase?.tags || []), "seller_tro", "tro"]),
+        docket_url: item.caseUrl || existingCase?.docket_url || null,
+        source_urls: [...(existingCase?.source_urls || []), item.caseUrl].filter(Boolean),
+        plaintiffs: existingCase?.plaintiffs?.length ? existingCase.plaintiffs : (item.plaintiff ? [item.plaintiff] : []),
+        defendants: existingCase?.defendants || [],
+        recent_activity_summary: existingCase?.recent_activity_summary || (item.brand ? `WorldTRO 案件目录：${item.brand}` : "WorldTRO 案件目录"),
+        latest_docket_filed_at: existingCase?.latest_docket_filed_at || item.dateFiled || null,
+        latest_docket_number: existingCase?.latest_docket_number || null,
+        docket_count: existingCase?.docket_count || 0,
+        last_seen_at: timestamp,
+        last_synced_at: timestamp,
+        last_docket_sync_at: existingCase?.last_docket_sync_at || null,
+        raw: {
+          ...(existingCase?.raw || {}),
+          worldtro: {
+            ...(existingCase?.raw?.worldtro || {}),
+            url: item.caseUrl,
+            stateCode: item.stateCode,
+            year: item.year,
+            serial: item.serial,
+            lawFirm: item.lawFirm || existingCase?.raw?.worldtro?.lawFirm || null,
+            brand: item.brand || existingCase?.raw?.worldtro?.brand || null,
+            catalogSeenAt: timestamp,
+            catalogPageId: item.pageId || null
+          }
+        }
+      });
+
+      if (!existingCase || !existingCase.source_urls?.some((url) => String(url).includes("worldtro.com"))) {
+        discoveredCases += 1;
+        if (existingCase) {
+          attachedCases += 1;
+        } else {
+          createdCases += 1;
+        }
+      }
+
+      void savedCase;
+    }
+
+    this.store.saveCheckpoint(checkpointKey, {
+      lastSyncedAt: new Date().toISOString(),
+      totalCatalogCases: listings.length,
+      discoveredCases,
+      attachedCases,
+      createdCases
+    });
+
+    return {
+      discoveredCases,
+      attachedCases,
+      createdCases,
+      totalCatalogCases: listings.length
+    };
   }
 
   async syncPacerMonitorRecent(mode = "recent") {

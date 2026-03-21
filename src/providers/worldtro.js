@@ -22,6 +22,19 @@ function decodeHtml(value) {
     .replace(/&#39;/gi, "'");
 }
 
+function absoluteUrl(value, baseUrl) {
+  const raw = String(value || "").trim();
+  if (!raw) {
+    return null;
+  }
+
+  try {
+    return new URL(raw, baseUrl).toString();
+  } catch {
+    return null;
+  }
+}
+
 function parseDocket(value) {
   const match = String(value || "").match(/(?:\d+:)?(\d{2})-cv-(\d{3,6})/i);
   if (!match) {
@@ -97,6 +110,8 @@ const STATE_NAMES = [
   ["WY", "wyoming"]
 ];
 
+const STATE_CODE_TO_NAME = new Map(STATE_NAMES);
+
 function deriveStateCode(caseRow) {
   const courtId = String(caseRow.court_id || "").toLowerCase();
   if (COURT_STATE_OVERRIDES.has(courtId)) {
@@ -124,6 +139,37 @@ function parseDate(value) {
   }
 
   return `${match[3]}-${match[1]}-${match[2]}`;
+}
+
+function buildShortDocket(year, serial) {
+  const normalizedYear = String(year || "").replace(/[^\d]/g, "");
+  const normalizedSerial = String(serial || "").replace(/[^\d]/g, "");
+  if (normalizedYear.length !== 4 || !normalizedSerial) {
+    return "";
+  }
+
+  return `${normalizedYear.slice(-2)}-cv-${normalizedSerial}`;
+}
+
+function parseWorldtroCasePath(value) {
+  const match = String(value || "").match(/case-([A-Z]{2})-(\d{4})-cv-(\d{3,6})\.html/i);
+  if (!match) {
+    return null;
+  }
+
+  const stateCode = String(match[1] || "").toUpperCase();
+  const year = String(match[2] || "");
+  const serial = String(match[3] || "");
+
+  return {
+    stateCode,
+    year,
+    serial,
+    docketNumber: buildShortDocket(year, serial),
+    courtName: STATE_CODE_TO_NAME.has(stateCode)
+      ? STATE_CODE_TO_NAME.get(stateCode).replace(/\b\w/g, (letter) => letter.toUpperCase())
+      : stateCode
+  };
 }
 
 function parseIsoDateMs(value) {
@@ -177,6 +223,7 @@ export class WorldtroClient {
     this.minIntervalMs = Number(config.minIntervalMs || 1500);
     this.timeoutMs = Number(config.timeoutMs || 15000);
     this.maxCasesPerRun = Number(config.maxCasesPerRun || 3);
+    this.discoveryPages = Array.isArray(config.discoveryPages) ? config.discoveryPages : [];
     this.lastRequestAt = 0;
   }
 
@@ -259,6 +306,77 @@ export class WorldtroClient {
     }
 
     return `/case-${stateCode}-${year}-cv-${serial}.html`;
+  }
+
+  async discoverCases() {
+    if (!this.enabled || !this.discoveryPages.length) {
+      return [];
+    }
+
+    const listings = [];
+    const seenUrls = new Set();
+
+    for (const pagePath of this.discoveryPages) {
+      const pageUrl = new URL(pagePath, `${this.baseUrl}/`).toString();
+      const html = await this.fetchText(pageUrl);
+      const items = this.parseListingPage(html, pageUrl);
+      for (const item of items) {
+        if (!item.caseUrl || seenUrls.has(item.caseUrl)) {
+          continue;
+        }
+
+        seenUrls.add(item.caseUrl);
+        listings.push(item);
+      }
+    }
+
+    return listings;
+  }
+
+  parseListingPage(html, pageUrl) {
+    const rows = [];
+    const tableRows = String(html || "").matchAll(/<tr>([\s\S]*?)<\/tr>/gi);
+
+    for (const match of tableRows) {
+      const rowHtml = match[1];
+      const columns = [...rowHtml.matchAll(/<td[^>]*>([\s\S]*?)<\/td>/gi)].map((item) => item[1]);
+      if (columns.length < 6) {
+        continue;
+      }
+
+      const linkMatch = columns[1].match(/href=['"]([^'"]*case-[A-Z]{2}-\d{4}-cv-\d{3,6}\.html[^'"]*)['"][^>]*?(?:data-id=['"]([^'"]+)['"])?/i);
+      const rawUrl = linkMatch?.[1] || "";
+      const pageId = linkMatch?.[2] || null;
+      const caseUrl = absoluteUrl(rawUrl, pageUrl);
+      const parsedPath = parseWorldtroCasePath(caseUrl);
+      if (!caseUrl || !parsedPath?.docketNumber) {
+        continue;
+      }
+
+      const filedAt = parseDate(cleanText(columns[0]));
+      const plaintiff = cleanText(columns[2]);
+      const stateCode = cleanText(columns[3]).toUpperCase() || parsedPath.stateCode;
+      const lawFirm = cleanText(columns[4]);
+      const brand = cleanText(columns[5]);
+
+      rows.push({
+        caseUrl,
+        pageId,
+        docketNumber: parsedPath.docketNumber,
+        stateCode,
+        courtName: STATE_CODE_TO_NAME.has(stateCode)
+          ? STATE_CODE_TO_NAME.get(stateCode).replace(/\b\w/g, (letter) => letter.toUpperCase())
+          : parsedPath.courtName,
+        year: parsedPath.year,
+        serial: parsedPath.serial,
+        dateFiled: filedAt,
+        plaintiff,
+        lawFirm,
+        brand
+      });
+    }
+
+    return rows;
   }
 
   parseCasePage(html, pageUrl, meta) {

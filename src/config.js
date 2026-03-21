@@ -129,10 +129,17 @@ export const config = {
     enabled: envBool("WORLDTRO_ENABLED", true),
     baseUrl: env("WORLDTRO_BASE_URL", "https://worldtro.com"),
     minIntervalMs: envInt("WORLDTRO_MIN_INTERVAL_MS", 1500),
-    timeoutMs: envInt("WORLDTRO_TIMEOUT_MS", 15000),
-    maxCasesPerRun: envInt("WORLDTRO_MAX_CASES_PER_RUN", 3),
-    backfillMaxCasesPerRun: envInt("WORLDTRO_BACKFILL_MAX_CASES_PER_RUN", 30),
-    staleAfterHours: envInt("WORLDTRO_STALE_AFTER_HOURS", 12)
+    timeoutMs: envInt("WORLDTRO_TIMEOUT_MS", 30000),
+    maxCasesPerRun: envInt("WORLDTRO_MAX_CASES_PER_RUN", 8),
+    backfillMaxCasesPerRun: envInt("WORLDTRO_BACKFILL_MAX_CASES_PER_RUN", 120),
+    staleAfterHours: envInt("WORLDTRO_STALE_AFTER_HOURS", 12),
+    discoveryStaleAfterHours: envInt("WORLDTRO_DISCOVERY_STALE_AFTER_HOURS", 6),
+    discoveryPages: envList("WORLDTRO_DISCOVERY_PAGES", [
+      "/2026/",
+      "/2025nianzuixintroanjian/",
+      "/2024niantroanjian/",
+      "/2023niantroanjian/"
+    ])
   },
   courtFeeds: {
     enabled: envBool("COURT_FEEDS_ENABLED", true),
