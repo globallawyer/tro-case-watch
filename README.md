@@ -12,19 +12,19 @@
 一个面向跨境电商 TRO / Schedule A 场景的案件监控站点原型。当前版本采用双源策略：
 
 - `CourtListener` 负责全国发现、回填和低成本实时更新
-- `WorldTRO` 公开页面负责补品牌、原告律所和更完整的卖家时间线
+- `优先目录` 公开页面负责补品牌、原告律所和更完整的卖家时间线
 
 当前版本已经实现：
 
 - 以 `CourtListener search` 为主数据源，检索 `2025-01-01` 以来的 TRO / Schedule A 案件
-- 以 `WorldTRO` 公开页面为补充数据源，补品牌、原告律所、公开 docket 时间线
+- 以 `优先目录` 公开页面为补充数据源，补品牌、原告律所、公开 docket 时间线
 - 本地 `SQLite` 去重、缓存、分页查询
 - 前端案件列表、详情页、docket 时间线
 - 中文翻译缓存，避免重复翻译同一段案件标题或 docket 文本
 - `PACER` 预算闸门和 `PACERMonitor` / `PACER` 适配器占位
 - 启动即同步，并支持每 10 分钟轮询
 - 支持后台持续 `backfill`，逐步补齐 2025 年以来历史案件
-- 支持 `WorldTRO` 单案懒加载补源，以及批量 `worldtro backfill`
+- 支持 `优先目录` 单案懒加载补源，以及批量目录回补
 
 ## 当前实测状态
 
@@ -189,7 +189,7 @@ docker compose -f deploy/gcp/compose.yml logs -f caddy
 可用按钮包括：
 
 - `跑 Recent`
-- `跑 WorldTRO`
+- `跑 优先目录`
 - `跑 PACERMonitor`
 - `跑法院源`
 - `跑律所源`
@@ -197,7 +197,7 @@ docker compose -f deploy/gcp/compose.yml logs -f caddy
 页面还会额外显示：
 
 - 当前明显没补满的案件列表
-- `WorldTRO / PACERMonitor` 哪一层还缺
+- `优先目录 / PACERMonitor` 哪一层还缺
 - `PACERMonitor challenge` 的案件数量
 - 一个“强制补首个命中案”的单案入口
 
@@ -317,14 +317,14 @@ docker compose -f deploy/oci/compose.yml logs -f caddy
 
 - `COURTLISTENER_ENABLE_DOCKET_SYNC=true`
   - 只有在你确认 token 有 `dockets` / `docket-entries` 访问权限时再打开。
-- `WORLDTRO_ENABLED=true`
+- `PRIORITY_FEED_ENABLED=true`
   - 默认已打开，使用公开页面补源。
-- `WORLDTRO_MIN_INTERVAL_MS=1500`
+- `PRIORITY_FEED_MIN_INTERVAL_MS=1500`
   - 两次公开页面请求的最小间隔，避免对第三方站点造成太大压力。
-- `WORLDTRO_TIMEOUT_MS=15000`
+- `PRIORITY_FEED_TIMEOUT_MS=15000`
   - 单次公开页面请求超时，避免批量补源卡死。
-- `WORLDTRO_MAX_CASES_PER_RUN=3`
-- `WORLDTRO_BACKFILL_MAX_CASES_PER_RUN=12`
+- `PRIORITY_FEED_MAX_CASES_PER_RUN=3`
+- `PRIORITY_FEED_BACKFILL_MAX_CASES_PER_RUN=12`
   - 控制每轮公开补源的案件数。
 - `PACERMONITOR_ENABLED=true`
 - `PACERMONITOR_API_BASE_URL=...`
@@ -336,11 +336,11 @@ docker compose -f deploy/oci/compose.yml logs -f caddy
 ## 已知边界
 
 - `CourtListener search` 是当前最稳的全国发现入口。
-- `WorldTRO` 不是官方 API，而是公开 HTML 页面补源。
+- `优先目录` 不是官方 API，而是公开 HTML 页面补源。
 - `CourtListener dockets` / `docket-entries` 不是所有账户都能直接拿到。
 - `PACERMonitor` 没有公开稳定文档时，不建议直接猜接口。
 - 直接从 `PACER / CM-ECF` 自动化全国轮询，费用和维护风险都很高，所以这版默认不打开。
-- `WorldTRO` 如果改版 HTML 结构，解析器需要跟着更新。
+- `优先目录` 如果改版 HTML 结构，解析器需要跟着更新。
 
 ## 常用命令
 
@@ -348,11 +348,11 @@ docker compose -f deploy/oci/compose.yml logs -f caddy
 npm start
 npm run sync:recent
 npm run sync:backfill
-npm run sync:worldtro
+npm run sync:catalog
 ```
 
-- `sync:worldtro`
-  - 单独跑一轮 `WorldTRO` 历史补源，不动 PACER。
+- `sync:catalog`
+  - 单独跑一轮 `优先目录` 历史补源，不动 PACER。
 
 ## 我建议你准备的资源
 

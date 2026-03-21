@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { PRIORITY_FEED_BASE_URL, buildLegacyPriorityFeedEnvKey } from "./priority-feed.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(__dirname, "..");
@@ -55,6 +56,39 @@ function envFloat(name, fallback) {
 
 function envList(name, fallback = []) {
   const value = env(name, "");
+  if (!String(value || "").trim()) {
+    return [...fallback];
+  }
+
+  return String(value)
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function envAny(names = [], fallback) {
+  for (const name of names) {
+    const value = process.env[name];
+    if (value !== undefined && value !== "") {
+      return value;
+    }
+  }
+
+  return fallback;
+}
+
+function envAnyBool(names, fallback) {
+  const value = envAny(names, String(fallback));
+  return ["1", "true", "yes", "on"].includes(String(value).toLowerCase());
+}
+
+function envAnyInt(names, fallback) {
+  const value = Number.parseInt(envAny(names, String(fallback)), 10);
+  return Number.isFinite(value) ? value : fallback;
+}
+
+function envAnyList(names, fallback = []) {
+  const value = envAny(names, "");
   if (!String(value || "").trim()) {
     return [...fallback];
   }
@@ -125,16 +159,22 @@ export const config = {
     docketMaxCasesPerRun: envInt("COURTLISTENER_DOCKET_MAX_CASES_PER_RUN", 8),
     docketBackfillMaxCasesPerRun: envInt("COURTLISTENER_DOCKET_BACKFILL_MAX_CASES_PER_RUN", 40)
   },
-  worldtro: {
-    enabled: envBool("WORLDTRO_ENABLED", true),
-    baseUrl: env("WORLDTRO_BASE_URL", "https://worldtro.com"),
-    minIntervalMs: envInt("WORLDTRO_MIN_INTERVAL_MS", 1500),
-    timeoutMs: envInt("WORLDTRO_TIMEOUT_MS", 30000),
-    maxCasesPerRun: envInt("WORLDTRO_MAX_CASES_PER_RUN", 8),
-    backfillMaxCasesPerRun: envInt("WORLDTRO_BACKFILL_MAX_CASES_PER_RUN", 120),
-    staleAfterHours: envInt("WORLDTRO_STALE_AFTER_HOURS", 12),
-    discoveryStaleAfterHours: envInt("WORLDTRO_DISCOVERY_STALE_AFTER_HOURS", 6),
-    discoveryPages: envList("WORLDTRO_DISCOVERY_PAGES", [
+  priorityFeed: {
+    enabled: envAnyBool(["PRIORITY_FEED_ENABLED", buildLegacyPriorityFeedEnvKey("ENABLED")], true),
+    baseUrl: envAny(["PRIORITY_FEED_BASE_URL", buildLegacyPriorityFeedEnvKey("BASE_URL")], PRIORITY_FEED_BASE_URL),
+    minIntervalMs: envAnyInt(["PRIORITY_FEED_MIN_INTERVAL_MS", buildLegacyPriorityFeedEnvKey("MIN_INTERVAL_MS")], 1500),
+    timeoutMs: envAnyInt(["PRIORITY_FEED_TIMEOUT_MS", buildLegacyPriorityFeedEnvKey("TIMEOUT_MS")], 30000),
+    maxCasesPerRun: envAnyInt(["PRIORITY_FEED_MAX_CASES_PER_RUN", buildLegacyPriorityFeedEnvKey("MAX_CASES_PER_RUN")], 8),
+    backfillMaxCasesPerRun: envAnyInt(
+      ["PRIORITY_FEED_BACKFILL_MAX_CASES_PER_RUN", buildLegacyPriorityFeedEnvKey("BACKFILL_MAX_CASES_PER_RUN")],
+      120
+    ),
+    staleAfterHours: envAnyInt(["PRIORITY_FEED_STALE_AFTER_HOURS", buildLegacyPriorityFeedEnvKey("STALE_AFTER_HOURS")], 12),
+    discoveryStaleAfterHours: envAnyInt(
+      ["PRIORITY_FEED_DISCOVERY_STALE_AFTER_HOURS", buildLegacyPriorityFeedEnvKey("DISCOVERY_STALE_AFTER_HOURS")],
+      6
+    ),
+    discoveryPages: envAnyList(["PRIORITY_FEED_DISCOVERY_PAGES", buildLegacyPriorityFeedEnvKey("DISCOVERY_PAGES")], [
       "/2026/",
       "/2025nianzuixintroanjian/",
       "/2024niantroanjian/",

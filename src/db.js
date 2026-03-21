@@ -3,6 +3,20 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { deriveCaseInsights, normalizeDocket, normalizeText } from "./insights.js";
 import { buildTagsMarker } from "./queries.js";
+import {
+  PRIORITY_FEED_ENTRY_SOURCE,
+  PRIORITY_FEED_HOST,
+  PRIORITY_FEED_LEGACY_RAW_KEY,
+  PRIORITY_FEED_MODERN_RAW_KEY,
+  PRIORITY_FEED_PROVIDER_KEY,
+  caseHasPriorityFeedUrl,
+  getPriorityFeedRaw,
+  getPriorityFeedRowCount as getPriorityFeedMetadataRowCount,
+  getPriorityFeedSyncedAt,
+  isPriorityFeedMissing,
+  isPriorityFeedPrimarySource,
+  sourceUrlUsesPriorityFeed
+} from "./priority-feed.js";
 
 function nowIso() {
   return new Date().toISOString();
@@ -37,7 +51,7 @@ function normalizeSourceUrl(value) {
   try {
     const url = new URL(raw);
     if (
-      url.hostname.includes("worldtro.com") ||
+      sourceUrlUsesPriorityFeed(url.hostname) ||
       url.hostname.includes("pacermonitor.com") ||
       url.hostname.includes("sriplaw.com") ||
       url.hostname.includes("gbc.law") ||
@@ -191,7 +205,7 @@ function buildCanonicalCaseGroupKey(caseLike) {
   return `${courtKey}|${docketKey}`;
 }
 
-function buildWorldtroTagClause() {
+function buildPriorityFeedTagClause() {
   return "(tags_marker LIKE '%|seller_tro|%' OR tags_marker LIKE '%|tro|%' OR tags_marker LIKE '%|schedule_a|%')";
 }
 
@@ -201,6 +215,10 @@ const TRACKED_LAW_FIRM_SOURCE_PATTERNS = [
   "whitewoodlaw.com",
   "jiangip.com"
 ];
+
+const PRIORITY_FEED_URL_CLAUSE = `source_urls_json LIKE '%${PRIORITY_FEED_HOST}%'`;
+const PRIORITY_FEED_RAW_CLAUSE =
+  `(raw_json LIKE '%"${PRIORITY_FEED_MODERN_RAW_KEY}"%' OR raw_json LIKE '%"${PRIORITY_FEED_LEGACY_RAW_KEY}"%')`;
 
 function buildTrackedLawFirmSourceClause(columnName = "source_urls_json") {
   return `(${TRACKED_LAW_FIRM_SOURCE_PATTERNS.map((pattern) => `${columnName} LIKE '%${pattern}%'`).join(" OR ")})`;
@@ -271,7 +289,7 @@ function caseSourceRank(caseLike = {}) {
     case "sriplaw":
     case "gbc":
       return 6;
-    case "worldtro":
+    case PRIORITY_FEED_ENTRY_SOURCE:
       return 5;
     case "courtfeed":
       return 4;
@@ -285,10 +303,10 @@ function caseSourceRank(caseLike = {}) {
 }
 
 function compareCaseRowsForCanonicalChoice(left, right) {
-  const leftWorldtro = getWorldtroRowCount(left) > 0 ? 1 : 0;
-  const rightWorldtro = getWorldtroRowCount(right) > 0 ? 1 : 0;
-  if (leftWorldtro !== rightWorldtro) {
-    return rightWorldtro - leftWorldtro;
+  const leftPriorityFeed = getPriorityFeedRowCount(left) > 0 ? 1 : 0;
+  const rightPriorityFeed = getPriorityFeedRowCount(right) > 0 ? 1 : 0;
+  if (leftPriorityFeed !== rightPriorityFeed) {
+    return rightPriorityFeed - leftPriorityFeed;
   }
 
   const leftTroScore =
@@ -814,8 +832,8 @@ function areSemanticallyDuplicateEntries(left, right, familyCounts = new Map()) 
 
   const crossSource = entrySourcesDiffer(left, right);
   const semanticEligible = crossSource && (
-    String(left?.primary_source || "") === "worldtro" ||
-    String(right?.primary_source || "") === "worldtro"
+    isPriorityFeedPrimarySource(left?.primary_source) ||
+    isPriorityFeedPrimarySource(right?.primary_source)
   );
   if (!semanticEligible) {
     return false;
@@ -869,8 +887,8 @@ function normalizedEntryOrderKey(entry) {
     return "";
   }
 
-  if (String(entry?.primary_source || "") === "worldtro") {
-    return `worldtro:${normalized}`;
+  if (isPriorityFeedPrimarySource(entry?.primary_source)) {
+    return `priority:${normalized}`;
   }
 
   return normalized;
@@ -903,7 +921,7 @@ function entrySourceRank(entry) {
     return 3;
   }
 
-  if (entry.primary_source === "worldtro") {
+  if (isPriorityFeedPrimarySource(entry.primary_source)) {
     return 2;
   }
 
@@ -983,15 +1001,15 @@ function compareEntriesForTimeline(left, right) {
   return Number(right.id || 0) - Number(left.id || 0);
 }
 
-function getWorldtroRowCount(caseLike = {}) {
-  return Math.max(0, Number(caseLike?.raw?.worldtro?.rowCount || 0));
+function getPriorityFeedRowCount(caseLike = {}) {
+  return getPriorityFeedMetadataRowCount(caseLike);
 }
 
-function getWorldtroEntries(entries = []) {
+function getPriorityFeedEntries(entries = []) {
   const deduped = new Map();
 
   for (const entry of entries
-    .filter((entry) => String(entry?.primary_source || "") === "worldtro")
+    .filter((entry) => isPriorityFeedPrimarySource(entry?.primary_source))
     .sort(compareEntriesForTimeline)) {
     const signature = [
       normalizeOrderText(entry?.document_number) || normalizeOrderText(entry?.entry_number) || "",
@@ -1007,8 +1025,8 @@ function getWorldtroEntries(entries = []) {
   return [...deduped.values()].sort(compareEntriesForTimeline);
 }
 
-function hasWorldtroAuthority(caseLike, entries = []) {
-  return getWorldtroRowCount(caseLike) > 0 || getWorldtroEntries(entries).length > 0;
+function hasPriorityFeedAuthority(caseLike, entries = []) {
+  return getPriorityFeedRowCount(caseLike) > 0 || getPriorityFeedEntries(entries).length > 0;
 }
 
 function applyAuthoritativeDocketPreference(caseLike, entries = null) {
@@ -1016,13 +1034,13 @@ function applyAuthoritativeDocketPreference(caseLike, entries = null) {
     return caseLike;
   }
 
-  const worldtroRowCount = getWorldtroRowCount(caseLike);
-  const worldtroEntries = Array.isArray(entries) ? getWorldtroEntries(entries) : null;
-  const hasWorldtroRecord = Array.isArray(entries)
-    ? hasWorldtroAuthority(caseLike, entries)
-    : worldtroRowCount > 0;
+  const priorityFeedRowCount = getPriorityFeedRowCount(caseLike);
+  const priorityFeedEntries = Array.isArray(entries) ? getPriorityFeedEntries(entries) : null;
+  const hasPriorityFeedRecord = Array.isArray(entries)
+    ? hasPriorityFeedAuthority(caseLike, entries)
+    : priorityFeedRowCount > 0;
 
-  if (!hasWorldtroRecord) {
+  if (!hasPriorityFeedRecord) {
     if (Array.isArray(entries)) {
       return {
         ...caseLike,
@@ -1032,23 +1050,23 @@ function applyAuthoritativeDocketPreference(caseLike, entries = null) {
     return caseLike;
   }
 
-  const newestEntry = worldtroEntries?.[0] || null;
+  const newestEntry = priorityFeedEntries?.[0] || null;
   const preferred = {
     ...caseLike,
-    primary_source: "worldtro",
+    primary_source: PRIORITY_FEED_ENTRY_SOURCE,
     source_urls: mergeArraysNormalized(
       ...(caseLike.source_urls ? [caseLike.source_urls] : []),
-      caseLike.raw?.worldtro?.url ? [[caseLike.raw.worldtro.url]] : []
+      getPriorityFeedRaw(caseLike)?.url ? [[getPriorityFeedRaw(caseLike).url]] : []
     ),
     recent_activity_summary: newestEntry?.description || caseLike.recent_activity_summary,
     latest_docket_filed_at: newestEntry?.filed_at || caseLike.latest_docket_filed_at,
     latest_docket_number: newestEntry?.row_number || newestEntry?.document_number || newestEntry?.entry_number ||
-      (worldtroRowCount > 0 ? String(worldtroRowCount) : caseLike.latest_docket_number),
-    docket_count: worldtroEntries?.length || worldtroRowCount || Number(caseLike.docket_count || 0)
+      (priorityFeedRowCount > 0 ? String(priorityFeedRowCount) : caseLike.latest_docket_number),
+    docket_count: priorityFeedEntries?.length || priorityFeedRowCount || Number(caseLike.docket_count || 0)
   };
 
   if (Array.isArray(entries)) {
-    preferred.entries = worldtroEntries;
+    preferred.entries = priorityFeedEntries;
   }
 
   return preferred;
@@ -1700,7 +1718,7 @@ export class Store {
     return Number(result?.changes || 0);
   }
 
-  caseGroupHasWorldtroAuthority(caseLike) {
+  caseGroupHasPriorityFeedAuthority(caseLike) {
     const ids = this.getRelatedCaseIds(caseLike);
     if (!ids.length) {
       return false;
@@ -1716,20 +1734,20 @@ export class Store {
       .all(...ids)
       .map((row) => hydrateCase(row));
 
-    if (caseRows.some((row) => getWorldtroRowCount(row) > 0 || sourceUrlsContain(row, "worldtro.com"))) {
+    if (caseRows.some((row) => getPriorityFeedRowCount(row) > 0 || caseHasPriorityFeedUrl(row))) {
       return true;
     }
 
     const coverage = this.db
       .prepare(`
-        SELECT COUNT(*) AS worldtro_entries
+        SELECT COUNT(*) AS priority_entries
         FROM docket_entries
-        WHERE primary_source = 'worldtro'
+        WHERE primary_source = '${PRIORITY_FEED_ENTRY_SOURCE}'
           AND case_id IN (${placeholders})
       `)
       .get(...ids);
 
-    return Number(coverage?.worldtro_entries || 0) > 0;
+    return Number(coverage?.priority_entries || 0) > 0;
   }
 
   upsertDocketEntry(record) {
@@ -2069,8 +2087,8 @@ export class Store {
       .map(hydrateEntry);
 
     const uniqueEntries = dedupeEntries(entries);
-    const displayEntries = hasWorldtroAuthority(canonicalRow, entries)
-      ? getWorldtroEntries(entries)
+    const displayEntries = hasPriorityFeedAuthority(canonicalRow, entries)
+      ? getPriorityFeedEntries(entries)
       : uniqueEntries;
 
     const detail = applyAuthoritativeDocketPreference({
@@ -2131,13 +2149,13 @@ export class Store {
       }
 
       const groupKey = buildCanonicalCaseGroupKey(row) || `id:${row.id}`;
-      let hasWorldtroAuthority = groupAuthorityCache.get(groupKey);
-      if (hasWorldtroAuthority === undefined) {
-        hasWorldtroAuthority = this.caseGroupHasWorldtroAuthority(row);
-        groupAuthorityCache.set(groupKey, hasWorldtroAuthority);
+      let hasPriorityFeedAuthority = groupAuthorityCache.get(groupKey);
+      if (hasPriorityFeedAuthority === undefined) {
+        hasPriorityFeedAuthority = this.caseGroupHasPriorityFeedAuthority(row);
+        groupAuthorityCache.set(groupKey, hasPriorityFeedAuthority);
       }
 
-      if (!hasWorldtroAuthority) {
+      if (!hasPriorityFeedAuthority) {
         selected.push(row);
       }
     }
@@ -2163,7 +2181,7 @@ export class Store {
             case_id,
             COUNT(*) AS total_entries,
             SUM(CASE WHEN primary_source = 'courtlistener' THEN 1 ELSE 0 END) AS courtlistener_entries,
-            SUM(CASE WHEN primary_source = 'worldtro' THEN 1 ELSE 0 END) AS worldtro_entries,
+            SUM(CASE WHEN primary_source = '${PRIORITY_FEED_ENTRY_SOURCE}' THEN 1 ELSE 0 END) AS priority_entries,
             SUM(CASE WHEN primary_source = 'pacermonitor' THEN 1 ELSE 0 END) AS pacermonitor_entries
           FROM docket_entries
           WHERE case_id IN (${placeholders})
@@ -2175,7 +2193,7 @@ export class Store {
         coverage.set(Number(row.case_id), {
           totalEntries: Number(row.total_entries || 0),
           courtlistenerEntries: Number(row.courtlistener_entries || 0),
-          worldtroEntries: Number(row.worldtro_entries || 0),
+          priorityFeedEntries: Number(row.priority_entries || 0),
           pacermonitorEntries: Number(row.pacermonitor_entries || 0)
         });
       }
@@ -2184,7 +2202,7 @@ export class Store {
     return coverage;
   }
 
-  getCasesNeedingWorldtroSync(limit, staleAfterHours = 12) {
+  getCasesNeedingPriorityFeedSync(limit, staleAfterHours = 12) {
     const staleBefore = Date.now() - staleAfterHours * 60 * 60 * 1000;
     const poolSize = Math.max(limit * 40, 400);
     const fetchCandidateRows = (whereSql, params = [], orderBySql, queryLimit = poolSize) =>
@@ -2193,7 +2211,7 @@ export class Store {
           SELECT *
           FROM cases
           WHERE date(date_filed) >= date(?)
-            AND ${buildWorldtroTagClause()}
+            AND ${buildPriorityFeedTagClause()}
             AND ${whereSql}
           ORDER BY ${orderBySql}
           LIMIT ?
@@ -2207,16 +2225,16 @@ export class Store {
       `COALESCE(latest_docket_filed_at, date_filed, updated_at) DESC, updated_at DESC`,
       Math.max(poolSize, limit * 8)
     );
-    const knownWorldtroRows = fetchCandidateRows(
-      `(source_urls_json LIKE '%worldtro.com%' OR raw_json LIKE '%"worldtro"%')`,
+    const knownPriorityFeedRows = fetchCandidateRows(
+      `(${PRIORITY_FEED_URL_CLAUSE} OR ${PRIORITY_FEED_RAW_CLAUSE})`,
       [],
       `COALESCE(latest_docket_filed_at, date_filed, updated_at) DESC, docket_count DESC, id ASC`,
       Math.max(limit * 8, 120)
     );
     const lawFirmBackedRows = fetchCandidateRows(
       `(${buildTrackedLawFirmSourceClause("source_urls_json")})
-       AND (raw_json NOT LIKE '%"worldtro"%')
-       AND (source_urls_json NOT LIKE '%worldtro.com%')`,
+       AND NOT (${PRIORITY_FEED_RAW_CLAUSE})
+       AND NOT (${PRIORITY_FEED_URL_CLAUSE})`,
       [],
       `docket_count DESC,
        COALESCE(latest_docket_filed_at, date_filed, updated_at) DESC,
@@ -2231,8 +2249,8 @@ export class Store {
       Math.max(limit * 8, 120)
     );
     const legacyUnsyncedRows = fetchCandidateRows(
-      `(raw_json NOT LIKE '%"worldtro"%')
-       AND (source_urls_json NOT LIKE '%worldtro.com%')
+      `NOT (${PRIORITY_FEED_RAW_CLAUSE})
+       AND NOT (${PRIORITY_FEED_URL_CLAUSE})
        AND docket_count >= ?`,
       [8],
       `docket_count DESC,
@@ -2244,7 +2262,7 @@ export class Store {
 
     const candidateRows = [];
     const seenCandidateIds = new Set();
-    for (const row of [...knownWorldtroRows, ...lawFirmBackedRows, ...recentRows, ...sparseRows, ...legacyUnsyncedRows]) {
+    for (const row of [...knownPriorityFeedRows, ...lawFirmBackedRows, ...recentRows, ...sparseRows, ...legacyUnsyncedRows]) {
       if (seenCandidateIds.has(row.id)) {
         continue;
       }
@@ -2259,47 +2277,47 @@ export class Store {
       .map((row) => {
         const coverage = entryCounts.get(Number(row.id)) || {
           totalEntries: 0,
-          worldtroEntries: 0
+          priorityFeedEntries: 0
         };
         const hasCivilDocketNumber = /\b\d{2}-cv-\d{3,6}\b/i.test(String(row.docket_number || ""));
-        const syncedAt = row.raw?.worldtro?.syncedAt ? Date.parse(row.raw.worldtro.syncedAt) : 0;
-        const worldtroRowCount = Number(row.raw?.worldtro?.rowCount || 0);
-        const hasWorldtroUrl = row.source_urls?.some((url) => String(url).includes("worldtro.com"));
-        const hasWorldtroEntries = worldtroRowCount > 0 || coverage.worldtroEntries > 0;
-        const hasKnownWorldtroSource = hasWorldtroUrl || hasWorldtroEntries;
+        const syncedAt = getPriorityFeedSyncedAt(row) ? Date.parse(getPriorityFeedSyncedAt(row)) : 0;
+        const priorityFeedRowCount = getPriorityFeedRowCount(row);
+        const hasPriorityFeedUrl = caseHasPriorityFeedUrl(row);
+        const hasPriorityFeedEntries = priorityFeedRowCount > 0 || coverage.priorityFeedEntries > 0;
+        const hasKnownPriorityFeedSource = hasPriorityFeedUrl || hasPriorityFeedEntries;
         const hasLawFirmSource = hasTrackedLawFirmSource(row);
         const minimumExpectedEntries = Math.max(12, Number(row.docket_count || 0), 6);
-        const missingMarked = Boolean(row.raw?.worldtro?.missing);
+        const missingMarked = isPriorityFeedMissing(row);
         const isFreshlyMissing = missingMarked && syncedAt && syncedAt >= staleBefore;
-        const isLegacyUnsynced = !hasKnownWorldtroSource && Number(row.docket_count || 0) >= 8;
+        const isPriorityFeedBacklog = !hasKnownPriorityFeedSource && Number(row.docket_count || 0) >= 8;
 
-        const needsCompletion = worldtroRowCount > 0
-          ? coverage.totalEntries < worldtroRowCount
-          : hasWorldtroUrl
-            ? coverage.worldtroEntries === 0 || coverage.totalEntries < minimumExpectedEntries
-            : !hasKnownWorldtroSource && coverage.totalEntries < minimumExpectedEntries;
+        const needsCompletion = priorityFeedRowCount > 0
+          ? coverage.totalEntries < priorityFeedRowCount
+          : hasPriorityFeedUrl
+            ? coverage.priorityFeedEntries === 0 || coverage.totalEntries < minimumExpectedEntries
+            : !hasKnownPriorityFeedSource && coverage.totalEntries < minimumExpectedEntries;
         const isStale = !syncedAt || syncedAt < staleBefore;
         const shouldSync = hasCivilDocketNumber && (
           needsCompletion ||
-          (!hasKnownWorldtroSource && !isFreshlyMissing) ||
-          (hasKnownWorldtroSource && isStale) ||
-          isLegacyUnsynced
+          (!hasKnownPriorityFeedSource && !isFreshlyMissing) ||
+          (hasKnownPriorityFeedSource && isStale) ||
+          isPriorityFeedBacklog
         );
         const activityAtRaw = row.latest_docket_filed_at || row.date_filed || row.updated_at;
 
         const priority = needsCompletion
-          ? hasWorldtroUrl
+          ? hasPriorityFeedUrl
             ? 0
             : hasLawFirmSource
               ? 1
               : 2
           : hasLawFirmSource
             ? 3
-            : isLegacyUnsynced
+            : isPriorityFeedBacklog
               ? Number(row.docket_count || 0) >= 20
                 ? 4
                 : 5
-          : !hasKnownWorldtroSource
+          : !hasKnownPriorityFeedSource
             ? 6
             : 7;
 
@@ -2308,11 +2326,11 @@ export class Store {
           priority,
           shouldSync,
           totalEntries: coverage.totalEntries,
-          hasWorldtroCoverage: hasKnownWorldtroSource,
-          hasWorldtroUrl,
+          hasPriorityFeedCoverage: hasKnownPriorityFeedSource,
+          hasPriorityFeedUrl,
           hasLawFirmSource,
           expectedEntries: minimumExpectedEntries,
-          isLegacyUnsynced,
+          isPriorityFeedBacklog,
           activityAtRaw
         };
       })
@@ -2336,12 +2354,12 @@ export class Store {
         return left.priority - right.priority;
       }
 
-      if (left.hasWorldtroUrl !== right.hasWorldtroUrl) {
-        return left.hasWorldtroUrl ? -1 : 1;
+      if (left.hasPriorityFeedUrl !== right.hasPriorityFeedUrl) {
+        return left.hasPriorityFeedUrl ? -1 : 1;
       }
 
-      if (left.hasWorldtroCoverage !== right.hasWorldtroCoverage) {
-        return left.hasWorldtroCoverage ? 1 : -1;
+      if (left.hasPriorityFeedCoverage !== right.hasPriorityFeedCoverage) {
+        return left.hasPriorityFeedCoverage ? 1 : -1;
       }
 
       if (Number(left.row.docket_count || 0) !== Number(right.row.docket_count || 0)) {
@@ -2364,15 +2382,15 @@ export class Store {
       return Number(left.row.id || 0) - Number(right.row.id || 0);
     });
 
-    const knownWorldtroOrdered = rows
-      .filter((item) => item.hasWorldtroUrl || item.hasWorldtroCoverage)
+    const knownPriorityFeedOrdered = rows
+      .filter((item) => item.hasPriorityFeedUrl || item.hasPriorityFeedCoverage)
       .sort((left, right) => {
         if (left.priority !== right.priority) {
           return left.priority - right.priority;
         }
 
-        if (left.hasWorldtroUrl !== right.hasWorldtroUrl) {
-          return left.hasWorldtroUrl ? -1 : 1;
+        if (left.hasPriorityFeedUrl !== right.hasPriorityFeedUrl) {
+          return left.hasPriorityFeedUrl ? -1 : 1;
         }
 
         if (left.expectedEntries !== right.expectedEntries) {
@@ -2383,7 +2401,7 @@ export class Store {
       });
 
     const lawFirmBackedOrdered = rows
-      .filter((item) => item.hasLawFirmSource && !item.hasWorldtroUrl && !item.hasWorldtroCoverage)
+      .filter((item) => item.hasLawFirmSource && !item.hasPriorityFeedUrl && !item.hasPriorityFeedCoverage)
       .sort((left, right) => {
         if (left.priority !== right.priority) {
           return left.priority - right.priority;
@@ -2401,7 +2419,7 @@ export class Store {
       });
 
     const legacyOrdered = rows
-      .filter((item) => item.isLegacyUnsynced && !item.hasLawFirmSource)
+      .filter((item) => item.isPriorityFeedBacklog && !item.hasLawFirmSource)
       .sort((left, right) => {
         if (Number(left.row.docket_count || 0) !== Number(right.row.docket_count || 0)) {
           return Number(right.row.docket_count || 0) - Number(left.row.docket_count || 0);
@@ -2414,9 +2432,9 @@ export class Store {
         return compareCaseActivityDesc(left.activityAtRaw, right.activityAtRaw);
       });
 
-    const knownWorldtroSlots = Math.max(1, Math.min(limit, Math.ceil(limit * 0.4)));
+    const knownPriorityFeedSlots = Math.max(1, Math.min(limit, Math.ceil(limit * 0.4)));
     const lawFirmSlots = Math.max(1, Math.min(limit, Math.ceil(limit * 0.35)));
-    const recentSlots = Math.max(1, limit - knownWorldtroSlots - lawFirmSlots);
+    const recentSlots = Math.max(1, limit - knownPriorityFeedSlots - lawFirmSlots);
     const selected = [];
     const seen = new Set();
     const appendRows = (items, maxItems = limit) => {
@@ -2430,9 +2448,9 @@ export class Store {
       }
     };
 
-    appendRows(knownWorldtroOrdered, knownWorldtroSlots);
-    appendRows(lawFirmBackedOrdered, knownWorldtroSlots + lawFirmSlots);
-    appendRows(recentOrdered, knownWorldtroSlots + lawFirmSlots + recentSlots);
+    appendRows(knownPriorityFeedOrdered, knownPriorityFeedSlots);
+    appendRows(lawFirmBackedOrdered, knownPriorityFeedSlots + lawFirmSlots);
+    appendRows(recentOrdered, knownPriorityFeedSlots + lawFirmSlots + recentSlots);
     appendRows(legacyOrdered, limit);
     appendRows(backlogOrdered, limit);
     appendRows(recentOrdered, limit);
@@ -2479,19 +2497,19 @@ export class Store {
         const coverage = entryCounts.get(Number(row.id)) || {
           totalEntries: 0,
           courtlistenerEntries: 0,
-          worldtroEntries: 0,
+          priorityFeedEntries: 0,
           pacermonitorEntries: 0
         };
         const hasCivilDocketNumber = /\b\d{2}-cv-\d{3,6}\b/i.test(String(row.docket_number || ""));
         const activityAtRaw = row.latest_docket_filed_at || row.date_filed || row.updated_at;
         const activityAtMs = Number.isFinite(Date.parse(activityAtRaw || "")) ? Date.parse(activityAtRaw || "") : 0;
         const isRecentCase = activityAtMs >= recentCutoff;
-        const worldtroRowCount = Number(row.raw?.worldtro?.rowCount || 0);
+        const priorityFeedRowCount = getPriorityFeedRowCount(row);
         const expectedEntries = Math.max(
           row.insights?.is_seller_case ? 12 : 8,
           isRecentCase ? 10 : 0,
           Number(row.docket_count || 0),
-          worldtroRowCount
+          priorityFeedRowCount
         );
         const gap = Math.max(0, expectedEntries - coverage.totalEntries);
         const syncedAt = row.raw?.pacermonitor?.syncedAt ? Date.parse(row.raw.pacermonitor.syncedAt) : 0;
@@ -2507,17 +2525,17 @@ export class Store {
               ? notFoundBefore
               : staleBefore;
         const isFresh = syncedAt && syncedAt >= freshnessCutoff;
-        const needsWorldtroLevelCompletion =
-          worldtroRowCount > 0 && coverage.totalEntries < worldtroRowCount;
+        const needsPriorityFeedLevelCompletion =
+          priorityFeedRowCount > 0 && coverage.totalEntries < priorityFeedRowCount;
         const needsBasicCompletion = coverage.totalEntries < expectedEntries;
         const shouldSync =
           hasCivilDocketNumber &&
           (row.insights?.is_seller_case || isRecentCase) &&
-          (needsWorldtroLevelCompletion || needsBasicCompletion) &&
+          (needsPriorityFeedLevelCompletion || needsBasicCompletion) &&
           !isBlockedFresh &&
           !isFresh;
 
-        const priority = needsWorldtroLevelCompletion
+        const priority = needsPriorityFeedLevelCompletion
           ? 0
           : row.insights?.is_seller_case
             ? 1
@@ -2532,7 +2550,7 @@ export class Store {
           shouldSync
         };
       })
-      .filter((item) => !hasWorldtroAuthority(item.row))
+      .filter((item) => !hasPriorityFeedAuthority(item.row))
       .filter((item) => item.shouldSync)
       .sort((left, right) => {
         if (left.priority !== right.priority) {
@@ -2585,28 +2603,28 @@ export class Store {
       .map((row) => {
         const coverage = entryCounts.get(Number(row.id)) || {
           totalEntries: 0,
-          worldtroEntries: 0,
+          priorityFeedEntries: 0,
           pacermonitorEntries: 0
         };
         const activityAtRaw = row.latest_docket_filed_at || row.date_filed || row.updated_at;
         const activityAtMs = Number.isFinite(Date.parse(activityAtRaw || "")) ? Date.parse(activityAtRaw || "") : 0;
         const isRecentCase = activityAtMs >= recentCutoff;
-        const worldtroRowCount = Number(row.raw?.worldtro?.rowCount || 0);
+        const priorityFeedRowCount = getPriorityFeedRowCount(row);
         const latestNumber = parseDocketNumber(row.latest_docket_number);
         const expectedEntries = Math.max(
           row.insights?.is_seller_case ? 12 : 8,
           isRecentCase ? 10 : 0,
           Number(row.docket_count || 0),
-          worldtroRowCount,
+          priorityFeedRowCount,
           latestNumber
         );
         const totalEntries = Number(coverage.totalEntries || 0);
         const gap = Math.max(0, expectedEntries - totalEntries);
         const courtListenerEntries = Number(coverage.courtlistenerEntries || 0);
         const pacerMonitorState = String(row.raw?.pacermonitor?.state || "").toLowerCase() || null;
-        const worldtroSyncedAt = row.raw?.worldtro?.syncedAt || null;
+        const priorityFeedSyncedAt = getPriorityFeedSyncedAt(row);
         const pacerMonitorSyncedAt = row.raw?.pacermonitor?.syncedAt || null;
-        const missingWorldtroCoverage = worldtroRowCount > 0 && totalEntries < worldtroRowCount;
+        const missingPriorityFeedCoverage = priorityFeedRowCount > 0 && totalEntries < priorityFeedRowCount;
         const courtListenerGap = Math.max(0, latestNumber - totalEntries);
         const hasCivilDocketNumber = /\b\d{2}-cv-\d{3,6}\b/i.test(String(row.docket_number || ""));
         const hasCourtListenerDocket = Number(row.courtlistener_docket_id || 0) > 0;
@@ -2623,10 +2641,10 @@ export class Store {
           providersNeeded.push("courtlistener");
         }
 
-        if (missingWorldtroCoverage) {
-          reasons.push(`WorldTRO 公开时间线应有 ${worldtroRowCount} 条，当前只有 ${totalEntries} 条`);
-          if (!providersNeeded.includes("worldtro")) {
-            providersNeeded.push("worldtro");
+        if (missingPriorityFeedCoverage) {
+          reasons.push(`优先目录 公开时间线应有 ${priorityFeedRowCount} 条，当前只有 ${totalEntries} 条`);
+          if (!providersNeeded.includes(PRIORITY_FEED_PROVIDER_KEY)) {
+            providersNeeded.push(PRIORITY_FEED_PROVIDER_KEY);
           }
         }
 
@@ -2655,10 +2673,10 @@ export class Store {
           expected_entries: expectedEntries,
           gap,
           courtlistener_gap: courtListenerGap,
-          worldtro_row_count: worldtroRowCount,
-          worldtro_entries: Number(coverage.worldtroEntries || 0),
+          priority_row_count: priorityFeedRowCount,
+          priority_entries: Number(coverage.priorityFeedEntries || 0),
           pacermonitor_entries: Number(coverage.pacermonitorEntries || 0),
-          worldtro_synced_at: worldtroSyncedAt,
+          priority_synced_at: priorityFeedSyncedAt,
           pacermonitor_synced_at: pacerMonitorSyncedAt,
           pacermonitor_state: pacerMonitorState,
           is_recent_case: isRecentCase,
@@ -2674,10 +2692,10 @@ export class Store {
           return (right.priority_score || 0) - (left.priority_score || 0);
         }
 
-        const leftNeedsWorldtro = left.providers_needed.includes("worldtro");
-        const rightNeedsWorldtro = right.providers_needed.includes("worldtro");
-        if (leftNeedsWorldtro !== rightNeedsWorldtro) {
-          return leftNeedsWorldtro ? -1 : 1;
+        const leftNeedsPriorityFeed = left.providers_needed.includes(PRIORITY_FEED_PROVIDER_KEY);
+        const rightNeedsPriorityFeed = right.providers_needed.includes(PRIORITY_FEED_PROVIDER_KEY);
+        if (leftNeedsPriorityFeed !== rightNeedsPriorityFeed) {
+          return leftNeedsPriorityFeed ? -1 : 1;
         }
 
         const leftNeedsCourtListener = left.providers_needed.includes("courtlistener");
@@ -2705,8 +2723,8 @@ export class Store {
         if (item.providers_needed.includes("courtlistener")) {
           acc.courtlistener += 1;
         }
-        if (item.providers_needed.includes("worldtro")) {
-          acc.worldtro += 1;
+        if (item.providers_needed.includes(PRIORITY_FEED_PROVIDER_KEY)) {
+          acc.priority += 1;
         }
         if (item.providers_needed.includes("pacermonitor")) {
           acc.pacermonitor += 1;
@@ -2716,7 +2734,7 @@ export class Store {
         }
         return acc;
       },
-      { total: 0, courtlistener: 0, worldtro: 0, pacermonitor: 0, challenge: 0 }
+      { total: 0, courtlistener: 0, priority: 0, pacermonitor: 0, challenge: 0 }
     );
 
     return {

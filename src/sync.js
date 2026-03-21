@@ -1,6 +1,15 @@
 import crypto from "node:crypto";
 import { buildTagsMarker, classifyCase, discoveryPresets } from "./queries.js";
 import { docketLooksLike, normalizeDocket, normalizeText } from "./insights.js";
+import {
+  PRIORITY_FEED_DISCOVERY_CHECKPOINT,
+  PRIORITY_FEED_ENTRY_SOURCE,
+  getPriorityFeedRaw,
+  getPriorityFeedSyncedAt,
+  mergePriorityFeedRaw,
+  sourceUrlUsesPriorityFeed,
+  isPriorityFeedPrimarySource
+} from "./priority-feed.js";
 
 function valueOf(...values) {
   return values.find((value) => value !== undefined && value !== null && value !== "") ?? null;
@@ -92,14 +101,14 @@ const STATE_CODE_TO_NAME = new Map([
   ["WY", "wyoming"]
 ]);
 
-const WORLDTRO_LAW_FIRM_PATTERNS = [
+const PRIORITY_FEED_LAW_FIRM_PATTERNS = [
   { needle: /sriplaw/i, pattern: "sriplaw.com" },
   { needle: /\bgbc\b|greer\s*burns/i, pattern: "gbc.law" },
   { needle: /whitewood/i, pattern: "whitewoodlaw.com" },
   { needle: /jiang|keith/i, pattern: "jiangip.com" }
 ];
 
-const WORLDTRO_DISCOVERY_STOP_WORDS = new Set([
+const PRIORITY_FEED_DISCOVERY_STOP_WORDS = new Set([
   "and",
   "the",
   "llc",
@@ -142,9 +151,9 @@ function normalizeCourtLookupText(value) {
   );
 }
 
-function normalizeWorldtroCaseUrl(value) {
+function normalizePriorityFeedCaseUrl(value) {
   const raw = String(value || "").trim();
-  if (!raw || !/worldtro\.com/i.test(raw)) {
+  if (!raw || !sourceUrlUsesPriorityFeed(raw)) {
     return "";
   }
 
@@ -174,13 +183,13 @@ function deriveStateCodeFromCase(caseLike = {}) {
   return "";
 }
 
-function detectWorldtroLawFirmPattern(value) {
+function detectPriorityFeedLawFirmPattern(value) {
   const text = String(value || "").trim();
   if (!text) {
     return "";
   }
 
-  const match = WORLDTRO_LAW_FIRM_PATTERNS.find((item) => item.needle.test(text));
+  const match = PRIORITY_FEED_LAW_FIRM_PATTERNS.find((item) => item.needle.test(text));
   return match?.pattern || "";
 }
 
@@ -189,7 +198,7 @@ function extractDistinctiveTokens(value, minLength = 3) {
     normalizeLookupText(value)
       .split(" ")
       .map((item) => item.trim())
-      .filter((item) => item.length >= minLength && !WORLDTRO_DISCOVERY_STOP_WORDS.has(item))
+      .filter((item) => item.length >= minLength && !PRIORITY_FEED_DISCOVERY_STOP_WORDS.has(item))
   )];
 }
 
@@ -202,18 +211,18 @@ function countTokenHits(tokens, haystack) {
   return tokens.filter((token) => text.includes(token)).length;
 }
 
-function scoreWorldtroDiscoveryCandidate(item, row) {
+function scorePriorityFeedDiscoveryCandidate(item, row) {
   let score = 0;
-  const normalizedWorldtroUrl = normalizeWorldtroCaseUrl(item.caseUrl);
+  const normalizedPriorityUrl = normalizePriorityFeedCaseUrl(item.caseUrl);
   const candidateUrls = asArray(row.source_urls)
-    .map(normalizeWorldtroCaseUrl)
+    .map(normalizePriorityFeedCaseUrl)
     .filter(Boolean);
 
-  if (normalizedWorldtroUrl && candidateUrls.includes(normalizedWorldtroUrl)) {
+  if (normalizedPriorityUrl && candidateUrls.includes(normalizedPriorityUrl)) {
     score += 1000;
   }
 
-  if (normalizeWorldtroCaseUrl(row.raw?.worldtro?.url) === normalizedWorldtroUrl) {
+  if (normalizePriorityFeedCaseUrl(getPriorityFeedRaw(row)?.url) === normalizedPriorityUrl) {
     score += 1000;
   }
 
@@ -240,7 +249,7 @@ function scoreWorldtroDiscoveryCandidate(item, row) {
   score += plaintiffHitCount * 45;
   score += brandHitCount * 35;
 
-  const lawFirmPattern = detectWorldtroLawFirmPattern(item.lawFirm);
+  const lawFirmPattern = detectPriorityFeedLawFirmPattern(item.lawFirm);
   if (lawFirmPattern && asArray(row.source_urls).some((url) => String(url || "").includes(lawFirmPattern))) {
     score += 200;
   }
@@ -253,7 +262,7 @@ function scoreWorldtroDiscoveryCandidate(item, row) {
     score += 40;
   }
 
-  if (row.primary_source === "worldtro") {
+  if (isPriorityFeedPrimarySource(row.primary_source)) {
     score += 120;
   }
 
@@ -264,9 +273,9 @@ function scoreWorldtroDiscoveryCandidate(item, row) {
   return score;
 }
 
-function buildWorldtroDiscoveryIndex(rows = []) {
+function buildPriorityFeedDiscoveryIndex(rows = []) {
   const byDocket = new Map();
-  const byWorldtroUrl = new Map();
+  const byPriorityUrl = new Map();
 
   for (const row of rows) {
     const docketKey = normalizeDocket(row.docket_number);
@@ -279,28 +288,28 @@ function buildWorldtroDiscoveryIndex(rows = []) {
 
     const urls = [
       ...asArray(row.source_urls),
-      row.raw?.worldtro?.url
+      getPriorityFeedRaw(row)?.url
     ]
-      .map(normalizeWorldtroCaseUrl)
+      .map(normalizePriorityFeedCaseUrl)
       .filter(Boolean);
 
     for (const url of urls) {
-      if (!byWorldtroUrl.has(url)) {
-        byWorldtroUrl.set(url, row);
+      if (!byPriorityUrl.has(url)) {
+        byPriorityUrl.set(url, row);
       }
     }
   }
 
   return {
     byDocket,
-    byWorldtroUrl
+    byPriorityUrl
   };
 }
 
-function findBestWorldtroDiscoveryCase(item, index) {
-  const normalizedUrl = normalizeWorldtroCaseUrl(item.caseUrl);
-  if (normalizedUrl && index.byWorldtroUrl.has(normalizedUrl)) {
-    return index.byWorldtroUrl.get(normalizedUrl);
+function findBestPriorityFeedDiscoveryCase(item, index) {
+  const normalizedUrl = normalizePriorityFeedCaseUrl(item.caseUrl);
+  if (normalizedUrl && index.byPriorityUrl.has(normalizedUrl)) {
+    return index.byPriorityUrl.get(normalizedUrl);
   }
 
   const docketKey = normalizeDocket(item.docketNumber);
@@ -314,7 +323,7 @@ function findBestWorldtroDiscoveryCase(item, index) {
   }
 
   const scored = candidates
-    .map((row) => ({ row, score: scoreWorldtroDiscoveryCandidate(item, row) }))
+    .map((row) => ({ row, score: scorePriorityFeedDiscoveryCandidate(item, row) }))
     .sort((left, right) => {
       if (left.score !== right.score) {
         return right.score - left.score;
@@ -429,13 +438,13 @@ function deriveParties(result) {
 }
 
 export class CaseSyncService {
-  constructor({ config, store, courtFeeds, lawFirms, courtListener, worldtro, pacerMonitor, pacer, translator }) {
+  constructor({ config, store, courtFeeds, lawFirms, courtListener, priorityFeed, pacerMonitor, pacer, translator }) {
     this.config = config;
     this.store = store;
     this.courtFeeds = courtFeeds;
     this.lawFirms = lawFirms;
     this.courtListener = courtListener;
-    this.worldtro = worldtro;
+    this.priorityFeed = priorityFeed;
     this.pacerMonitor = pacerMonitor;
     this.pacer = pacer;
     this.translator = translator;
@@ -471,7 +480,7 @@ export class CaseSyncService {
           docketEnabled: this.courtListener.hasDocketAccess(),
           docketEntriesEnabled: this.courtListener.hasDocketEntriesAccess() && !knownNoDocketEntries
         },
-        worldtro: this.worldtro.getStatus(),
+        priorityFeed: this.priorityFeed.getStatus(),
         pacermonitor: this.pacerMonitor.getStatus(),
         pacer: this.pacer.getStatus(),
         translation: {
@@ -527,7 +536,7 @@ export class CaseSyncService {
       casesUpserted: 0,
       docketEntriesUpserted: 0,
       docketCasesSynced: 0,
-      worldtroCasesSynced: 0,
+      priorityFeedCasesSynced: 0,
       translationsApplied: 0,
       notes: []
     };
@@ -579,13 +588,13 @@ export class CaseSyncService {
       }
 
       try {
-        const worldtroResult = await this.syncWorldtroRecent(mode);
-        stats.worldtroCasesSynced += worldtroResult.syncedCases;
-        if (worldtroResult.note) {
-          stats.notes.push(worldtroResult.note);
+        const priorityFeedResult = await this.syncPriorityFeedRecent(mode);
+        stats.priorityFeedCasesSynced += priorityFeedResult.syncedCases;
+        if (priorityFeedResult.note) {
+          stats.notes.push(priorityFeedResult.note);
         }
       } catch (error) {
-        stats.notes.push(`WorldTRO 补源跳过：${error.message}`);
+        stats.notes.push(`优先目录 补源跳过：${error.message}`);
       }
 
       try {
@@ -1364,20 +1373,20 @@ export class CaseSyncService {
     });
   }
 
-  async enrichCaseWithWorldtro(caseId, { force = false } = {}) {
+  async enrichCaseWithPriorityFeed(caseId, { force = false } = {}) {
     return this.store.batchMutations(async () => {
       const caseRow = this.store.getCase(caseId);
-      if (!caseRow || !this.worldtro.enabled || !caseRow.insights?.is_seller_case) {
+      if (!caseRow || !this.priorityFeed.enabled || !caseRow.insights?.is_seller_case) {
         return { enriched: false, reason: "not-applicable" };
       }
 
-      const syncedAt = caseRow.raw?.worldtro?.syncedAt ? Date.parse(caseRow.raw.worldtro.syncedAt) : 0;
-      const staleAfterMs = this.config.worldtro.staleAfterHours * 60 * 60 * 1000;
+      const syncedAt = getPriorityFeedSyncedAt(caseRow) ? Date.parse(getPriorityFeedSyncedAt(caseRow)) : 0;
+      const staleAfterMs = this.config.priorityFeed.staleAfterHours * 60 * 60 * 1000;
       if (!force && syncedAt && Date.now() - syncedAt < staleAfterMs) {
         return { enriched: false, reason: "fresh" };
       }
 
-      return this.syncSingleWorldtroCase(caseRow);
+      return this.syncSinglePriorityFeedCase(caseRow);
     });
   }
 
@@ -1444,29 +1453,31 @@ export class CaseSyncService {
     });
   }
 
-  async syncWorldtroRecent(mode = "recent") {
+  async syncPriorityFeedRecent(mode = "recent") {
     return this.store.batchMutations(async () => {
-      if (!this.worldtro.enabled) {
+      if (!this.priorityFeed.enabled) {
         return {
           syncedCases: 0,
-          note: "WorldTRO 公开补源已关闭。"
+          note: "优先目录 公开补源已关闭。"
         };
       }
 
-      const discoveryResult = await this.syncWorldtroDiscovery();
+      const discoveryResult = await this.syncPriorityFeedDiscovery();
 
       const maxCases =
-        mode === "backfill" ? this.config.worldtro.backfillMaxCasesPerRun : this.config.worldtro.maxCasesPerRun;
-      const candidates = this.store.getCasesNeedingWorldtroSync(
+        mode === "backfill"
+          ? this.config.priorityFeed.backfillMaxCasesPerRun
+          : this.config.priorityFeed.maxCasesPerRun;
+      const candidates = this.store.getCasesNeedingPriorityFeedSync(
         maxCases,
-        this.config.worldtro.staleAfterHours
+        this.config.priorityFeed.staleAfterHours
       );
 
       let syncedCases = 0;
       let failedCases = 0;
       for (const caseRow of candidates) {
         try {
-          const result = await this.syncSingleWorldtroCase(caseRow);
+          const result = await this.syncSinglePriorityFeedCase(caseRow);
           if (result.enriched) {
             syncedCases += 1;
           }
@@ -1484,25 +1495,25 @@ export class CaseSyncService {
         totalCatalogCases: Number(discoveryResult.totalCatalogCases || 0),
         discoverySkipped: Boolean(discoveryResult.skipped),
         note: syncedCases
-          ? `WorldTRO 本轮${discoveryResult.skipped ? "复用目录缓存" : `登记 ${discoveryResult.discoveredCases} 个公开案件`}，并补齐 ${syncedCases} 个案件的公开时间线${failedCases ? `，另有 ${failedCases} 个案件待重试` : ""}。`
+          ? `优先目录 本轮${discoveryResult.skipped ? "复用目录缓存" : `登记 ${discoveryResult.discoveredCases} 个公开案件`}，并补齐 ${syncedCases} 个案件的公开时间线${failedCases ? `，另有 ${failedCases} 个案件待重试` : ""}。`
           : failedCases
-            ? `WorldTRO 本轮${discoveryResult.skipped ? "复用目录缓存" : `登记 ${discoveryResult.discoveredCases} 个公开案件`}，但没有补齐成功，${failedCases} 个案件待重试。`
+            ? `优先目录 本轮${discoveryResult.skipped ? "复用目录缓存" : `登记 ${discoveryResult.discoveredCases} 个公开案件`}，但没有补齐成功，${failedCases} 个案件待重试。`
             : discoveryResult.discoveredCases
-              ? `WorldTRO 本轮新增登记 ${discoveryResult.discoveredCases} 个公开案件，当前没有待补源案件。`
+              ? `优先目录 本轮新增登记 ${discoveryResult.discoveredCases} 个公开案件，当前没有待补源案件。`
               : discoveryResult.skipped
-                ? `WorldTRO 目录缓存仍有效（共 ${discoveryResult.totalCatalogCases || 0} 个公开案件），当前没有待补源案件。`
-                : "WorldTRO 本轮没有待补源案件。"
+                ? `优先目录 目录缓存仍有效（共 ${discoveryResult.totalCatalogCases || 0} 个公开案件），当前没有待补源案件。`
+                : "优先目录 本轮没有待补源案件。"
       };
     });
   }
 
-  async syncWorldtroDiscovery() {
-    if (!this.worldtro.enabled) {
-      return { discoveredCases: 0 };
-    }
+  async syncPriorityFeedDiscovery() {
+      if (!this.priorityFeed.enabled) {
+        return { discoveredCases: 0 };
+      }
 
-    const checkpointKey = "worldtro:discovery";
-    const staleAfterMs = Number(this.config.worldtro.discoveryStaleAfterHours || 0) * 60 * 60 * 1000;
+    const checkpointKey = PRIORITY_FEED_DISCOVERY_CHECKPOINT;
+    const staleAfterMs = Number(this.config.priorityFeed.discoveryStaleAfterHours || 0) * 60 * 60 * 1000;
     const checkpoint = this.store.getCheckpoint(checkpointKey) || {};
     const lastCatalogSyncMs = checkpoint.lastSyncedAt ? Date.parse(checkpoint.lastSyncedAt) : 0;
     if (staleAfterMs > 0 && lastCatalogSyncMs && Date.now() - lastCatalogSyncMs < staleAfterMs) {
@@ -1515,19 +1526,20 @@ export class CaseSyncService {
       };
     }
 
-    const listings = await this.worldtro.discoverCases();
-    const discoveryIndex = buildWorldtroDiscoveryIndex(this.store.getHydratedCases(this.config.sync.startDate));
+    const listings = await this.priorityFeed.discoverCases();
+    const discoveryIndex = buildPriorityFeedDiscoveryIndex(this.store.getHydratedCases(this.config.sync.startDate));
     let discoveredCases = 0;
     let attachedCases = 0;
     let createdCases = 0;
 
     for (const item of listings) {
-      const existingCase = findBestWorldtroDiscoveryCase(item, discoveryIndex) || null;
+      const existingCase = findBestPriorityFeedDiscoveryCase(item, discoveryIndex) || null;
       const timestamp = new Date().toISOString();
-      const sourceCaseKey = existingCase?.source_case_key || `worldtro:${item.stateCode}:${item.year}:${item.serial}`;
+      const sourceCaseKey =
+        existingCase?.source_case_key || `${PRIORITY_FEED_ENTRY_SOURCE}:${item.stateCode}:${item.year}:${item.serial}`;
       const savedCase = this.store.upsertCase({
         source_case_key: sourceCaseKey,
-        primary_source: existingCase?.primary_source || "worldtro",
+        primary_source: existingCase?.primary_source || PRIORITY_FEED_ENTRY_SOURCE,
         source_case_id: existingCase?.source_case_id || item.pageId || `${item.stateCode}-${item.year}-${item.serial}`,
         courtlistener_docket_id: existingCase?.courtlistener_docket_id ?? null,
         pacer_case_id: existingCase?.pacer_case_id ?? null,
@@ -1545,30 +1557,26 @@ export class CaseSyncService {
         source_urls: [...(existingCase?.source_urls || []), item.caseUrl].filter(Boolean),
         plaintiffs: existingCase?.plaintiffs?.length ? existingCase.plaintiffs : (item.plaintiff ? [item.plaintiff] : []),
         defendants: existingCase?.defendants || [],
-        recent_activity_summary: existingCase?.recent_activity_summary || (item.brand ? `WorldTRO 案件目录：${item.brand}` : "WorldTRO 案件目录"),
+        recent_activity_summary: existingCase?.recent_activity_summary || (item.brand ? `优先目录 案件目录：${item.brand}` : "优先目录 案件目录"),
         latest_docket_filed_at: existingCase?.latest_docket_filed_at || item.dateFiled || null,
         latest_docket_number: existingCase?.latest_docket_number || null,
         docket_count: existingCase?.docket_count || 0,
         last_seen_at: timestamp,
         last_synced_at: timestamp,
         last_docket_sync_at: existingCase?.last_docket_sync_at || null,
-        raw: {
-          ...(existingCase?.raw || {}),
-          worldtro: {
-            ...(existingCase?.raw?.worldtro || {}),
-            url: item.caseUrl,
-            stateCode: item.stateCode,
-            year: item.year,
-            serial: item.serial,
-            lawFirm: item.lawFirm || existingCase?.raw?.worldtro?.lawFirm || null,
-            brand: item.brand || existingCase?.raw?.worldtro?.brand || null,
-            catalogSeenAt: timestamp,
-            catalogPageId: item.pageId || null
-          }
-        }
+        raw: mergePriorityFeedRaw(existingCase?.raw, {
+          url: item.caseUrl,
+          stateCode: item.stateCode,
+          year: item.year,
+          serial: item.serial,
+          lawFirm: item.lawFirm || getPriorityFeedRaw(existingCase)?.lawFirm || null,
+          brand: item.brand || getPriorityFeedRaw(existingCase)?.brand || null,
+          catalogSeenAt: timestamp,
+          catalogPageId: item.pageId || null
+        })
       });
 
-      if (!existingCase || !existingCase.source_urls?.some((url) => String(url).includes("worldtro.com"))) {
+      if (!existingCase || !existingCase.source_urls?.some((url) => sourceUrlUsesPriorityFeed(url))) {
         discoveredCases += 1;
         if (existingCase) {
           attachedCases += 1;
@@ -1663,19 +1671,15 @@ export class CaseSyncService {
     });
   }
 
-  async syncSingleWorldtroCase(caseRow) {
-    const payload = await this.worldtro.enrichCase(caseRow);
+  async syncSinglePriorityFeedCase(caseRow) {
+    const payload = await this.priorityFeed.enrichCase(caseRow);
     if (!payload || !payload.entries.length) {
       const timestamp = new Date().toISOString();
-      const mergedRaw = {
-        ...(caseRow.raw || {}),
-        worldtro: {
-          ...(caseRow.raw?.worldtro || {}),
-          syncedAt: timestamp,
-          rowCount: 0,
-          missing: true
-        }
-      };
+      const mergedRaw = mergePriorityFeedRaw(caseRow.raw, {
+        syncedAt: timestamp,
+        rowCount: 0,
+        missing: true
+      });
 
       this.store.upsertCase({
         source_case_key: caseRow.source_case_key,
@@ -1710,24 +1714,21 @@ export class CaseSyncService {
       return { enriched: false, reason: "not-found" };
     }
 
-    this.store.deleteDocketEntriesNotFromSourceForRelatedCases(caseRow, "worldtro");
-    this.store.deleteDocketEntriesBySourceForRelatedCases(caseRow, "worldtro");
+    this.store.deleteDocketEntriesNotFromSourceForRelatedCases(caseRow, PRIORITY_FEED_ENTRY_SOURCE);
+    this.store.deleteDocketEntriesBySourceForRelatedCases(caseRow, PRIORITY_FEED_ENTRY_SOURCE);
 
-    const mergedRaw = {
-      ...(caseRow.raw || {}),
-      worldtro: {
-        url: payload.url,
-        title: payload.title,
-        lawFirm: payload.lawFirm,
-        brand: payload.brand,
-        rowCount: payload.entries.length,
-        stateCode: payload.stateCode,
-        year: payload.year,
-        serial: payload.serial,
-        matchQuality: payload.matchQuality || null,
-        syncedAt: payload.syncedAt
-      }
-    };
+    const mergedRaw = mergePriorityFeedRaw(caseRow.raw, {
+      url: payload.url,
+      title: payload.title,
+      lawFirm: payload.lawFirm,
+      brand: payload.brand,
+      rowCount: payload.entries.length,
+      stateCode: payload.stateCode,
+      year: payload.year,
+      serial: payload.serial,
+      matchQuality: payload.matchQuality || null,
+      syncedAt: payload.syncedAt
+    });
 
     this.store.upsertCase({
       source_case_key: caseRow.source_case_key,
@@ -1769,10 +1770,10 @@ export class CaseSyncService {
 
       this.store.upsertDocketEntry({
         case_id: caseRow.id,
-        source_entry_key: `worldtro:${caseRow.id}:${entry.row_number}:${digest}`,
-        primary_source: "worldtro",
+        source_entry_key: `${PRIORITY_FEED_ENTRY_SOURCE}:${caseRow.id}:${entry.row_number}:${digest}`,
+        primary_source: PRIORITY_FEED_ENTRY_SOURCE,
         source_entry_id: String(entry.row_number || ""),
-        document_type: "WorldTRO Entry",
+        document_type: "优先目录 Entry",
         entry_number: String(entry.row_number || ""),
         document_number: String(entry.row_number || ""),
         filed_at: entry.filed_at,
@@ -1794,8 +1795,8 @@ export class CaseSyncService {
   }
 
   async syncSinglePacerMonitorCase(caseRow) {
-    if (this.store.caseGroupHasWorldtroAuthority(caseRow)) {
-      return { enriched: false, reason: "worldtro-authoritative" };
+    if (this.store.caseGroupHasPriorityFeedAuthority(caseRow)) {
+      return { enriched: false, reason: "priority-authoritative" };
     }
 
     const payload = await this.pacerMonitor.enrichCase(caseRow);
@@ -2062,9 +2063,9 @@ export class CaseSyncService {
   }
 
   async syncSingleCourtListenerDocket(caseRow) {
-    if (this.store.caseGroupHasWorldtroAuthority(caseRow)) {
+    if (this.store.caseGroupHasPriorityFeedAuthority(caseRow)) {
       this.store.touchCaseDocketSync(caseRow.id);
-      return { enriched: false, reason: "worldtro-authoritative" };
+      return { enriched: false, reason: "priority-authoritative" };
     }
 
     const docketId = caseRow.courtlistener_docket_id;

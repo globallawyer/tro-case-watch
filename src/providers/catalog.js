@@ -1,3 +1,5 @@
+import { PRIORITY_FEED_BASE_URL, PRIORITY_FEED_PUBLIC_LABEL } from "../priority-feed.js";
+
 function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -151,7 +153,7 @@ function buildShortDocket(year, serial) {
   return `${normalizedYear.slice(-2)}-cv-${normalizedSerial}`;
 }
 
-function parseWorldtroCasePath(value) {
+function parseCatalogCasePath(value) {
   const match = String(value || "").match(/case-([A-Z]{2})-(\d{4})-cv-(\d{3,6})\.html/i);
   if (!match) {
     return null;
@@ -216,10 +218,10 @@ function looksLikeForeignNamedEntity(text) {
   return /\b[A-Z][a-z]{2,}(?:\s+[A-Z][a-z]{2,})+\b/.test(String(text || ""));
 }
 
-export class WorldtroClient {
+export class CatalogClient {
   constructor(config) {
     this.enabled = Boolean(config.enabled);
-    this.baseUrl = String(config.baseUrl || "https://worldtro.com").replace(/\/$/, "");
+    this.baseUrl = String(config.baseUrl || PRIORITY_FEED_BASE_URL).replace(/\/$/, "");
     this.minIntervalMs = Number(config.minIntervalMs || 1500);
     this.timeoutMs = Number(config.timeoutMs || 15000);
     this.maxCasesPerRun = Number(config.maxCasesPerRun || 3);
@@ -348,7 +350,7 @@ export class WorldtroClient {
       const rawUrl = linkMatch?.[1] || "";
       const pageId = linkMatch?.[2] || null;
       const caseUrl = absoluteUrl(rawUrl, pageUrl);
-      const parsedPath = parseWorldtroCasePath(caseUrl);
+      const parsedPath = parseCatalogCasePath(caseUrl);
       if (!caseUrl || !parsedPath?.docketNumber) {
         continue;
       }
@@ -492,7 +494,7 @@ export class WorldtroClient {
       });
     } catch (error) {
       if (error?.name === "AbortError") {
-        throw new Error(`WorldTRO request timed out after ${this.timeoutMs}ms`);
+        throw new Error(`${PRIORITY_FEED_PUBLIC_LABEL} 请求超时（${this.timeoutMs}ms）`);
       }
 
       throw error;
@@ -504,7 +506,7 @@ export class WorldtroClient {
 
     const text = await response.text();
     if (!response.ok) {
-      const error = new Error(`WorldTRO request failed: ${response.status}`);
+      const error = new Error(`${PRIORITY_FEED_PUBLIC_LABEL} 请求失败：${response.status}`);
       error.status = response.status;
       error.body = text;
       throw error;

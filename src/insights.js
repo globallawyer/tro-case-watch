@@ -1,3 +1,5 @@
+import { getPriorityFeedRaw } from "./priority-feed.js";
+
 const IP_TERMS = [
   "trademark",
   "copyright",
@@ -115,9 +117,9 @@ function pullPlaintiffName(caseLike) {
 }
 
 function pullLawFirms(caseLike) {
-  const worldtroFirm = normalize(caseLike.raw?.worldtro?.lawFirm);
-  if (worldtroFirm) {
-    return [worldtroFirm];
+  const priorityFeedFirm = normalize(getPriorityFeedRaw(caseLike.raw)?.lawFirm);
+  if (priorityFeedFirm) {
+    return [priorityFeedFirm];
   }
 
   const rawFirms = caseLike.raw?.firm;
@@ -400,7 +402,7 @@ export function deriveCaseInsights(caseLike) {
       ((ipHits >= 1 || isTroCase || text.includes("temporary restraining order")) &&
         (platformHits >= 1 || defendantCount >= 5 || text.includes("seller ids") || text.includes("marketplace"))));
   const status = deriveStatus(caseLike, text);
-  const brandName = cleanBrandName(caseLike.raw?.worldtro?.brand || plaintiffName);
+  const brandName = cleanBrandName(getPriorityFeedRaw(caseLike.raw)?.brand || plaintiffName);
   const highlights = buildHighlights(text);
   const actionItems = buildActionItems(status.key);
   const narrative = buildNarrative({

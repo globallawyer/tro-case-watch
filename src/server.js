@@ -11,7 +11,7 @@ import { Store } from "./db.js";
 import { CourtListenerClient } from "./providers/courtlistener.js";
 import { CourtFeedClient } from "./providers/courtfeed.js";
 import { LawFirmClient } from "./providers/lawfirm.js";
-import { WorldtroClient } from "./providers/worldtro.js";
+import { CatalogClient } from "./providers/catalog.js";
 import { PacerAdapter } from "./providers/pacer.js";
 import { PacerMonitorAdapter } from "./providers/pacermonitor.js";
 import {
@@ -48,7 +48,7 @@ const store = createStoreWithRecovery();
 const courtListener = new CourtListenerClient(config.courtListener);
 const courtFeeds = new CourtFeedClient(config.courtFeeds);
 const lawFirms = new LawFirmClient(config.lawFirms);
-const worldtro = new WorldtroClient(config.worldtro);
+const priorityFeed = new CatalogClient(config.priorityFeed);
 const pacerMonitor = new PacerMonitorAdapter(config.pacerMonitor);
 const pacer = new PacerAdapter(config.pacer, store);
 const translator = new TranslationService(config.translation, store);
@@ -58,7 +58,7 @@ const syncService = new CaseSyncService({
   courtFeeds,
   lawFirms,
   courtListener,
-  worldtro,
+  priorityFeed,
   pacerMonitor,
   pacer,
   translator
@@ -663,7 +663,7 @@ function sanitizeTimelineLabel(entry = {}) {
   return "Docket 时间线";
 }
 
-function hasWorldtroCoverage(item = {}) {
+function hasPriorityFeedCoverage(item = {}) {
   if (Number(getPriorityFeedRaw(item.raw)?.rowCount || 0) > 0) {
     return true;
   }
@@ -675,25 +675,25 @@ function hasWorldtroCoverage(item = {}) {
   return Array.isArray(item.entries) && item.entries.some((entry) => entry.primary_source === PRIORITY_FEED_SOURCE);
 }
 
-function shouldHydrateWorldtroOnDemand(item = {}) {
-  if (!config.worldtro.enabled || !item.insights?.is_seller_case) {
+function shouldHydratePriorityFeedOnDemand(item = {}) {
+  if (!config.priorityFeed.enabled || !item.insights?.is_seller_case) {
     return false;
   }
 
   const entryCount = Number(item.entries?.length || 0);
-  const worldtroRowCount = Number(getPriorityFeedRaw(item.raw)?.rowCount || 0);
+  const priorityFeedRowCount = Number(getPriorityFeedRaw(item.raw)?.rowCount || 0);
   const minimumExpectedEntries = Math.max(12, Number(item.docket_count || 0), 6);
 
-  if (!hasWorldtroCoverage(item)) {
+  if (!hasPriorityFeedCoverage(item)) {
     return entryCount < minimumExpectedEntries;
   }
 
-  return worldtroRowCount > 0 && entryCount < worldtroRowCount;
+  return priorityFeedRowCount > 0 && entryCount < priorityFeedRowCount;
 }
 
-function shouldForceWorldtroRefresh(item = {}) {
-  const worldtroRowCount = Number(getPriorityFeedRaw(item.raw)?.rowCount || 0);
-  return worldtroRowCount > 0 && Number(item.entries?.length || 0) < worldtroRowCount;
+function shouldForcePriorityFeedRefresh(item = {}) {
+  const priorityFeedRowCount = Number(getPriorityFeedRaw(item.raw)?.rowCount || 0);
+  return priorityFeedRowCount > 0 && Number(item.entries?.length || 0) < priorityFeedRowCount;
 }
 
 function shouldHydrateCourtListenerOnDemand(item = {}) {
@@ -765,12 +765,12 @@ function shouldHydratePacerMonitorOnDemand(item = {}) {
 
 function buildCaseHydrationPlan(item = {}) {
   const courtlistener = shouldHydrateCourtListenerOnDemand(item);
-  const worldtro = shouldHydrateWorldtroOnDemand(item);
+  const priorityFeed = shouldHydratePriorityFeedOnDemand(item);
   const pacermonitor = shouldHydratePacerMonitorOnDemand(item);
   return {
-    pending: courtlistener || worldtro || pacermonitor,
+    pending: courtlistener || priorityFeed || pacermonitor,
     courtlistener,
-    priority: worldtro,
+    priority: priorityFeed,
     pacermonitor
   };
 }
@@ -797,10 +797,10 @@ function queueCaseHydration(caseId, initialItem) {
       }
     }
 
-    if (plan.priority && shouldHydrateWorldtroOnDemand(current)) {
+    if (plan.priority && shouldHydratePriorityFeedOnDemand(current)) {
       try {
-        await syncService.enrichCaseWithWorldtro(caseId, {
-          force: shouldForceWorldtroRefresh(current)
+        await syncService.enrichCaseWithPriorityFeed(caseId, {
+          force: shouldForcePriorityFeedRefresh(current)
         });
         current = store.getCase(caseId) || current;
       } catch {
@@ -941,8 +941,8 @@ function serializeAdminStatus(status = {}) {
   return {
     ...serializePublicStatus(status),
     providers: {
-      priority: status.providers?.worldtro
-        ? { enabled: Boolean(status.providers.worldtro.enabled), state: status.providers.worldtro.state || null }
+      priority: status.providers?.priorityFeed
+        ? { enabled: Boolean(status.providers.priorityFeed.enabled), state: status.providers.priorityFeed.state || null }
         : null,
       official: status.providers?.courtlistener
         ? { enabled: Boolean(status.providers.courtlistener.enabled), state: status.providers.courtlistener.state || null }
@@ -965,7 +965,7 @@ function serializeGapPayload(payload = {}) {
     summary: {
       total: Number(payload.summary?.total || 0),
       courtlistener: Number(payload.summary?.courtlistener || 0),
-      priority: Number(payload.summary?.worldtro || 0),
+      priority: Number(payload.summary?.priority || 0),
       pacermonitor: Number(payload.summary?.pacermonitor || 0),
       challenge: Number(payload.summary?.challenge || 0)
     },
@@ -984,10 +984,10 @@ function serializeGapPayload(payload = {}) {
           expected_entries: Number(item.expected_entries || 0),
           gap: Number(item.gap || 0),
           courtlistener_gap: Number(item.courtlistener_gap || 0),
-          priority_row_count: Number(item.worldtro_row_count || 0),
-          priority_entries: Number(item.worldtro_entries || 0),
+          priority_row_count: Number(item.priority_row_count || 0),
+          priority_entries: Number(item.priority_entries || 0),
           pacermonitor_entries: Number(item.pacermonitor_entries || 0),
-          priority_synced_at: item.worldtro_synced_at || null,
+          priority_synced_at: item.priority_synced_at || null,
           pacermonitor_synced_at: item.pacermonitor_synced_at || null,
           pacermonitor_state: item.pacermonitor_state || null,
           is_recent_case: Boolean(item.is_recent_case),
@@ -1445,7 +1445,7 @@ async function main() {
     }
 
     if (providers.includes(PRIORITY_FEED_SOURCE)) {
-      await syncService.enrichCaseWithWorldtro(caseId, { force: true });
+      await syncService.enrichCaseWithPriorityFeed(caseId, { force: true });
     }
 
     if (providers.includes("pacermonitor")) {
@@ -1460,7 +1460,7 @@ async function main() {
   if (syncOnlyIndex !== -1) {
     const rawMode = process.argv[syncOnlyIndex + 1];
     if (rawMode === "catalog") {
-      const result = await syncService.syncWorldtroRecent("backfill");
+      const result = await syncService.syncPriorityFeedRecent("backfill");
       console.log(`[sync] completed catalog ${JSON.stringify(result)}`);
       process.exit(0);
     }
@@ -1489,7 +1489,7 @@ async function main() {
 
       while (rounds < maxRounds && idleStreak < idleRounds) {
         rounds += 1;
-        const result = await syncService.syncWorldtroRecent("backfill");
+        const result = await syncService.syncPriorityFeedRecent("backfill");
         totalSyncedCases += Number(result.syncedCases || 0);
         totalFailedCases += Number(result.failedCases || 0);
         totalDiscoveredCases += Number(result.discoveredCases || 0);
