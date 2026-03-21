@@ -2270,17 +2270,19 @@ export class Store {
               ? coverage.priorityFeedEntries === 0 || coverage.totalEntries < minimumExpectedEntries
               : false;
           const isStale = !syncedAt || syncedAt < staleBefore;
+          const shouldSync = !isFreshlyMissing && (needsCompletion || isStale);
           return {
             row,
             needsCompletion,
             isStale,
             isFreshlyMissing,
+            shouldSync,
             activityAtRaw: row.latest_docket_filed_at || row.date_filed || row.updated_at,
             priorityFeedRowCount,
             totalEntries: coverage.totalEntries
           };
         })
-        .filter((item) => item.needsCompletion || (!item.isFreshlyMissing && item.isStale))
+        .filter((item) => item.shouldSync)
         .sort((left, right) => {
           if (left.needsCompletion !== right.needsCompletion) {
             return left.needsCompletion ? -1 : 1;
@@ -2370,9 +2372,9 @@ export class Store {
             ? coverage.priorityFeedEntries === 0 || coverage.totalEntries < minimumExpectedEntries
             : !hasKnownPriorityFeedSource && coverage.totalEntries < minimumExpectedEntries;
         const isStale = !syncedAt || syncedAt < staleBefore;
-        const shouldSync = hasCivilDocketNumber && (
+        const shouldSync = hasCivilDocketNumber && !isFreshlyMissing && (
           needsCompletion ||
-          (!hasKnownPriorityFeedSource && !isFreshlyMissing) ||
+          !hasKnownPriorityFeedSource ||
           (hasKnownPriorityFeedSource && isStale) ||
           isPriorityFeedBacklog
         );
