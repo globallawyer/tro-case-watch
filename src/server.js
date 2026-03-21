@@ -82,14 +82,17 @@ function spawnDetachedTask(args = []) {
   child.unref();
 }
 
-function runSyncModeChild(mode, extraArgs = []) {
+function runSyncModeChild(mode, extraArgs = [], extraEnv = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(
       process.execPath,
       [currentScriptPath, "--sync-only", mode, "--result-json", ...extraArgs],
       {
         cwd: path.dirname(config.publicDir),
-        env: process.env,
+        env: {
+          ...process.env,
+          ...extraEnv
+        },
         stdio: ["ignore", "pipe", "pipe"]
       }
     );
@@ -1523,6 +1526,7 @@ async function main() {
       const maxRoundsIndex = process.argv.indexOf("--max-rounds");
       const idleRoundsIndex = process.argv.indexOf("--idle-rounds");
       const sleepMsIndex = process.argv.indexOf("--sleep-ms");
+      const batchSizeIndex = process.argv.indexOf("--batch-size");
       const maxRounds = maxRoundsIndex !== -1
         ? Math.max(Number(process.argv[maxRoundsIndex + 1] || 0), 1)
         : 200;
@@ -1532,6 +1536,9 @@ async function main() {
       const sleepMs = sleepMsIndex !== -1
         ? Math.max(Number(process.argv[sleepMsIndex + 1] || 0), 0)
         : 3000;
+      const batchSize = batchSizeIndex !== -1
+        ? Math.max(Number(process.argv[batchSizeIndex + 1] || 0), 1)
+        : 25;
 
       let rounds = 0;
       let idleStreak = 0;
@@ -1543,7 +1550,12 @@ async function main() {
 
       while (rounds < maxRounds && idleStreak < idleRounds) {
         rounds += 1;
-        const result = await runSyncModeChild("catalog");
+        console.log(`[sync] catalog round ${rounds} starting ${JSON.stringify({ batchSize })}`);
+        const result = await runSyncModeChild(
+          "catalog",
+          [],
+          { PRIORITY_FEED_BACKFILL_MAX_CASES_PER_RUN: String(batchSize) }
+        );
         totalSyncedCases += Number(result.syncedCases || 0);
         totalFailedCases += Number(result.failedCases || 0);
         totalDiscoveredCases += Number(result.discoveredCases || 0);
@@ -1573,6 +1585,7 @@ async function main() {
         idleStreak,
         maxRounds,
         idleRounds,
+        batchSize,
         totalSyncedCases,
         totalFailedCases,
         totalDiscoveredCases,
