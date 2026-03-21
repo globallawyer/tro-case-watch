@@ -191,6 +191,29 @@ function buildCanonicalCaseGroupKey(caseLike) {
   return `${courtKey}|${docketKey}`;
 }
 
+function buildWorldtroTagClause() {
+  return "(tags_marker LIKE '%|seller_tro|%' OR tags_marker LIKE '%|tro|%' OR tags_marker LIKE '%|schedule_a|%')";
+}
+
+const TRACKED_LAW_FIRM_SOURCE_PATTERNS = [
+  "sriplaw.com",
+  "gbc.law",
+  "whitewoodlaw.com",
+  "jiangip.com"
+];
+
+function buildTrackedLawFirmSourceClause(columnName = "source_urls_json") {
+  return `(${TRACKED_LAW_FIRM_SOURCE_PATTERNS.map((pattern) => `${columnName} LIKE '%${pattern}%'`).join(" OR ")})`;
+}
+
+function sourceUrlsContain(caseLike, needle) {
+  return (caseLike?.source_urls || []).some((url) => String(url || "").includes(needle));
+}
+
+function hasTrackedLawFirmSource(caseLike) {
+  return TRACKED_LAW_FIRM_SOURCE_PATTERNS.some((pattern) => sourceUrlsContain(caseLike, pattern));
+}
+
 const shanghaiDateFormatter = new Intl.DateTimeFormat("en-CA", {
   timeZone: "Asia/Shanghai",
   year: "numeric",
@@ -1610,6 +1633,105 @@ export class Store {
     this.invalidateCaseViews();
   }
 
+  getRelatedCaseIds(caseLike) {
+    if (!caseLike) {
+      return [];
+    }
+
+    const canonicalGroupKey = buildCanonicalCaseGroupKey(caseLike);
+    const { exactNeedles, suffixNeedles } = buildDocketSearchNeedles(caseLike.docket_number);
+    const clauses = [];
+    const params = [];
+
+    for (const needle of exactNeedles) {
+      clauses.push("lower(docket_number) = ?");
+      params.push(needle);
+    }
+
+    for (const needle of suffixNeedles) {
+      clauses.push("lower(docket_number) LIKE ?");
+      params.push(`%${needle}`);
+    }
+
+    if (!clauses.length) {
+      return [Number(caseLike.id)].filter((value) => Number.isFinite(value) && value > 0);
+    }
+
+    const matched = this.db
+      .prepare(`
+        SELECT id, docket_number, court_id, court_name
+        FROM cases
+        WHERE ${clauses.join(" OR ")}
+        LIMIT 250
+      `)
+      .all(...params)
+      .filter((candidate) => buildCanonicalCaseGroupKey(candidate) === canonicalGroupKey)
+      .map((candidate) => Number(candidate.id))
+      .filter((value) => Number.isFinite(value) && value > 0);
+
+    return matched.length ? [...new Set(matched)] : [Number(caseLike.id)].filter((value) => Number.isFinite(value) && value > 0);
+  }
+
+  deleteDocketEntriesBySourceForRelatedCases(caseLike, primarySource) {
+    const ids = this.getRelatedCaseIds(caseLike);
+    if (!ids.length) {
+      return 0;
+    }
+
+    const placeholders = ids.map(() => "?").join(", ");
+    const result = this.db
+      .prepare(`DELETE FROM docket_entries WHERE primary_source = ? AND case_id IN (${placeholders})`)
+      .run(primarySource, ...ids);
+    this.invalidateCaseViews();
+    return Number(result?.changes || 0);
+  }
+
+  deleteDocketEntriesNotFromSourceForRelatedCases(caseLike, primarySource) {
+    const ids = this.getRelatedCaseIds(caseLike);
+    if (!ids.length) {
+      return 0;
+    }
+
+    const placeholders = ids.map(() => "?").join(", ");
+    const result = this.db
+      .prepare(`DELETE FROM docket_entries WHERE primary_source <> ? AND case_id IN (${placeholders})`)
+      .run(primarySource, ...ids);
+    this.invalidateCaseViews();
+    return Number(result?.changes || 0);
+  }
+
+  caseGroupHasWorldtroAuthority(caseLike) {
+    const ids = this.getRelatedCaseIds(caseLike);
+    if (!ids.length) {
+      return false;
+    }
+
+    const placeholders = ids.map(() => "?").join(", ");
+    const caseRows = this.db
+      .prepare(`
+        SELECT raw_json, source_urls_json
+        FROM cases
+        WHERE id IN (${placeholders})
+      `)
+      .all(...ids)
+      .map((row) => hydrateCase(row));
+
+    if (caseRows.some((row) => getWorldtroRowCount(row) > 0 || sourceUrlsContain(row, "worldtro.com"))) {
+      return true;
+    }
+
+    const coverage = this.db
+      .prepare(`
+        SELECT COUNT(*) AS worldtro_entries
+        FROM docket_entries
+        WHERE primary_source = 'worldtro'
+          AND case_id IN (${placeholders})
+      `)
+      .get(...ids);
+
+    return Number(coverage?.worldtro_entries || 0) > 0;
+  }
+
   upsertDocketEntry(record) {
     const existing = this.db
       .prepare("SELECT id, description FROM docket_entries WHERE source_entry_key = ?")
@@ -1970,7 +2092,7 @@ export class Store {
   }
 
   getCasesNeedingDocketSync(limit) {
-    return this.db
+    const candidateRows = this.db
       .prepare(`
         SELECT *
         FROM cases
@@ -1997,8 +2119,30 @@ export class Store {
                  COALESCE(latest_docket_filed_at, date_filed, updated_at) DESC
         LIMIT ?
       `)
-      .all(limit)
+      .all(Math.max(limit * 12, 120))
       .map(hydrateCase);
+
+    const selected = [];
+    const groupAuthorityCache = new Map();
+
+    for (const row of candidateRows) {
+      if (selected.length >= limit) {
+        break;
+      }
+
+      const groupKey = buildCanonicalCaseGroupKey(row) || `id:${row.id}`;
+      let hasWorldtroAuthority = groupAuthorityCache.get(groupKey);
+      if (hasWorldtroAuthority === undefined) {
+        hasWorldtroAuthority = this.caseGroupHasWorldtroAuthority(row);
+        groupAuthorityCache.set(groupKey, hasWorldtroAuthority);
+      }
+
+      if (!hasWorldtroAuthority) {
+        selected.push(row);
+      }
+    }
+
+    return selected;
   }
 
   getEntryCoverageForCaseIds(caseIds = []) {
@@ -2042,14 +2186,14 @@ export class Store {
 
   getCasesNeedingWorldtroSync(limit, staleAfterHours = 12) {
     const staleBefore = Date.now() - staleAfterHours * 60 * 60 * 1000;
-    const poolSize = Math.max(limit * 12, 180);
+    const poolSize = Math.max(limit * 40, 400);
     const fetchCandidateRows = (whereSql, params = [], orderBySql, queryLimit = poolSize) =>
       this.db
         .prepare(`
           SELECT *
           FROM cases
           WHERE date(date_filed) >= date(?)
-            AND tags_marker LIKE '%|seller_tro|%'
+            AND ${buildWorldtroTagClause()}
             AND ${whereSql}
           ORDER BY ${orderBySql}
           LIMIT ?
@@ -2066,8 +2210,19 @@ export class Store {
     const knownWorldtroRows = fetchCandidateRows(
       `(source_urls_json LIKE '%worldtro.com%' OR raw_json LIKE '%"worldtro"%')`,
       [],
-      `COALESCE(latest_docket_filed_at, date_filed, updated_at) ASC, id ASC`,
+      `COALESCE(latest_docket_filed_at, date_filed, updated_at) DESC, docket_count DESC, id ASC`,
       Math.max(limit * 8, 120)
+    );
+    const lawFirmBackedRows = fetchCandidateRows(
+      `(${buildTrackedLawFirmSourceClause("source_urls_json")})
+       AND (raw_json NOT LIKE '%"worldtro"%')
+       AND (source_urls_json NOT LIKE '%worldtro.com%')`,
+      [],
+      `docket_count DESC,
+       COALESCE(latest_docket_filed_at, date_filed, updated_at) DESC,
+       COALESCE(last_synced_at, '1970-01-01T00:00:00.000Z') ASC,
+       id ASC`,
+      Math.max(limit * 20, 240)
     );
     const sparseRows = fetchCandidateRows(
       `docket_count <= ?`,
@@ -2075,10 +2230,21 @@ export class Store {
       `COALESCE(latest_docket_filed_at, date_filed, updated_at) DESC, updated_at DESC`,
       Math.max(limit * 8, 120)
     );
+    const legacyUnsyncedRows = fetchCandidateRows(
+      `(raw_json NOT LIKE '%"worldtro"%')
+       AND (source_urls_json NOT LIKE '%worldtro.com%')
+       AND docket_count >= ?`,
+      [8],
+      `docket_count DESC,
+       COALESCE(latest_docket_filed_at, date_filed, updated_at) DESC,
+       COALESCE(last_synced_at, '1970-01-01T00:00:00.000Z') ASC,
+       id ASC`,
+      Math.max(limit * 20, 240)
+    );
 
     const candidateRows = [];
     const seenCandidateIds = new Set();
-    for (const row of [...recentRows, ...knownWorldtroRows, ...sparseRows]) {
+    for (const row of [...knownWorldtroRows, ...lawFirmBackedRows, ...recentRows, ...sparseRows, ...legacyUnsyncedRows]) {
       if (seenCandidateIds.has(row.id)) {
         continue;
       }
@@ -2101,9 +2267,11 @@ export class Store {
         const hasWorldtroUrl = row.source_urls?.some((url) => String(url).includes("worldtro.com"));
         const hasWorldtroEntries = worldtroRowCount > 0 || coverage.worldtroEntries > 0;
         const hasKnownWorldtroSource = hasWorldtroUrl || hasWorldtroEntries;
+        const hasLawFirmSource = hasTrackedLawFirmSource(row);
         const minimumExpectedEntries = Math.max(12, Number(row.docket_count || 0), 6);
         const missingMarked = Boolean(row.raw?.worldtro?.missing);
         const isFreshlyMissing = missingMarked && syncedAt && syncedAt >= staleBefore;
+        const isLegacyUnsynced = !hasKnownWorldtroSource && Number(row.docket_count || 0) >= 8;
 
         const needsCompletion = worldtroRowCount > 0
           ? coverage.totalEntries < worldtroRowCount
@@ -2114,17 +2282,26 @@ export class Store {
         const shouldSync = hasCivilDocketNumber && (
           needsCompletion ||
           (!hasKnownWorldtroSource && !isFreshlyMissing) ||
-          (hasKnownWorldtroSource && isStale)
+          (hasKnownWorldtroSource && isStale) ||
+          isLegacyUnsynced
         );
         const activityAtRaw = row.latest_docket_filed_at || row.date_filed || row.updated_at;
 
         const priority = needsCompletion
           ? hasWorldtroUrl
             ? 0
-            : 1
+            : hasLawFirmSource
+              ? 1
+              : 2
+          : hasLawFirmSource
+            ? 3
+            : isLegacyUnsynced
+              ? Number(row.docket_count || 0) >= 20
+                ? 4
+                : 5
           : !hasKnownWorldtroSource
-            ? 2
-            : 3;
+            ? 6
+            : 7;
 
         return {
           row,
@@ -2133,6 +2310,9 @@ export class Store {
           totalEntries: coverage.totalEntries,
           hasWorldtroCoverage: hasKnownWorldtroSource,
           hasWorldtroUrl,
+          hasLawFirmSource,
+          expectedEntries: minimumExpectedEntries,
+          isLegacyUnsynced,
           activityAtRaw
         };
       })
@@ -2164,6 +2344,14 @@ export class Store {
         return left.hasWorldtroCoverage ? 1 : -1;
       }
 
+      if (Number(left.row.docket_count || 0) !== Number(right.row.docket_count || 0)) {
+        return Number(right.row.docket_count || 0) - Number(left.row.docket_count || 0);
+      }
+
+      if (left.expectedEntries !== right.expectedEntries) {
+        return right.expectedEntries - left.expectedEntries;
+      }
+
       const olderActivityCompare = String(left.activityAtRaw || "").localeCompare(String(right.activityAtRaw || ""));
       if (olderActivityCompare !== 0) {
         return olderActivityCompare;
@@ -2176,7 +2364,59 @@ export class Store {
       return Number(left.row.id || 0) - Number(right.row.id || 0);
     });
 
-    const recentSlots = Math.max(1, Math.ceil(limit * 0.65));
+    const knownWorldtroOrdered = rows
+      .filter((item) => item.hasWorldtroUrl || item.hasWorldtroCoverage)
+      .sort((left, right) => {
+        if (left.priority !== right.priority) {
+          return left.priority - right.priority;
+        }
+
+        if (left.hasWorldtroUrl !== right.hasWorldtroUrl) {
+          return left.hasWorldtroUrl ? -1 : 1;
+        }
+
+        if (left.expectedEntries !== right.expectedEntries) {
+          return right.expectedEntries - left.expectedEntries;
+        }
+
+        return compareCaseActivityDesc(left.activityAtRaw, right.activityAtRaw);
+      });
+
+    const lawFirmBackedOrdered = rows
+      .filter((item) => item.hasLawFirmSource && !item.hasWorldtroUrl && !item.hasWorldtroCoverage)
+      .sort((left, right) => {
+        if (left.priority !== right.priority) {
+          return left.priority - right.priority;
+        }
+
+        if (Number(left.row.docket_count || 0) !== Number(right.row.docket_count || 0)) {
+          return Number(right.row.docket_count || 0) - Number(left.row.docket_count || 0);
+        }
+
+        if (left.expectedEntries !== right.expectedEntries) {
+          return right.expectedEntries - left.expectedEntries;
+        }
+
+        return compareCaseActivityDesc(left.activityAtRaw, right.activityAtRaw);
+      });
+
+    const legacyOrdered = rows
+      .filter((item) => item.isLegacyUnsynced && !item.hasLawFirmSource)
+      .sort((left, right) => {
+        if (Number(left.row.docket_count || 0) !== Number(right.row.docket_count || 0)) {
+          return Number(right.row.docket_count || 0) - Number(left.row.docket_count || 0);
+        }
+
+        if (left.expectedEntries !== right.expectedEntries) {
+          return right.expectedEntries - left.expectedEntries;
+        }
+
+        return compareCaseActivityDesc(left.activityAtRaw, right.activityAtRaw);
+      });
+
+    const knownWorldtroSlots = Math.max(1, Math.min(limit, Math.ceil(limit * 0.4)));
+    const lawFirmSlots = Math.max(1, Math.min(limit, Math.ceil(limit * 0.35)));
+    const recentSlots = Math.max(1, limit - knownWorldtroSlots - lawFirmSlots);
     const selected = [];
     const seen = new Set();
     const appendRows = (items, maxItems = limit) => {
@@ -2190,7 +2430,10 @@ export class Store {
       }
     };
 
-    appendRows(recentOrdered, recentSlots);
+    appendRows(knownWorldtroOrdered, knownWorldtroSlots);
+    appendRows(lawFirmBackedOrdered, knownWorldtroSlots + lawFirmSlots);
+    appendRows(recentOrdered, knownWorldtroSlots + lawFirmSlots + recentSlots);
+    appendRows(legacyOrdered, limit);
     appendRows(backlogOrdered, limit);
     appendRows(recentOrdered, limit);
 
@@ -2289,6 +2532,7 @@ export class Store {
           shouldSync
         };
       })
+      .filter((item) => !hasWorldtroAuthority(item.row))
       .filter((item) => item.shouldSync)
       .sort((left, right) => {
         if (left.priority !== right.priority) {

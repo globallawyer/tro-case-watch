@@ -311,16 +311,6 @@ export class CaseSyncService {
       }
 
       try {
-        const docketResult = await this.syncCourtListenerDockets(mode);
-        stats.docketCasesSynced += docketResult.syncedCases;
-        if (docketResult.note) {
-          stats.notes.push(docketResult.note);
-        }
-      } catch (error) {
-        stats.notes.push(`CourtListener docket 补抓跳过：${error.message}`);
-      }
-
-      try {
         const worldtroResult = await this.syncWorldtroRecent(mode);
         stats.worldtroCasesSynced += worldtroResult.syncedCases;
         if (worldtroResult.note) {
@@ -328,6 +318,16 @@ export class CaseSyncService {
         }
       } catch (error) {
         stats.notes.push(`WorldTRO 补源跳过：${error.message}`);
+      }
+
+      try {
+        const docketResult = await this.syncCourtListenerDockets(mode);
+        stats.docketCasesSynced += docketResult.syncedCases;
+        if (docketResult.note) {
+          stats.notes.push(docketResult.note);
+        }
+      } catch (error) {
+        stats.notes.push(`CourtListener docket 补抓跳过：${error.message}`);
       }
 
       try {
@@ -1330,7 +1330,8 @@ export class CaseSyncService {
       return { enriched: false, reason: "not-found" };
     }
 
-    this.store.deleteDocketEntriesBySource(caseRow.id, "worldtro");
+    this.store.deleteDocketEntriesNotFromSourceForRelatedCases(caseRow, "worldtro");
+    this.store.deleteDocketEntriesBySourceForRelatedCases(caseRow, "worldtro");
 
     const mergedRaw = {
       ...(caseRow.raw || {}),
@@ -1413,6 +1414,10 @@ export class CaseSyncService {
   }
 
   async syncSinglePacerMonitorCase(caseRow) {
+    if (this.store.caseGroupHasWorldtroAuthority(caseRow)) {
+      return { enriched: false, reason: "worldtro-authoritative" };
+    }
+
     const payload = await this.pacerMonitor.enrichCase(caseRow);
     const timestamp = new Date().toISOString();
     if (!payload) {
@@ -1677,6 +1682,11 @@ export class CaseSyncService {
   }
 
   async syncSingleCourtListenerDocket(caseRow) {
+    if (this.store.caseGroupHasWorldtroAuthority(caseRow)) {
+      this.store.touchCaseDocketSync(caseRow.id);
+      return { enriched: false, reason: "worldtro-authoritative" };
+    }
+
     const docketId = caseRow.courtlistener_docket_id;
     if (!docketId) {
       return { enriched: false, reason: "not-found" };
