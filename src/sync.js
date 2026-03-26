@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import { buildTagsMarker, classifyCase, discoveryPresets } from "./queries.js";
 import { docketLooksLike, normalizeDocket, normalizeText } from "./insights.js";
+import { hasStrictScheduleATerm, isOutOfScopeCase } from "./case-scope.js";
 import {
   PRIORITY_FEED_DISCOVERY_CHECKPOINT,
   PRIORITY_FEED_ENTRY_SOURCE,
@@ -36,6 +37,21 @@ function uniqueByNormalized(values) {
   }
 
   return [...unique.values()];
+}
+
+function buildScopeCandidate(fields = {}) {
+  return {
+    case_name: fields.case_name || fields.caseName || null,
+    court_name: fields.court_name || fields.courtName || null,
+    cause: fields.cause || null,
+    nature_of_suit: fields.nature_of_suit || fields.natureOfSuit || fields.suitNature || null,
+    recent_activity_summary: fields.recent_activity_summary || fields.summary || null,
+    plaintiffs: asArray(fields.plaintiffs),
+    defendants: asArray(fields.defendants),
+    tags: asArray(fields.tags),
+    entries: asArray(fields.entries),
+    raw: fields.raw || {}
+  };
 }
 
 const DISTRICT_DIRECTION_MAP = {
@@ -125,7 +141,6 @@ const PRIORITY_FEED_DISCOVERY_STOP_WORDS = new Set([
   "et",
   "al"
 ]);
-const WORKER_STATUS_CHECKPOINT_KEY = "worker:status";
 
 const FULL_CATALOG_START_DATE = "1900-01-01";
 
@@ -466,22 +481,6 @@ export class CaseSyncService {
     const lastNotes = dashboard.recentSync?.stats?.notes || [];
     const knownNoDocketEntries = lastNotes.some((note) => note.includes("无权访问 docket-entries"));
     const recentSyncRunning = dashboard.recentSync?.status === "running";
-    const workerCheckpoint = this.store.getCheckpoint(WORKER_STATUS_CHECKPOINT_KEY) || null;
-    const workerUpdatedAt = workerCheckpoint?.updatedAt || null;
-    const workerUpdatedMs = workerUpdatedAt ? Date.parse(workerUpdatedAt) : 0;
-    const workerStaleAfterMs = Math.max(
-      Number(this.config.sync.workerCycleSleepMs || 0) * 3,
-      Number(this.config.sync.workerErrorBackoffMs || 0) * 2,
-      2 * 60 * 1000
-    );
-    const worker = workerCheckpoint
-      ? {
-          message: workerCheckpoint.message || null,
-          updatedAt: workerUpdatedAt,
-          stale: !workerUpdatedMs || Date.now() - workerUpdatedMs > workerStaleAfterMs,
-          payload: workerCheckpoint.payload || null
-        }
-      : null;
 
     return {
       ...this.state,
@@ -489,7 +488,6 @@ export class CaseSyncService {
       currentMode: this.state.currentMode || (recentSyncRunning ? dashboard.recentSync?.mode || null : null),
       lastStartedAt: this.state.lastStartedAt || dashboard.recentSync?.started_at || null,
       lastFinishedAt: this.state.lastFinishedAt || dashboard.recentSync?.finished_at || null,
-      worker,
       dashboard,
       backfill: this.getBackfillStatus(),
       providers: {
@@ -802,6 +800,24 @@ export class CaseSyncService {
       return false;
     }
 
+    const scopeCandidate = buildScopeCandidate({
+      caseName: item.caseName,
+      courtName: item.courtName,
+      summary: item.description || item.documentType || null,
+      tags,
+      raw: {
+        recap_documents: [
+          {
+            short_description: item.documentType,
+            description: item.description
+          }
+        ]
+      }
+    });
+    if (isOutOfScopeCase(scopeCandidate)) {
+      return false;
+    }
+
     if (existingCase) {
       return true;
     }
@@ -1032,10 +1048,11 @@ export class CaseSyncService {
       ].join(" | ")
     );
     const isStructuredTroFirm = item.sourceId === "sriplaw" || item.sourceId === "gbc";
+    const hasStrictScheduleA = hasStrictScheduleATerm(text);
     const looksLikeSellerCaption =
       text.includes("et al") ||
       text.includes("does") ||
-      text.includes("schedule a") ||
+      hasStrictScheduleA ||
       text.includes("seller") ||
       text.includes("marketplace") ||
       text.includes("temporary restraining order") ||
@@ -1049,7 +1066,7 @@ export class CaseSyncService {
       nextTags.add("tro");
     }
 
-    if (text.includes("schedule a")) {
+    if (hasStrictScheduleA) {
       nextTags.add("schedule_a");
     }
 
@@ -1058,6 +1075,20 @@ export class CaseSyncService {
 
   shouldTrackLawFirmItem(item, existingCase, tags) {
     if (!/\b\d{2}-cv-\d{3,6}\b/i.test(String(item.docketNumber || ""))) {
+      return false;
+    }
+
+    const scopeCandidate = buildScopeCandidate({
+      caseName: item.caseName,
+      courtName: item.courtName,
+      summary: item.summary,
+      entries: item.entries,
+      tags,
+      raw: {
+        firm: item.lawFirm ? [item.lawFirm] : []
+      }
+    });
+    if (isOutOfScopeCase(scopeCandidate)) {
       return false;
     }
 
@@ -2016,6 +2047,20 @@ export class CaseSyncService {
       const latestDoc = documents[0];
       const parties = deriveParties(result);
       const tags = classifyCase(result, preset.tags);
+      const scopeCandidate = buildScopeCandidate({
+        case_name: valueOf(result.caseName, result.case_name_full),
+        court_name: valueOf(result.court),
+        cause: valueOf(result.cause),
+        nature_of_suit: valueOf(result.nature_of_suit, result.suitNature),
+        recent_activity_summary: valueOf(latestDoc?.short_description, latestDoc?.description),
+        plaintiffs: parties.plaintiffs,
+        defendants: parties.defendants,
+        tags,
+        raw: result
+      });
+      if (isOutOfScopeCase(scopeCandidate)) {
+        continue;
+      }
       const existingCase = this.store.findCaseByCourtAndDocket({
         courtId: valueOf(result.court_id),
         courtName: valueOf(result.court),

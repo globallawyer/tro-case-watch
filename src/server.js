@@ -67,7 +67,6 @@ const backgroundCaseHydrations = new Map();
 const publicResponseCache = new Map();
 const publicRateLimitBuckets = new Map();
 const browserGuardCookieName = "__tt_guard";
-const workerCheckpointKey = "worker:status";
 
 function clearPublicResponseCache() {
   publicResponseCache.clear();
@@ -138,14 +137,6 @@ function runSyncModeChild(mode, extraArgs = [], extraEnv = {}, { streamLogs = fa
 }
 
 function logWorker(message, payload = null) {
-  try {
-    store.saveCheckpoint(workerCheckpointKey, {
-      message,
-      payload,
-      updatedAt: new Date().toISOString()
-    });
-  } catch {}
-
   if (payload === null || payload === undefined) {
     console.log(`[worker] ${message}`);
     return;
@@ -980,13 +971,6 @@ function serializePublicStatus(status = {}) {
     currentMode: status.currentMode || null,
     lastStartedAt: status.lastStartedAt || null,
     lastFinishedAt: status.lastFinishedAt || null,
-    worker: status.worker
-      ? {
-          message: status.worker.message || null,
-          updatedAt: status.worker.updatedAt || null,
-          stale: Boolean(status.worker.stale)
-        }
-      : null,
     dashboard: {
       totals: {
         total_cases: Number(dashboard.totals?.total_cases || 0),
@@ -1019,14 +1003,6 @@ function serializePublicStatus(status = {}) {
 function serializeAdminStatus(status = {}) {
   return {
     ...serializePublicStatus(status),
-    worker: status.worker
-      ? {
-          message: status.worker.message || null,
-          updatedAt: status.worker.updatedAt || null,
-          stale: Boolean(status.worker.stale),
-          payload: status.worker.payload || null
-        }
-      : null,
     providers: {
       priority: status.providers?.priorityFeed
         ? { enabled: Boolean(status.providers.priorityFeed.enabled), state: status.providers.priorityFeed.state || null }
@@ -1154,7 +1130,6 @@ async function handleApi(request, response, pathname, searchParams) {
       return sendJson(response, 200, cached);
     }
 
-    const publicStatus = syncService.getPublicStatus();
     const payload = {
       ok: true,
       startDate: config.sync.startDate,
@@ -1163,8 +1138,7 @@ async function handleApi(request, response, pathname, searchParams) {
         currentMode: syncService.state.currentMode,
         lastStartedAt: syncService.state.lastStartedAt,
         lastFinishedAt: syncService.state.lastFinishedAt,
-        lastError: syncService.state.lastError,
-        worker: publicStatus.worker || null
+        lastError: syncService.state.lastError
       }
     };
     setCachedPublicPayload(request, pathname, payload);
@@ -1545,6 +1519,17 @@ async function main() {
     }
 
     console.log(`[sync] enriched case ${caseId} with ${providers.join(",")}`);
+    process.exit(0);
+  }
+
+  if (process.argv.includes("--purge-out-of-scope")) {
+    const dryRun = process.argv.includes("--dry-run");
+    const sampleLimitIndex = process.argv.indexOf("--sample-limit");
+    const sampleLimit = sampleLimitIndex !== -1
+      ? Math.min(Math.max(Number(process.argv[sampleLimitIndex + 1] || 25), 1), 200)
+      : 25;
+    const result = store.purgeOutOfScopeCases({ dryRun, sampleLimit });
+    console.log(JSON.stringify(result, null, 2));
     process.exit(0);
   }
 

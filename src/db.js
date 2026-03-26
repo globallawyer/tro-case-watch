@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { evaluateCaseScope } from "./case-scope.js";
 import { deriveCaseInsights, normalizeDocket, normalizeText } from "./insights.js";
 import { buildTagsMarker } from "./queries.js";
 import {
@@ -1649,6 +1650,92 @@ export class Store {
 
     this.db.prepare(`UPDATE cases SET ${sets.join(", ")} WHERE id = ?`).run(...values);
     this.invalidateCaseViews();
+  }
+
+  purgeOutOfScopeCases({ dryRun = false, sampleLimit = 25 } = {}) {
+    const rows = this.db
+      .prepare(`
+        SELECT id, docket_number, court_name, date_filed, case_name, cause, nature_of_suit,
+               tags_marker, source_urls_json, plaintiffs_json, defendants_json,
+               recent_activity_summary, raw_json
+        FROM cases
+        ORDER BY id
+      `)
+      .all();
+
+    const ids = [];
+    const samples = [];
+    let taggedMatches = 0;
+
+    for (const row of rows) {
+      const raw = parseJson(row.raw_json, {});
+      const sourceUrls = parseJson(row.source_urls_json, []);
+      const plaintiffs = parseJson(row.plaintiffs_json, []);
+      const defendants = parseJson(row.defendants_json, []);
+      const tags = String(row.tags_marker || "").split("|").map((value) => value.trim()).filter(Boolean);
+      const scope = evaluateCaseScope({
+        case_name: row.case_name,
+        court_name: row.court_name,
+        date_filed: row.date_filed,
+        cause: row.cause,
+        nature_of_suit: row.nature_of_suit,
+        tags,
+        tags_marker: row.tags_marker,
+        source_urls: sourceUrls,
+        plaintiffs,
+        defendants,
+        recent_activity_summary: row.recent_activity_summary,
+        raw
+      });
+
+      if (!scope.isOutOfScope) {
+        continue;
+      }
+
+      ids.push(row.id);
+      if (tags.includes("schedule_a") || tags.includes("seller_tro")) {
+        taggedMatches += 1;
+      }
+
+      if (samples.length < sampleLimit) {
+        samples.push({
+          id: row.id,
+          docketNumber: row.docket_number,
+          caseName: row.case_name,
+          dateFiled: row.date_filed,
+          cause: row.cause,
+          natureOfSuit: row.nature_of_suit,
+          tags,
+          nonTargetHits: scope.nonTargetHits
+        });
+      }
+    }
+
+    let deletedEntries = 0;
+    let deletedCases = 0;
+
+    if (!dryRun && ids.length) {
+      for (let index = 0; index < ids.length; index += 500) {
+        const chunk = ids.slice(index, index + 500);
+        const placeholders = chunk.map(() => "?").join(", ");
+        deletedEntries += Number(
+          this.db.prepare(`SELECT count(*) AS n FROM docket_entries WHERE case_id IN (${placeholders})`).get(...chunk)?.n || 0
+        );
+        deletedCases += Number(
+          this.db.prepare(`DELETE FROM cases WHERE id IN (${placeholders})`).run(...chunk)?.changes || 0
+        );
+      }
+      this.invalidateCaseViews();
+    }
+
+    return {
+      matchedCases: ids.length,
+      deletedCases,
+      deletedEntries,
+      taggedMatches,
+      dryRun,
+      samples
+    };
   }
 
   touchCaseDocketSync(caseId) {

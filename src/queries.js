@@ -1,3 +1,5 @@
+import { hasStrictScheduleATerm } from "./case-scope.js";
+
 export const discoveryPresets = [
   {
     key: "tro_phrase",
@@ -113,7 +115,7 @@ export function classifyCase(searchResult, presetTags = []) {
   const hasIp = includesOne(text, IP_PATTERNS);
   const hasBankruptcy = includesOne(text, BANKRUPTCY_PATTERNS);
   const hasStrongScheduleA = includesOne(text, SCHEDULE_A_STRONG_PATTERNS);
-  const hasLooseScheduleA = text.includes("schedule a");
+  const hasLooseScheduleA = hasStrictScheduleATerm(text);
 
   if (requestedTro || hasTro) {
     tags.add("tro");

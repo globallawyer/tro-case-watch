@@ -15,6 +15,7 @@
     "sync:catalog:drain": "node src/server.js --sync-only catalog-until-idle",
     "sync:courts": "node src/server.js --sync-only courtfeeds",
     "sync:lawfirms": "node src/server.js --sync-only lawfirms",
-    "worker": "node src/server.js --worker"
+    "worker": "node src/server.js --worker",
+    "purge:out-of-scope": "node src/server.js --purge-out-of-scope"
   }
 }
