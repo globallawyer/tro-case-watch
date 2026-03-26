@@ -136,15 +136,6 @@ function runSyncModeChild(mode, extraArgs = [], extraEnv = {}, { streamLogs = fa
   });
 }
 
-function logWorker(message, payload = null) {
-  if (payload === null || payload === undefined) {
-    console.log(`[worker] ${message}`);
-    return;
-  }
-
-  console.log(`[worker] ${message} ${JSON.stringify(payload)}`);
-}
-
 function ensureSeedDatabase() {
   if (!config.seedDbArchivePath || !fs.existsSync(config.seedDbArchivePath)) {
     return;
@@ -1492,9 +1483,6 @@ const server = http.createServer(async (request, response) => {
 });
 
 async function main() {
-  const workerMode = process.argv.includes("--worker");
-  const workerOnce = process.argv.includes("--worker-once");
-
   const enrichCaseIdIndex = process.argv.indexOf("--enrich-case-id");
   if (enrichCaseIdIndex !== -1) {
     const caseId = Number(process.argv[enrichCaseIdIndex + 1]);
@@ -1619,7 +1607,7 @@ async function main() {
         }
       }
 
-      const summary = {
+      console.log(`[sync] completed catalog-until-idle ${JSON.stringify({
         rounds,
         idleStreak,
         maxRounds,
@@ -1629,12 +1617,7 @@ async function main() {
         totalFailedCases,
         totalNotFoundCases,
         discoverySnapshot
-      };
-      if (resultJson) {
-        console.log(JSON.stringify(summary));
-      } else {
-        console.log(`[sync] completed catalog-until-idle ${JSON.stringify(summary)}`);
-      }
+      })}`);
       process.exit(0);
     }
 
@@ -1675,79 +1658,9 @@ async function main() {
     }
 
     const mode = rawMode === "backfill" ? "backfill" : "recent";
-    const result = await syncService.run(mode);
-    if (resultJson) {
-      console.log(JSON.stringify(result));
-    } else {
-      console.log(`[sync] completed ${mode}`);
-    }
+    await syncService.run(mode);
+    console.log(`[sync] completed ${mode}`);
     process.exit(0);
-  }
-
-  if (workerMode) {
-    let lastBackfillAt = 0;
-
-    while (true) {
-      const cycleStartedAt = Date.now();
-      logWorker("cycle starting", {
-        cycleStartedAt: new Date(cycleStartedAt).toISOString(),
-        catalogBatchSize: config.sync.workerCatalogBatchSize,
-        catalogMaxRounds: config.sync.workerCatalogMaxRounds
-      });
-
-      try {
-        const recentResult = await runSyncModeChild("recent");
-        logWorker("recent completed", {
-          recentSyncStatus: recentResult?.dashboard?.recentSync?.status || null,
-          totalCases: recentResult?.dashboard?.totals?.total_cases || null,
-          watchlistCases: recentResult?.dashboard?.totals?.watchlist_cases || null
-        });
-      } catch (error) {
-        logWorker("recent failed", { error: error.message });
-      }
-
-      try {
-        const catalogResult = await runSyncModeChild(
-          "catalog-until-idle",
-          [
-            "--max-rounds", String(config.sync.workerCatalogMaxRounds),
-            "--idle-rounds", String(config.sync.workerCatalogIdleRounds),
-            "--sleep-ms", String(config.sync.workerCatalogSleepMs),
-            "--batch-size", String(config.sync.workerCatalogBatchSize)
-          ],
-          {},
-          { streamLogs: true }
-        );
-        logWorker("catalog pass completed", catalogResult);
-      } catch (error) {
-        logWorker("catalog pass failed", { error: error.message });
-      }
-
-      const shouldRunBackfill =
-        syncService.getBackfillStatus().pending &&
-        (!lastBackfillAt || Date.now() - lastBackfillAt >= config.sync.workerBackfillEveryMs);
-      if (shouldRunBackfill) {
-        try {
-          const backfillResult = await runSyncModeChild("backfill");
-          lastBackfillAt = Date.now();
-          logWorker("backfill completed", {
-            recentSyncStatus: backfillResult?.dashboard?.recentSync?.status || null
-          });
-        } catch (error) {
-          logWorker("backfill failed", { error: error.message });
-        }
-      }
-
-      if (workerOnce) {
-        logWorker("run-once complete");
-        process.exit(0);
-      }
-
-      const elapsedMs = Date.now() - cycleStartedAt;
-      const sleepMs = Math.max(config.sync.workerCycleSleepMs - elapsedMs, 0);
-      logWorker("sleeping", { sleepMs, elapsedMs });
-      await wait(sleepMs || config.sync.workerErrorBackoffMs);
-    }
   }
 
   server.listen(config.server.port, () => {
