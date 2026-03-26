@@ -1,7 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { evaluateCaseScope } from "./case-scope.js";
 import { deriveCaseInsights, normalizeDocket, normalizeText } from "./insights.js";
 import { buildTagsMarker } from "./queries.js";
 import {
@@ -220,6 +219,16 @@ const TRACKED_LAW_FIRM_SOURCE_PATTERNS = [
 const PRIORITY_FEED_URL_CLAUSE = `source_urls_json LIKE '%${PRIORITY_FEED_HOST}%'`;
 const PRIORITY_FEED_RAW_CLAUSE =
   `(raw_json LIKE '%"${PRIORITY_FEED_MODERN_RAW_KEY}"%' OR raw_json LIKE '%"${PRIORITY_FEED_LEGACY_RAW_KEY}"%')`;
+
+function buildDisplayVisibilityClause(tableAlias = "") {
+  const prefix = tableAlias ? `${tableAlias}.` : "";
+  return `(
+    date(${prefix}date_filed) >= date(?)
+    OR ${prefix}source_urls_json LIKE '%${PRIORITY_FEED_HOST}%'
+    OR ${prefix}raw_json LIKE '%"${PRIORITY_FEED_MODERN_RAW_KEY}"%'
+    OR ${prefix}raw_json LIKE '%"${PRIORITY_FEED_LEGACY_RAW_KEY}"%'
+  )`;
+}
 
 function buildTrackedLawFirmSourceClause(columnName = "source_urls_json") {
   return `(${TRACKED_LAW_FIRM_SOURCE_PATTERNS.map((pattern) => `${columnName} LIKE '%${pattern}%'`).join(" OR ")})`;
@@ -1337,7 +1346,7 @@ export class Store {
       .prepare(`
         SELECT *
         FROM cases
-        WHERE date(date_filed) >= date(?)
+        WHERE ${buildDisplayVisibilityClause()}
         ORDER BY COALESCE(latest_docket_filed_at, date_filed, updated_at) DESC, updated_at DESC
       `)
       .all(String(startDate || "2025-01-01"))
@@ -1642,92 +1651,6 @@ export class Store {
     this.invalidateCaseViews();
   }
 
-  purgeOutOfScopeCases({ dryRun = false, sampleLimit = 25 } = {}) {
-    const rows = this.db
-      .prepare(`
-        SELECT id, docket_number, court_name, date_filed, case_name, cause, nature_of_suit,
-               tags_marker, source_urls_json, plaintiffs_json, defendants_json,
-               recent_activity_summary, raw_json
-        FROM cases
-        ORDER BY id
-      `)
-      .all();
-
-    const ids = [];
-    const samples = [];
-    let taggedMatches = 0;
-
-    for (const row of rows) {
-      const raw = parseJson(row.raw_json, {});
-      const sourceUrls = parseJson(row.source_urls_json, []);
-      const plaintiffs = parseJson(row.plaintiffs_json, []);
-      const defendants = parseJson(row.defendants_json, []);
-      const tags = String(row.tags_marker || "").split("|").map((value) => value.trim()).filter(Boolean);
-      const scope = evaluateCaseScope({
-        case_name: row.case_name,
-        court_name: row.court_name,
-        date_filed: row.date_filed,
-        cause: row.cause,
-        nature_of_suit: row.nature_of_suit,
-        tags,
-        tags_marker: row.tags_marker,
-        source_urls: sourceUrls,
-        plaintiffs,
-        defendants,
-        recent_activity_summary: row.recent_activity_summary,
-        raw
-      });
-
-      if (!scope.isOutOfScope) {
-        continue;
-      }
-
-      ids.push(row.id);
-      if (tags.includes("schedule_a") || tags.includes("seller_tro")) {
-        taggedMatches += 1;
-      }
-
-      if (samples.length < sampleLimit) {
-        samples.push({
-          id: row.id,
-          docketNumber: row.docket_number,
-          caseName: row.case_name,
-          dateFiled: row.date_filed,
-          cause: row.cause,
-          natureOfSuit: row.nature_of_suit,
-          tags,
-          nonTargetHits: scope.nonTargetHits
-        });
-      }
-    }
-
-    let deletedEntries = 0;
-    let deletedCases = 0;
-
-    if (!dryRun && ids.length) {
-      for (let index = 0; index < ids.length; index += 500) {
-        const chunk = ids.slice(index, index + 500);
-        const placeholders = chunk.map(() => "?").join(", ");
-        deletedEntries += Number(
-          this.db.prepare(`SELECT count(*) AS n FROM docket_entries WHERE case_id IN (${placeholders})`).get(...chunk)?.n || 0
-        );
-        deletedCases += Number(
-          this.db.prepare(`DELETE FROM cases WHERE id IN (${placeholders})`).run(...chunk)?.changes || 0
-        );
-      }
-      this.invalidateCaseViews();
-    }
-
-    return {
-      matchedCases: ids.length,
-      deletedCases,
-      deletedEntries,
-      taggedMatches,
-      dryRun,
-      samples
-    };
-  }
-
   touchCaseDocketSync(caseId) {
     this.db
       .prepare("UPDATE cases SET last_docket_sync_at = ?, updated_at = ? WHERE id = ?")
@@ -1949,7 +1872,7 @@ export class Store {
       .prepare(`
         SELECT *
         FROM cases
-        WHERE date(date_filed) >= date(?)
+        WHERE ${buildDisplayVisibilityClause()}
           AND (${clauses.join(" OR ")})
         ORDER BY COALESCE(latest_docket_filed_at, date_filed, updated_at) DESC, updated_at DESC
         LIMIT 250
@@ -1982,7 +1905,7 @@ export class Store {
 
   listCasesBySql({ startDate, pageSize, page, category, selectedCourt }) {
     const categoryClause = this.buildCategoryWhereClause(category);
-    const baseWhere = [`date(date_filed) >= date(?)`, `(${categoryClause})`];
+    const baseWhere = [buildDisplayVisibilityClause(), `(${categoryClause})`];
     const baseParams = [startDate];
 
     if (selectedCourt) {
@@ -2010,7 +1933,7 @@ export class Store {
       .prepare(`
         SELECT court_id, court_name, COUNT(*) AS total
         FROM cases
-        WHERE date(date_filed) >= date(?)
+        WHERE ${buildDisplayVisibilityClause()}
           AND (${categoryClause})
         GROUP BY court_id, court_name
         ORDER BY total DESC, court_name ASC
@@ -3116,7 +3039,7 @@ export class Store {
             END
           ) AS today_added_watchlist
         FROM cases
-        WHERE date(date_filed) >= date(?)
+        WHERE ${buildDisplayVisibilityClause()}
       `)
       .get(todayBounds.startIso, todayBounds.endIso, "2025-01-01");
     const totals = {

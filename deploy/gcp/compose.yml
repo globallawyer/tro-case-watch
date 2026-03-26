@@ -6,6 +6,10 @@ services:
     restart: unless-stopped
     env_file:
       - ../../.env
+    environment:
+      ENABLE_SCHEDULER: "false"
+      ENABLE_BACKFILL_SCHEDULER: "false"
+      BOOTSTRAP_SYNC: "false"
     volumes:
       - ${APP_DATA_DIR:-/var/lib/tro-case-watch/data}:/app/data
     healthcheck:
@@ -20,6 +24,21 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
+
+  worker:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - ../../.env
+    environment:
+      ENABLE_SCHEDULER: "false"
+      ENABLE_BACKFILL_SCHEDULER: "false"
+      BOOTSTRAP_SYNC: "false"
+    command: ["node", "src/server.js", "--worker"]
+    volumes:
+      - ${APP_DATA_DIR:-/var/lib/tro-case-watch/data}:/app/data
 
   caddy:
     image: caddy:2

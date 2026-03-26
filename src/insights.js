@@ -1,5 +1,4 @@
 import { getPriorityFeedRaw } from "./priority-feed.js";
-import { evaluateCaseScope, hasStrictScheduleATerm } from "./case-scope.js";
 
 const IP_TERMS = [
   "trademark",
@@ -373,21 +372,19 @@ export function deriveCaseInsights(caseLike) {
   const platformHits = countMatches(text, PLATFORM_TERMS);
   const negativeHits = countMatches(text, NEGATIVE_TERMS);
   const hasTroTerm = includesOne(text, TRO_PATTERNS);
-  const scope = evaluateCaseScope(caseLike);
-  const hasScheduleATerm = hasStrictScheduleATerm(text);
+  const hasScheduleATerm = includesOne(text, SCHEDULE_A_PATTERNS);
   const hasBankruptcyTerm =
     includesOne(text, BANKRUPTCY_TERMS) || normalizeText(caseLike.court_name).includes("bankruptcy");
   const defendantCount = defendants.length;
 
   const isScheduleACase =
-    !scope.isOutOfScope &&
     !hasBankruptcyTerm &&
     (tags.includes("schedule_a") ||
       text.includes("identified on schedule a") ||
       text.includes("schedule a defendants") ||
       text.includes("partnerships and unincorporated associations") ||
       (hasScheduleATerm && (ipHits >= 1 || platformHits >= 1 || hasTroTerm)));
-  const isTroCase = !scope.isOutOfScope && (tags.includes("tro") || hasTroTerm);
+  const isTroCase = tags.includes("tro") || hasTroTerm;
 
   let sellerRelevanceScore = 0;
 
@@ -400,7 +397,6 @@ export function deriveCaseInsights(caseLike) {
   sellerRelevanceScore -= hasBankruptcyTerm ? 8 : 0;
 
   const sellerRelevant =
-    !scope.isOutOfScope &&
     !hasBankruptcyTerm &&
     (isScheduleACase ||
       ((ipHits >= 1 || isTroCase || text.includes("temporary restraining order")) &&
