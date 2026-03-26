@@ -37,6 +37,8 @@ services:
       ENABLE_BACKFILL_SCHEDULER: "false"
       BOOTSTRAP_SYNC: "false"
     command: ["node", "src/server.js", "--worker"]
+    healthcheck:
+      disable: true
     volumes:
       - ${APP_DATA_DIR:-/var/lib/tro-case-watch/data}:/app/data
 
