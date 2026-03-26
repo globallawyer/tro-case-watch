@@ -125,6 +125,7 @@ const PRIORITY_FEED_DISCOVERY_STOP_WORDS = new Set([
   "et",
   "al"
 ]);
+const WORKER_STATUS_CHECKPOINT_KEY = "worker:status";
 
 const FULL_CATALOG_START_DATE = "1900-01-01";
 
@@ -465,6 +466,22 @@ export class CaseSyncService {
     const lastNotes = dashboard.recentSync?.stats?.notes || [];
     const knownNoDocketEntries = lastNotes.some((note) => note.includes("无权访问 docket-entries"));
     const recentSyncRunning = dashboard.recentSync?.status === "running";
+    const workerCheckpoint = this.store.getCheckpoint(WORKER_STATUS_CHECKPOINT_KEY) || null;
+    const workerUpdatedAt = workerCheckpoint?.updatedAt || null;
+    const workerUpdatedMs = workerUpdatedAt ? Date.parse(workerUpdatedAt) : 0;
+    const workerStaleAfterMs = Math.max(
+      Number(this.config.sync.workerCycleSleepMs || 0) * 3,
+      Number(this.config.sync.workerErrorBackoffMs || 0) * 2,
+      2 * 60 * 1000
+    );
+    const worker = workerCheckpoint
+      ? {
+          message: workerCheckpoint.message || null,
+          updatedAt: workerUpdatedAt,
+          stale: !workerUpdatedMs || Date.now() - workerUpdatedMs > workerStaleAfterMs,
+          payload: workerCheckpoint.payload || null
+        }
+      : null;
 
     return {
       ...this.state,
@@ -472,6 +489,7 @@ export class CaseSyncService {
       currentMode: this.state.currentMode || (recentSyncRunning ? dashboard.recentSync?.mode || null : null),
       lastStartedAt: this.state.lastStartedAt || dashboard.recentSync?.started_at || null,
       lastFinishedAt: this.state.lastFinishedAt || dashboard.recentSync?.finished_at || null,
+      worker,
       dashboard,
       backfill: this.getBackfillStatus(),
       providers: {
