@@ -220,16 +220,6 @@ const PRIORITY_FEED_URL_CLAUSE = `source_urls_json LIKE '%${PRIORITY_FEED_HOST}%
 const PRIORITY_FEED_RAW_CLAUSE =
   `(raw_json LIKE '%"${PRIORITY_FEED_MODERN_RAW_KEY}"%' OR raw_json LIKE '%"${PRIORITY_FEED_LEGACY_RAW_KEY}"%')`;
 
-function buildDisplayVisibilityClause(tableAlias = "") {
-  const prefix = tableAlias ? `${tableAlias}.` : "";
-  return `(
-    date(${prefix}date_filed) >= date(?)
-    OR ${prefix}source_urls_json LIKE '%${PRIORITY_FEED_HOST}%'
-    OR ${prefix}raw_json LIKE '%"${PRIORITY_FEED_MODERN_RAW_KEY}"%'
-    OR ${prefix}raw_json LIKE '%"${PRIORITY_FEED_LEGACY_RAW_KEY}"%'
-  )`;
-}
-
 function buildTrackedLawFirmSourceClause(columnName = "source_urls_json") {
   return `(${TRACKED_LAW_FIRM_SOURCE_PATTERNS.map((pattern) => `${columnName} LIKE '%${pattern}%'`).join(" OR ")})`;
 }
@@ -1346,7 +1336,7 @@ export class Store {
       .prepare(`
         SELECT *
         FROM cases
-        WHERE ${buildDisplayVisibilityClause()}
+        WHERE date(date_filed) >= date(?)
         ORDER BY COALESCE(latest_docket_filed_at, date_filed, updated_at) DESC, updated_at DESC
       `)
       .all(String(startDate || "2025-01-01"))
@@ -1872,7 +1862,7 @@ export class Store {
       .prepare(`
         SELECT *
         FROM cases
-        WHERE ${buildDisplayVisibilityClause()}
+        WHERE date(date_filed) >= date(?)
           AND (${clauses.join(" OR ")})
         ORDER BY COALESCE(latest_docket_filed_at, date_filed, updated_at) DESC, updated_at DESC
         LIMIT 250
@@ -1905,7 +1895,7 @@ export class Store {
 
   listCasesBySql({ startDate, pageSize, page, category, selectedCourt }) {
     const categoryClause = this.buildCategoryWhereClause(category);
-    const baseWhere = [buildDisplayVisibilityClause(), `(${categoryClause})`];
+    const baseWhere = [`date(date_filed) >= date(?)`, `(${categoryClause})`];
     const baseParams = [startDate];
 
     if (selectedCourt) {
@@ -1933,7 +1923,7 @@ export class Store {
       .prepare(`
         SELECT court_id, court_name, COUNT(*) AS total
         FROM cases
-        WHERE ${buildDisplayVisibilityClause()}
+        WHERE date(date_filed) >= date(?)
           AND (${categoryClause})
         GROUP BY court_id, court_name
         ORDER BY total DESC, court_name ASC
@@ -3039,7 +3029,7 @@ export class Store {
             END
           ) AS today_added_watchlist
         FROM cases
-        WHERE ${buildDisplayVisibilityClause()}
+        WHERE date(date_filed) >= date(?)
       `)
       .get(todayBounds.startIso, todayBounds.endIso, "2025-01-01");
     const totals = {
