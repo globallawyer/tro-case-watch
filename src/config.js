@@ -290,5 +290,27 @@ export const config = {
     notFoundRetryAfterHours: envInt("DOCKETALARM_NOT_FOUND_RETRY_AFTER_HOURS", 6),
     useCachedDockets: envBool("DOCKETALARM_USE_CACHED_DOCKETS", true),
     testMode: envBool("DOCKETALARM_TEST_MODE", false)
+  },
+  uniCourt: {
+    enabled: envBool("UNICOURT_ENABLED", false),
+    baseUrl: env("UNICOURT_BASE_URL", "https://enterpriseapi.unicourt.com"),
+    username: env("UNICOURT_USERNAME", ""),
+    password: env("UNICOURT_PASSWORD", ""),
+    apiToken: env("UNICOURT_API_TOKEN", ""),
+    tokenPath: env("UNICOURT_TOKEN_PATH", "/generateNewToken"),
+    tokenMethod: env("UNICOURT_TOKEN_METHOD", "POST"),
+    caseSearchPath: env("UNICOURT_CASE_SEARCH_PATH", "/caseSearch"),
+    caseSearchMethod: env("UNICOURT_CASE_SEARCH_METHOD", "POST"),
+    caseDetailPath: env("UNICOURT_CASE_DETAIL_PATH", "/case"),
+    caseDetailMethod: env("UNICOURT_CASE_DETAIL_METHOD", "GET"),
+    authHeader: env("UNICOURT_AUTH_HEADER", "Authorization"),
+    authScheme: env("UNICOURT_AUTH_SCHEME", "Bearer"),
+    minIntervalMs: envInt("UNICOURT_MIN_INTERVAL_MS", 2000),
+    timeoutMs: envInt("UNICOURT_TIMEOUT_MS", 20000),
+    maxCasesPerRun: envInt("UNICOURT_MAX_CASES_PER_RUN", 2),
+    backfillMaxCasesPerRun: envInt("UNICOURT_BACKFILL_MAX_CASES_PER_RUN", 8),
+    staleAfterHours: envInt("UNICOURT_STALE_AFTER_HOURS", 24),
+    notFoundRetryAfterHours: envInt("UNICOURT_NOT_FOUND_RETRY_AFTER_HOURS", 6),
+    testMode: envBool("UNICOURT_TEST_MODE", false)
   }
 };

@@ -88,5 +88,9 @@ export function publicProviderLabel(value = "") {
     return FALLBACK_PROVIDER_KEY;
   }
 
+  if (normalized === "docketalarm" || normalized === "unicourt") {
+    return FALLBACK_PROVIDER_KEY;
+  }
+
   return normalized;
 }

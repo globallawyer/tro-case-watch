@@ -2879,6 +2879,135 @@ export class Store {
     return selected.slice(0, limit);
   }
 
+  getCasesNeedingSupplementalDocketSync(limit, { recentWindowDays = 120 } = {}) {
+    const recentCutoff = Date.now() - recentWindowDays * 24 * 60 * 60 * 1000;
+    const recentCutoffIso = new Date(recentCutoff).toISOString();
+    const candidatePoolSize = Math.max(limit * 120, 360);
+
+    const candidateRows = this.db
+      .prepare(`
+        SELECT *
+        FROM cases
+        WHERE date(date_filed) >= date('2025-01-01')
+          AND docket_number IS NOT NULL
+          AND TRIM(docket_number) <> ''
+          AND (
+            tags_marker LIKE '%|seller_tro|%'
+            OR tags_marker LIKE '%|tro|%'
+            OR tags_marker LIKE '%|schedule_a|%'
+            OR COALESCE(latest_docket_filed_at, date_filed, updated_at) >= ?
+          )
+        ORDER BY COALESCE(latest_docket_filed_at, date_filed, updated_at) DESC
+        LIMIT ?
+      `)
+      .all(recentCutoffIso, candidatePoolSize)
+      .map(buildCaseView);
+    const entryCounts = this.getEntryCoverageForCaseIds(candidateRows.map((row) => row.id));
+
+    return candidateRows
+      .map((row) => {
+        const coverage = entryCounts.get(Number(row.id)) || {
+          totalEntries: 0,
+          courtlistenerEntries: 0,
+          priorityFeedEntries: 0,
+          pacermonitorEntries: 0,
+          gapPriorityScore: 0,
+          hasContinuityGap: false
+        };
+        const hasCivilDocketNumber = /\b\d{2}-cv-\d{3,6}\b/i.test(String(row.docket_number || ""));
+        const activityAtRaw = row.latest_docket_filed_at || row.date_filed || row.updated_at;
+        const activityAtMs = Number.isFinite(Date.parse(activityAtRaw || "")) ? Date.parse(activityAtRaw || "") : 0;
+        const isRecentCase = activityAtMs >= recentCutoff;
+        const isCurrentYearCase = isCurrentPriorityYearCase(row);
+        const hasRecentGapIssue = isGapPriorityCase(row) && Number(coverage.gapPriorityScore || 0) > 0;
+        const priorityFeedRowCount = getPriorityFeedRowCount(row);
+        const latestNumber = parseDocketNumber(row.latest_docket_number);
+        const expectedEntries = Math.max(
+          row.insights?.is_seller_case ? 12 : 8,
+          isRecentCase ? 10 : 0,
+          Number(row.docket_count || 0),
+          priorityFeedRowCount,
+          latestNumber
+        );
+        const currentYearGapWeight = getCurrentYearGapPriorityWeight(row, coverage, expectedEntries);
+        const totalEntries = Number(coverage.totalEntries || 0);
+        const gap = Math.max(0, expectedEntries - totalEntries);
+        const missingPriorityFeedCoverage = priorityFeedRowCount > 0 && totalEntries < priorityFeedRowCount;
+        const shouldSync = hasCivilDocketNumber && (gap > 0 || missingPriorityFeedCoverage);
+
+        let priority = missingPriorityFeedCoverage
+          ? 0
+          : row.insights?.is_seller_case
+            ? 1
+            : 2;
+        if (currentYearGapWeight > 0) {
+          priority -= 2;
+        }
+        if (hasRecentGapIssue) {
+          priority -= 1;
+        }
+
+        return {
+          row,
+          priority,
+          gap,
+          totalEntries,
+          isCurrentYearCase,
+          currentYearGapWeight,
+          gapPriorityScore: Number(coverage.gapPriorityScore || 0),
+          missingPriorityFeedCoverage,
+          activityAtRaw,
+          shouldSync
+        };
+      })
+      .filter((item) => item.shouldSync)
+      .sort((left, right) => {
+        if (left.priority !== right.priority) {
+          return left.priority - right.priority;
+        }
+
+        if (left.isCurrentYearCase !== right.isCurrentYearCase) {
+          return left.isCurrentYearCase ? -1 : 1;
+        }
+
+        if (left.isCurrentYearCase && right.isCurrentYearCase) {
+          const currentYearActivityCompare = compareCaseActivityDesc(left.activityAtRaw, right.activityAtRaw);
+          if (currentYearActivityCompare !== 0) {
+            return currentYearActivityCompare;
+          }
+        }
+
+        if (left.currentYearGapWeight !== right.currentYearGapWeight) {
+          return right.currentYearGapWeight - left.currentYearGapWeight;
+        }
+
+        if (left.gapPriorityScore !== right.gapPriorityScore) {
+          return right.gapPriorityScore - left.gapPriorityScore;
+        }
+
+        if (left.missingPriorityFeedCoverage !== right.missingPriorityFeedCoverage) {
+          return left.missingPriorityFeedCoverage ? -1 : 1;
+        }
+
+        if (left.gap !== right.gap) {
+          return right.gap - left.gap;
+        }
+
+        const activityCompare = compareCaseActivityDesc(left.activityAtRaw, right.activityAtRaw);
+        if (activityCompare !== 0) {
+          return activityCompare;
+        }
+
+        if (left.totalEntries !== right.totalEntries) {
+          return left.totalEntries - right.totalEntries;
+        }
+
+        return Number(right.row.id || 0) - Number(left.row.id || 0);
+      })
+      .slice(0, limit)
+      .map((item) => item.row);
+  }
+
   getCasesNeedingPacerMonitorSync(
     limit,
     {

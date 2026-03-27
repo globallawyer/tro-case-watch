@@ -15,6 +15,7 @@ import { CatalogClient } from "./providers/catalog.js";
 import { PacerAdapter } from "./providers/pacer.js";
 import { PacerMonitorAdapter } from "./providers/pacermonitor.js";
 import { DocketAlarmClient } from "./providers/docketalarm.js";
+import { UniCourtClient } from "./providers/unicourt.js";
 import {
   FALLBACK_PROVIDER_KEY,
   OFFICIAL_DOCKET_PROVIDER_KEY,
@@ -53,6 +54,7 @@ const lawFirms = new LawFirmClient(config.lawFirms);
 const priorityFeed = new CatalogClient(config.priorityFeed);
 const pacerMonitor = new PacerMonitorAdapter(config.pacerMonitor);
 const docketAlarm = new DocketAlarmClient(config.docketAlarm);
+const uniCourt = new UniCourtClient(config.uniCourt);
 const pacer = new PacerAdapter(config.pacer, store);
 const translator = new TranslationService(config.translation, store);
 const dailyEmailReport = new DailyEmailReportService({ config, store });
@@ -65,6 +67,7 @@ const syncService = new CaseSyncService({
   priorityFeed,
   pacerMonitor,
   docketAlarm,
+  uniCourt,
   pacer,
   translator
 });
@@ -737,7 +740,8 @@ function sanitizePublicText(value) {
     .replace(/worldtro\.com/gi, "站内归档")
     .replace(/courtlistener/gi, "公开摘要")
     .replace(/pacermonitor/gi, "公开来源")
-    .replace(/docketalarm/gi, "外部补充源");
+    .replace(/docketalarm/gi, "外部补充源")
+    .replace(/unicourt/gi, "外部补充源");
 }
 
 function sanitizeEntryDocumentType(value) {
@@ -1064,6 +1068,9 @@ function serializeAdminStatus(status = {}) {
       docketalarm: status.providers?.docketalarm
         ? { enabled: Boolean(status.providers.docketalarm.enabled), state: status.providers.docketalarm.state || null }
         : null,
+      unicourt: status.providers?.unicourt
+        ? { enabled: Boolean(status.providers.unicourt.enabled), state: status.providers.unicourt.state || null }
+        : null,
       courtfeeds: status.providers?.courtfeeds
         ? { enabled: Boolean(status.providers.courtfeeds.enabled), state: status.providers.courtfeeds.state || null }
         : null,
@@ -1351,6 +1358,34 @@ async function handleApi(request, response, pathname, searchParams) {
     });
   }
 
+  if (request.method === "POST" && pathname === "/api/admin/docketalarm-sync") {
+    if (!authorize(request)) {
+      return sendJson(response, 401, { error: "Unauthorized" });
+    }
+
+    spawnDetachedTask(["--sync-only", "docketalarm"]);
+    clearPublicResponseCache();
+
+    return sendJson(response, 202, {
+      accepted: true,
+      mode: "docketalarm-sync"
+    });
+  }
+
+  if (request.method === "POST" && pathname === "/api/admin/unicourt-sync") {
+    if (!authorize(request)) {
+      return sendJson(response, 401, { error: "Unauthorized" });
+    }
+
+    spawnDetachedTask(["--sync-only", "unicourt"]);
+    clearPublicResponseCache();
+
+    return sendJson(response, 202, {
+      accepted: true,
+      mode: "unicourt-sync"
+    });
+  }
+
   if (request.method === "POST" && pathname === "/api/admin/official-docket-sync") {
     if (!authorize(request)) {
       return sendJson(response, 401, { error: "Unauthorized" });
@@ -1418,12 +1453,13 @@ async function handleApi(request, response, pathname, searchParams) {
     const body = await readRequestBody(request);
     const requestedProviders = Array.isArray(body.providers)
       ? body.providers
-      : [OFFICIAL_DOCKET_PROVIDER_KEY, PRIORITY_FEED_PROVIDER_KEY, FALLBACK_PROVIDER_KEY];
+      : [OFFICIAL_DOCKET_PROVIDER_KEY, PRIORITY_FEED_PROVIDER_KEY, FALLBACK_PROVIDER_KEY, "docketalarm", "unicourt"];
     const providers = [...new Set(
       requestedProviders.filter((item) =>
         item === "courtlistener" ||
         item === "pacermonitor" ||
         item === "docketalarm" ||
+        item === "unicourt" ||
         item === OFFICIAL_DOCKET_PROVIDER_KEY ||
         item === PRIORITY_FEED_PROVIDER_KEY ||
         item === FALLBACK_PROVIDER_KEY
@@ -1559,7 +1595,7 @@ async function main() {
           .split(",")
           .map((value) => value.trim())
           .filter(Boolean)
-      : ["courtlistener", PRIORITY_FEED_SOURCE, "pacermonitor", "docketalarm"];
+      : ["courtlistener", PRIORITY_FEED_SOURCE, "pacermonitor", "docketalarm", "unicourt"];
 
     if (providers.includes("courtlistener")) {
       await syncService.enrichCaseWithCourtListener(caseId, { force: true });
@@ -1575,6 +1611,10 @@ async function main() {
 
     if (providers.includes("docketalarm")) {
       await syncService.enrichCaseWithDocketAlarm(caseId, { force: true });
+    }
+
+    if (providers.includes("unicourt")) {
+      await syncService.enrichCaseWithUniCourt(caseId, { force: true });
     }
 
     console.log(`[sync] enriched case ${caseId} with ${providers.join(",")}`);
@@ -1702,6 +1742,12 @@ async function main() {
     if (rawMode === "docketalarm") {
       const result = await syncService.syncDocketAlarmRecent("backfill");
       console.log(`[sync] completed docketalarm ${JSON.stringify(result)}`);
+      process.exit(0);
+    }
+
+    if (rawMode === "unicourt") {
+      const result = await syncService.syncUniCourtRecent("backfill");
+      console.log(`[sync] completed unicourt ${JSON.stringify(result)}`);
       process.exit(0);
     }
 
