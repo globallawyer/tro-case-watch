@@ -107,9 +107,14 @@ function hasSparsePublicCoverage(caseLike = {}) {
 }
 
 const GAP_PRIORITY_START_DATE = "2025-08-01";
+const CURRENT_PRIORITY_YEAR_START_DATE = `${new Date().getUTCFullYear()}-01-01`;
 
 function isGapPriorityCase(caseLike = {}) {
   return String(caseLike.date_filed || "") >= GAP_PRIORITY_START_DATE;
+}
+
+function isCurrentPriorityYearCase(caseLike = {}) {
+  return String(caseLike.date_filed || "") >= CURRENT_PRIORITY_YEAR_START_DATE;
 }
 
 function getCoverageGapPressure(coverage = {}) {
@@ -129,6 +134,19 @@ function getCoverageGapPressure(coverage = {}) {
     gapPriorityScore: leadingGap + sequenceGap + smallDocketGap,
     hasContinuityGap: leadingGap > 0 || sequenceGap > 0
   };
+}
+
+function getCurrentYearGapPriorityWeight(caseLike = {}, coverage = {}, expectedEntries = 0) {
+  if (!isCurrentPriorityYearCase(caseLike)) {
+    return 0;
+  }
+
+  const totalEntries = Number(coverage.totalEntries || 0);
+  const gapPriorityScore = Number(coverage.gapPriorityScore || 0);
+  const docketCount = Number(caseLike.docket_count || 0);
+  const latestGap = Math.max(0, parseDocketNumber(caseLike.latest_docket_number) - Math.max(totalEntries, docketCount));
+  const completionGap = Math.max(0, Math.max(Number(expectedEntries || 0), docketCount, 6) - totalEntries);
+  return gapPriorityScore + latestGap + completionGap + 10;
 }
 
 function compareIsoDesc(left, right) {
@@ -2175,6 +2193,28 @@ export class Store {
       const rightCoverage = entryCounts.get(Number(right.id)) || {};
       const leftGapPriority = isGapPriorityCase(left) ? Number(leftCoverage.gapPriorityScore || 0) : 0;
       const rightGapPriority = isGapPriorityCase(right) ? Number(rightCoverage.gapPriorityScore || 0) : 0;
+      const leftIsCurrentYear = isCurrentPriorityYearCase(left);
+      const rightIsCurrentYear = isCurrentPriorityYearCase(right);
+      const leftCurrentYearWeight = getCurrentYearGapPriorityWeight(left, leftCoverage, Number(left.docket_count || 0));
+      const rightCurrentYearWeight = getCurrentYearGapPriorityWeight(right, rightCoverage, Number(right.docket_count || 0));
+
+      if (leftIsCurrentYear !== rightIsCurrentYear) {
+        return leftIsCurrentYear ? -1 : 1;
+      }
+
+      if (leftIsCurrentYear && rightIsCurrentYear) {
+        const currentYearActivityCompare = compareCaseActivityDesc(
+          left.latest_docket_filed_at || left.date_filed || left.updated_at,
+          right.latest_docket_filed_at || right.date_filed || right.updated_at
+        );
+        if (currentYearActivityCompare !== 0) {
+          return currentYearActivityCompare;
+        }
+      }
+
+      if (leftCurrentYearWeight !== rightCurrentYearWeight) {
+        return rightCurrentYearWeight - leftCurrentYearWeight;
+      }
 
       if (leftGapPriority !== rightGapPriority) {
         return rightGapPriority - leftGapPriority;
@@ -2354,7 +2394,9 @@ export class Store {
           const hasPriorityFeedUrl = hasConcretePriorityFeedLink(row);
           const minimumExpectedEntries = Math.max(12, Number(row.docket_count || 0), priorityFeedRowCount, 6);
           const missingMarked = isPriorityFeedMissing(row);
+          const isCurrentYearCase = isCurrentPriorityYearCase(row);
           const hasRecentGapIssue = isGapPriorityCase(row) && Number(coverage.gapPriorityScore || 0) > 0;
+          const currentYearGapWeight = getCurrentYearGapPriorityWeight(row, coverage, minimumExpectedEntries);
           const freshnessCutoff = hasRecentGapIssue ? gapRetryBefore : staleBefore;
           const isFreshlyMissing = missingMarked && syncedAt && syncedAt >= freshnessCutoff;
           const needsCompletion = priorityFeedRowCount > 0
@@ -2367,7 +2409,9 @@ export class Store {
           return {
             row,
             needsCompletion,
+            isCurrentYearCase,
             hasRecentGapIssue,
+            currentYearGapWeight,
             gapPriorityScore: Number(coverage.gapPriorityScore || 0),
             neverSynced: !syncedAt,
             isStale,
@@ -2382,6 +2426,21 @@ export class Store {
         .sort((left, right) => {
           if (left.needsCompletion !== right.needsCompletion) {
             return left.needsCompletion ? -1 : 1;
+          }
+
+          if (left.isCurrentYearCase !== right.isCurrentYearCase) {
+            return left.isCurrentYearCase ? -1 : 1;
+          }
+
+          if (left.isCurrentYearCase && right.isCurrentYearCase) {
+            const currentYearActivityCompare = compareCaseActivityDesc(left.activityAtRaw, right.activityAtRaw);
+            if (currentYearActivityCompare !== 0) {
+              return currentYearActivityCompare;
+            }
+          }
+
+          if (left.currentYearGapWeight !== right.currentYearGapWeight) {
+            return right.currentYearGapWeight - left.currentYearGapWeight;
           }
 
           if (left.hasRecentGapIssue !== right.hasRecentGapIssue) {
@@ -2473,7 +2532,9 @@ export class Store {
         const hasLawFirmSource = hasTrackedLawFirmSource(row);
         const minimumExpectedEntries = Math.max(12, Number(row.docket_count || 0), 6);
         const missingMarked = isPriorityFeedMissing(row);
+        const isCurrentYearCase = isCurrentPriorityYearCase(row);
         const hasRecentGapIssue = isGapPriorityCase(row) && Number(coverage.gapPriorityScore || 0) > 0;
+        const currentYearGapWeight = getCurrentYearGapPriorityWeight(row, coverage, minimumExpectedEntries);
         const freshnessCutoff = hasRecentGapIssue
           ? Date.now() - Math.min(staleAfterHours, 4) * 60 * 60 * 1000
           : staleBefore;
@@ -2509,6 +2570,9 @@ export class Store {
             : !hasKnownPriorityFeedSource
               ? 6
               : 7;
+        if (currentYearGapWeight > 0) {
+          priority -= 2;
+        }
         if (hasRecentGapIssue) {
           priority -= 2;
         }
@@ -2517,7 +2581,9 @@ export class Store {
           row,
           priority,
           shouldSync,
+          isCurrentYearCase,
           hasRecentGapIssue,
+          currentYearGapWeight,
           gapPriorityScore: Number(coverage.gapPriorityScore || 0),
           totalEntries: coverage.totalEntries,
           hasPriorityFeedCoverage: hasKnownPriorityFeedSource,
@@ -2535,6 +2601,21 @@ export class Store {
         return left.priority - right.priority;
       }
 
+      if (left.isCurrentYearCase !== right.isCurrentYearCase) {
+        return left.isCurrentYearCase ? -1 : 1;
+      }
+
+      if (left.isCurrentYearCase && right.isCurrentYearCase) {
+        const currentYearActivityCompare = compareCaseActivityDesc(left.activityAtRaw, right.activityAtRaw);
+        if (currentYearActivityCompare !== 0) {
+          return currentYearActivityCompare;
+        }
+      }
+
+      if (left.currentYearGapWeight !== right.currentYearGapWeight) {
+        return right.currentYearGapWeight - left.currentYearGapWeight;
+      }
+
       if (left.gapPriorityScore !== right.gapPriorityScore) {
         return right.gapPriorityScore - left.gapPriorityScore;
       }
@@ -2550,6 +2631,21 @@ export class Store {
     const backlogOrdered = rows.slice().sort((left, right) => {
       if (left.priority !== right.priority) {
         return left.priority - right.priority;
+      }
+
+      if (left.isCurrentYearCase !== right.isCurrentYearCase) {
+        return left.isCurrentYearCase ? -1 : 1;
+      }
+
+      if (left.isCurrentYearCase && right.isCurrentYearCase) {
+        const currentYearActivityCompare = compareCaseActivityDesc(left.activityAtRaw, right.activityAtRaw);
+        if (currentYearActivityCompare !== 0) {
+          return currentYearActivityCompare;
+        }
+      }
+
+      if (left.currentYearGapWeight !== right.currentYearGapWeight) {
+        return right.currentYearGapWeight - left.currentYearGapWeight;
       }
 
       if (left.gapPriorityScore !== right.gapPriorityScore) {
@@ -2591,6 +2687,21 @@ export class Store {
           return left.priority - right.priority;
         }
 
+        if (left.isCurrentYearCase !== right.isCurrentYearCase) {
+          return left.isCurrentYearCase ? -1 : 1;
+        }
+
+        if (left.isCurrentYearCase && right.isCurrentYearCase) {
+          const currentYearActivityCompare = compareCaseActivityDesc(left.activityAtRaw, right.activityAtRaw);
+          if (currentYearActivityCompare !== 0) {
+            return currentYearActivityCompare;
+          }
+        }
+
+        if (left.currentYearGapWeight !== right.currentYearGapWeight) {
+          return right.currentYearGapWeight - left.currentYearGapWeight;
+        }
+
         if (left.gapPriorityScore !== right.gapPriorityScore) {
           return right.gapPriorityScore - left.gapPriorityScore;
         }
@@ -2606,11 +2717,49 @@ export class Store {
         return compareCaseActivityDesc(left.activityAtRaw, right.activityAtRaw);
       });
 
+    const currentYearGapOrdered = rows
+      .filter((item) => item.isCurrentYearCase && item.currentYearGapWeight > 0)
+      .sort((left, right) => {
+        const currentYearActivityCompare = compareCaseActivityDesc(left.activityAtRaw, right.activityAtRaw);
+        if (currentYearActivityCompare !== 0) {
+          return currentYearActivityCompare;
+        }
+
+        if (left.currentYearGapWeight !== right.currentYearGapWeight) {
+          return right.currentYearGapWeight - left.currentYearGapWeight;
+        }
+
+        if (left.gapPriorityScore !== right.gapPriorityScore) {
+          return right.gapPriorityScore - left.gapPriorityScore;
+        }
+
+        if (left.totalEntries !== right.totalEntries) {
+          return left.totalEntries - right.totalEntries;
+        }
+
+        return Number(right.row.id || 0) - Number(left.row.id || 0);
+      });
+
     const lawFirmBackedOrdered = rows
       .filter((item) => item.hasLawFirmSource && !item.hasPriorityFeedUrl && !item.hasPriorityFeedCoverage)
       .sort((left, right) => {
         if (left.priority !== right.priority) {
           return left.priority - right.priority;
+        }
+
+        if (left.isCurrentYearCase !== right.isCurrentYearCase) {
+          return left.isCurrentYearCase ? -1 : 1;
+        }
+
+        if (left.isCurrentYearCase && right.isCurrentYearCase) {
+          const currentYearActivityCompare = compareCaseActivityDesc(left.activityAtRaw, right.activityAtRaw);
+          if (currentYearActivityCompare !== 0) {
+            return currentYearActivityCompare;
+          }
+        }
+
+        if (left.currentYearGapWeight !== right.currentYearGapWeight) {
+          return right.currentYearGapWeight - left.currentYearGapWeight;
         }
 
         if (left.gapPriorityScore !== right.gapPriorityScore) {
@@ -2631,6 +2780,21 @@ export class Store {
     const legacyOrdered = rows
       .filter((item) => item.isPriorityFeedBacklog && !item.hasLawFirmSource)
       .sort((left, right) => {
+        if (left.isCurrentYearCase !== right.isCurrentYearCase) {
+          return left.isCurrentYearCase ? -1 : 1;
+        }
+
+        if (left.isCurrentYearCase && right.isCurrentYearCase) {
+          const currentYearActivityCompare = compareCaseActivityDesc(left.activityAtRaw, right.activityAtRaw);
+          if (currentYearActivityCompare !== 0) {
+            return currentYearActivityCompare;
+          }
+        }
+
+        if (left.currentYearGapWeight !== right.currentYearGapWeight) {
+          return right.currentYearGapWeight - left.currentYearGapWeight;
+        }
+
         if (left.gapPriorityScore !== right.gapPriorityScore) {
           return right.gapPriorityScore - left.gapPriorityScore;
         }
@@ -2660,19 +2824,22 @@ export class Store {
     };
 
     if (preferKnownPriorityFeed) {
+      appendRows(currentYearGapOrdered, limit);
       appendRows(knownPriorityFeedOrdered, limit);
       appendRows(lawFirmBackedOrdered, limit);
       appendRows(legacyOrdered, limit);
       appendRows(backlogOrdered, limit);
       appendRows(recentOrdered, limit);
     } else {
+      const currentYearGapSlots = Math.max(1, Math.min(limit, Math.ceil(limit * 0.5)));
       const knownPriorityFeedSlots = Math.max(1, Math.min(limit, Math.ceil(limit * 0.4)));
       const lawFirmSlots = Math.max(1, Math.min(limit, Math.ceil(limit * 0.35)));
-      const recentSlots = Math.max(1, limit - knownPriorityFeedSlots - lawFirmSlots);
+      const recentSlots = Math.max(1, limit - currentYearGapSlots - knownPriorityFeedSlots - lawFirmSlots);
 
+      appendRows(currentYearGapOrdered, currentYearGapSlots);
       appendRows(knownPriorityFeedOrdered, knownPriorityFeedSlots);
-      appendRows(lawFirmBackedOrdered, knownPriorityFeedSlots + lawFirmSlots);
-      appendRows(recentOrdered, knownPriorityFeedSlots + lawFirmSlots + recentSlots);
+      appendRows(lawFirmBackedOrdered, currentYearGapSlots + knownPriorityFeedSlots + lawFirmSlots);
+      appendRows(recentOrdered, currentYearGapSlots + knownPriorityFeedSlots + lawFirmSlots + recentSlots);
       appendRows(legacyOrdered, limit);
       appendRows(backlogOrdered, limit);
       appendRows(recentOrdered, limit);
@@ -2729,6 +2896,7 @@ export class Store {
         const activityAtRaw = row.latest_docket_filed_at || row.date_filed || row.updated_at;
         const activityAtMs = Number.isFinite(Date.parse(activityAtRaw || "")) ? Date.parse(activityAtRaw || "") : 0;
         const isRecentCase = activityAtMs >= recentCutoff;
+        const isCurrentYearCase = isCurrentPriorityYearCase(row);
         const hasRecentGapIssue = isGapPriorityCase(row) && Number(coverage.gapPriorityScore || 0) > 0;
         const priorityFeedRowCount = getPriorityFeedRowCount(row);
         const expectedEntries = Math.max(
@@ -2737,6 +2905,7 @@ export class Store {
           Number(row.docket_count || 0),
           priorityFeedRowCount
         );
+        const currentYearGapWeight = getCurrentYearGapPriorityWeight(row, coverage, expectedEntries);
         const gap = Math.max(0, expectedEntries - coverage.totalEntries);
         const syncedAt = row.raw?.pacermonitor?.syncedAt ? Date.parse(row.raw.pacermonitor.syncedAt) : 0;
         const state = String(row.raw?.pacermonitor?.state || "").toLowerCase();
@@ -2766,6 +2935,9 @@ export class Store {
           : row.insights?.is_seller_case
             ? 1
             : 2;
+        if (currentYearGapWeight > 0) {
+          priority -= 2;
+        }
         if (hasRecentGapIssue) {
           priority -= 1;
         }
@@ -2774,6 +2946,8 @@ export class Store {
           row,
           priority,
           gap,
+          isCurrentYearCase,
+          currentYearGapWeight,
           gapPriorityScore: Number(coverage.gapPriorityScore || 0),
           activityAtRaw,
           totalEntries: coverage.totalEntries,
@@ -2785,6 +2959,21 @@ export class Store {
       .sort((left, right) => {
         if (left.priority !== right.priority) {
           return left.priority - right.priority;
+        }
+
+        if (left.isCurrentYearCase !== right.isCurrentYearCase) {
+          return left.isCurrentYearCase ? -1 : 1;
+        }
+
+        if (left.isCurrentYearCase && right.isCurrentYearCase) {
+          const currentYearActivityCompare = compareCaseActivityDesc(left.activityAtRaw, right.activityAtRaw);
+          if (currentYearActivityCompare !== 0) {
+            return currentYearActivityCompare;
+          }
+        }
+
+        if (left.currentYearGapWeight !== right.currentYearGapWeight) {
+          return right.currentYearGapWeight - left.currentYearGapWeight;
         }
 
         if (left.gapPriorityScore !== right.gapPriorityScore) {
