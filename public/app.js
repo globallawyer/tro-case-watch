@@ -748,32 +748,34 @@ nextPageButton.addEventListener("click", () => {
   }).catch(console.error);
 });
 
-refreshButton.addEventListener("click", async () => {
-  refreshButton.disabled = true;
-  refreshButton.textContent = "同步中...";
-  try {
-    await request("/api/admin/sync", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json"
-      },
-      body: JSON.stringify({ mode: "recent" })
-    });
-    await Promise.all([
-      loadStatus(),
-      loadCases({
-        preserveSelection: true
-      })
-    ]);
-  } finally {
-    refreshButton.disabled = false;
-    refreshButton.textContent = "立即刷新";
-  }
-});
+if (refreshButton) {
+  refreshButton.addEventListener("click", async () => {
+    refreshButton.disabled = true;
+    refreshButton.textContent = "同步中...";
+    try {
+      await request("/api/admin/sync", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json"
+        },
+        body: JSON.stringify({ mode: "recent" })
+      });
+      await Promise.all([
+        loadStatus(),
+        loadCases({
+          preserveSelection: true
+        })
+      ]);
+    } finally {
+      refreshButton.disabled = false;
+      refreshButton.textContent = "立即刷新";
+    }
+  });
+}
 
 if (copyWechatButton) {
   copyWechatButton.addEventListener("click", async () => {
-    const defaultLabel = "点击添加微信";
+    const defaultLabel = "加微信组团和解";
 
     try {
       await navigator.clipboard.writeText("mylearnedfriend");
