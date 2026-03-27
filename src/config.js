@@ -110,18 +110,18 @@ export const config = {
   server: {
     port: envInt("PORT", 4127),
     adminToken: env("ADMIN_TOKEN", ""),
-    publicCasesMaxPageSize: envInt("PUBLIC_CASES_MAX_PAGE_SIZE", 30),
+    publicCasesMaxPageSize: envInt("PUBLIC_CASES_MAX_PAGE_SIZE", 15),
     publicHealthCacheTtlMs: envInt("PUBLIC_HEALTH_CACHE_TTL_MS", 5_000),
     publicStatusCacheTtlMs: envInt("PUBLIC_STATUS_CACHE_TTL_MS", 15_000),
     publicCasesCacheTtlMs: envInt("PUBLIC_CASES_CACHE_TTL_MS", 8_000),
     publicCaseDetailCacheTtlMs: envInt("PUBLIC_CASE_DETAIL_CACHE_TTL_MS", 12_000),
     publicApiCacheMaxEntries: envInt("PUBLIC_API_CACHE_MAX_ENTRIES", 300),
     publicRateLimitWindowMs: envInt("PUBLIC_RATE_LIMIT_WINDOW_MS", 60_000),
-    publicRateLimitCasesPerWindow: envInt("PUBLIC_RATE_LIMIT_CASES_PER_WINDOW", 90),
-    publicRateLimitCaseDetailPerWindow: envInt("PUBLIC_RATE_LIMIT_CASE_DETAIL_PER_WINDOW", 180),
-    publicRateLimitStatusPerWindow: envInt("PUBLIC_RATE_LIMIT_STATUS_PER_WINDOW", 60),
-    publicRateLimitHealthPerWindow: envInt("PUBLIC_RATE_LIMIT_HEALTH_PER_WINDOW", 60),
-    suspiciousRateLimitPerWindow: envInt("SUSPICIOUS_RATE_LIMIT_PER_WINDOW", 15),
+    publicRateLimitCasesPerWindow: envInt("PUBLIC_RATE_LIMIT_CASES_PER_WINDOW", 36),
+    publicRateLimitCaseDetailPerWindow: envInt("PUBLIC_RATE_LIMIT_CASE_DETAIL_PER_WINDOW", 72),
+    publicRateLimitStatusPerWindow: envInt("PUBLIC_RATE_LIMIT_STATUS_PER_WINDOW", 24),
+    publicRateLimitHealthPerWindow: envInt("PUBLIC_RATE_LIMIT_HEALTH_PER_WINDOW", 24),
+    suspiciousRateLimitPerWindow: envInt("SUSPICIOUS_RATE_LIMIT_PER_WINDOW", 6),
     suspiciousUserAgentPatterns: envList("SUSPICIOUS_USER_AGENT_PATTERNS", [
       "python-requests",
       "curl/",
@@ -137,7 +137,15 @@ export const config = {
       "libwww-perl",
       "mechanize",
       "phantomjs",
-      "headlesschrome"
+      "headlesschrome",
+      "playwright",
+      "puppeteer",
+      "selenium",
+      "postmanruntime",
+      "insomnia",
+      "python-urllib",
+      "httpx",
+      "undici"
     ])
   },
   email: {

@@ -72,6 +72,12 @@ const backgroundCaseHydrations = new Map();
 const publicResponseCache = new Map();
 const publicRateLimitBuckets = new Map();
 const browserGuardCookieName = "__tt_guard";
+const publicSiteOrigins = new Set([
+  "https://trotracker.com",
+  "https://www.trotracker.com",
+  "https://tro-case-watch-production.up.railway.app",
+  "http://localhost:4127"
+]);
 
 function clearPublicResponseCache() {
   publicResponseCache.clear();
@@ -311,17 +317,13 @@ function buildApiHeaders(origin = "") {
   const headers = {
     "content-type": "application/json; charset=utf-8",
     "cache-control": "no-store",
-    "x-robots-tag": "noindex, nofollow, noarchive"
+    "x-robots-tag": "noindex, nofollow, noarchive",
+    "x-frame-options": "DENY",
+    "referrer-policy": "same-origin",
+    "permissions-policy": "camera=(), microphone=(), geolocation=()"
   };
 
-  const allowedOrigins = new Set([
-    "https://trotracker.com",
-    "https://www.trotracker.com",
-    "https://tro-case-watch-production.up.railway.app",
-    "http://localhost:4127"
-  ]);
-
-  if (allowedOrigins.has(origin)) {
+  if (publicSiteOrigins.has(origin)) {
     headers["access-control-allow-origin"] = origin;
     headers["access-control-allow-methods"] = "GET,POST,OPTIONS";
     headers["access-control-allow-headers"] = "content-type,x-admin-token";
@@ -475,6 +477,38 @@ function isSuspiciousUserAgent(request) {
   );
 }
 
+function getRequestOriginFromReferer(request) {
+  const referer = String(request.headers.referer || "").trim();
+  if (!referer) {
+    return "";
+  }
+
+  try {
+    return new URL(referer).origin;
+  } catch {
+    return "";
+  }
+}
+
+function hasAllowedPublicOriginContext(request) {
+  if (authorize(request)) {
+    return true;
+  }
+
+  const origin = String(request.headers.origin || "").trim();
+  if (origin && publicSiteOrigins.has(origin)) {
+    return true;
+  }
+
+  const refererOrigin = getRequestOriginFromReferer(request);
+  if (refererOrigin && publicSiteOrigins.has(refererOrigin)) {
+    return true;
+  }
+
+  const secFetchSite = String(request.headers["sec-fetch-site"] || "").trim().toLowerCase();
+  return secFetchSite === "same-origin" || secFetchSite === "same-site";
+}
+
 function getPublicRateLimitPolicy(pathname) {
   if (pathname === "/api/cases") {
     return {
@@ -571,6 +605,14 @@ function requiresBrowserGuard(pathname = "") {
 function enforceBrowserGuard(request, response, pathname) {
   if (request.method !== "GET" || !requiresBrowserGuard(pathname) || authorize(request)) {
     return false;
+  }
+
+  if (!hasAllowedPublicOriginContext(request)) {
+    response.writeHead(403, buildApiHeaders());
+    response.end(JSON.stringify({
+      error: "Same-site browser context required"
+    }));
+    return true;
   }
 
   if (hasValidBrowserGuard(request)) {
@@ -676,10 +718,26 @@ function sanitizeInsights(insights = {}) {
           label: "持续观察",
           tone: "neutral"
         },
-    highlights: Array.isArray(insights.highlights) ? insights.highlights : [],
-    narrative: insights.narrative || null,
-    badges: Array.isArray(insights.badges) ? insights.badges : []
+    highlights: Array.isArray(insights.highlights)
+      ? insights.highlights.map((value) => sanitizePublicText(value)).filter(Boolean)
+      : [],
+    narrative: sanitizePublicText(insights.narrative),
+    badges: Array.isArray(insights.badges) ? insights.badges.map((value) => sanitizePublicText(value)).filter(Boolean) : []
   };
+}
+
+function sanitizePublicText(value) {
+  const text = String(value || "").trim();
+  if (!text) {
+    return null;
+  }
+
+  return text
+    .replace(new RegExp(PRIORITY_FEED_SOURCE, "gi"), "站内归档")
+    .replace(/worldtro\.com/gi, "站内归档")
+    .replace(/courtlistener/gi, "公开摘要")
+    .replace(/pacermonitor/gi, "公开来源")
+    .replace(/docketalarm/gi, "外部补充源");
 }
 
 function sanitizeEntryDocumentType(value) {
@@ -715,11 +773,7 @@ function normalizeDisplayNumber(value) {
 }
 
 function sanitizeTimelineLabel(entry = {}) {
-  if (entry.primary_source === "courtlistener") {
-    return "公开文书摘要";
-  }
-
-  return "Docket 时间线";
+  return "站内归档";
 }
 
 function hasPriorityFeedCoverage(item = {}) {
@@ -892,8 +946,8 @@ function serializePublicEntry(entry = {}) {
     entry_number: normalizeDisplayNumber(entry.entry_number),
     document_number: normalizeDisplayNumber(entry.document_number),
     document_type: sanitizeEntryDocumentType(entry.document_type),
-    description: entry.description || null,
-    description_zh: entry.description_zh || null,
+    description: sanitizePublicText(entry.description),
+    description_zh: sanitizePublicText(entry.description_zh),
     timeline_label: sanitizeTimelineLabel(entry)
   };
 }
@@ -909,8 +963,8 @@ function serializePublicCaseSummary(item = {}) {
     date_filed: item.date_filed || null,
     date_terminated: item.date_terminated || null,
     status: item.status || null,
-    recent_activity_summary: item.recent_activity_summary || null,
-    recent_activity_summary_zh: item.recent_activity_summary_zh || null,
+    recent_activity_summary: sanitizePublicText(item.recent_activity_summary),
+    recent_activity_summary_zh: sanitizePublicText(item.recent_activity_summary_zh),
     latest_docket_filed_at: item.latest_docket_filed_at || null,
     latest_docket_number: item.latest_docket_number || null,
     docket_count: Number(item.docket_count || 0),
@@ -923,9 +977,7 @@ function serializePublicCaseDetail(item = {}) {
     ...serializePublicCaseSummary(item),
     hydration_pending: item.hydration_pending
       ? {
-          pending: Boolean(item.hydration_pending.pending),
-          priority: Boolean(item.hydration_pending.priority),
-          fallback: Boolean(item.hydration_pending.pacermonitor)
+          pending: Boolean(item.hydration_pending.pending)
         }
       : null,
     entries: Array.isArray(item.entries) ? item.entries.map(serializePublicEntry) : []
@@ -1450,7 +1502,10 @@ function serveStatic(request, response, pathname) {
 
   const extension = path.extname(filePath);
   const headers = {
-    "content-type": mimeTypes[extension] || "application/octet-stream"
+    "content-type": mimeTypes[extension] || "application/octet-stream",
+    "x-content-type-options": "nosniff",
+    "x-frame-options": "DENY",
+    "referrer-policy": "same-origin"
   };
 
   if (target === "/ops.html") {
@@ -1458,7 +1513,10 @@ function serveStatic(request, response, pathname) {
     headers["x-robots-tag"] = "noindex, nofollow, noarchive";
   }
 
-  headers["x-content-type-options"] = "nosniff";
+  if (extension === ".html") {
+    headers["content-security-policy"] =
+      "default-src 'self'; img-src 'self' data:; style-src 'self' https://fonts.googleapis.com 'unsafe-inline'; font-src 'self' https://fonts.gstatic.com data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self' mailto:";
+  }
   if (extension === ".html") {
     attachBrowserGuardCookie(request, headers);
   }
