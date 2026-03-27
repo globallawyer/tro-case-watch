@@ -106,6 +106,31 @@ function hasSparsePublicCoverage(caseLike = {}) {
   return latestNumber >= 5 && knownEntries <= 1;
 }
 
+const GAP_PRIORITY_START_DATE = "2025-08-01";
+
+function isGapPriorityCase(caseLike = {}) {
+  return String(caseLike.date_filed || "") >= GAP_PRIORITY_START_DATE;
+}
+
+function getCoverageGapPressure(coverage = {}) {
+  const totalEntries = Number(coverage.totalEntries || 0);
+  const firstNumber = Number(coverage.firstNumber || 0);
+  const lastNumber = Number(coverage.lastNumber || 0);
+  const numberedEntries = Number(coverage.numberedEntries || 0);
+  const leadingGap = firstNumber > 1 ? firstNumber - 1 : 0;
+  const sequenceGap = firstNumber > 0 && lastNumber >= firstNumber && numberedEntries >= 2
+    ? Math.max(0, lastNumber - firstNumber + 1 - numberedEntries)
+    : 0;
+  const smallDocketGap = totalEntries < 6 ? 6 - totalEntries : 0;
+  return {
+    leadingGap,
+    sequenceGap,
+    smallDocketGap,
+    gapPriorityScore: leadingGap + sequenceGap + smallDocketGap,
+    hasContinuityGap: leadingGap > 0 || sequenceGap > 0
+  };
+}
+
 function compareIsoDesc(left, right) {
   return String(right || "").localeCompare(String(left || ""));
 }
@@ -2144,10 +2169,49 @@ export class Store {
       .all(Math.max(limit * 12, 120))
       .map(hydrateCase);
 
+    const entryCounts = this.getEntryCoverageForCaseIds(candidateRows.map((row) => row.id));
+    const prioritizedRows = candidateRows.slice().sort((left, right) => {
+      const leftCoverage = entryCounts.get(Number(left.id)) || {};
+      const rightCoverage = entryCounts.get(Number(right.id)) || {};
+      const leftGapPriority = isGapPriorityCase(left) ? Number(leftCoverage.gapPriorityScore || 0) : 0;
+      const rightGapPriority = isGapPriorityCase(right) ? Number(rightCoverage.gapPriorityScore || 0) : 0;
+
+      if (leftGapPriority !== rightGapPriority) {
+        return rightGapPriority - leftGapPriority;
+      }
+
+      const leftSyncAt = String(left.last_docket_sync_at || "1970-01-01T00:00:00.000Z");
+      const rightSyncAt = String(right.last_docket_sync_at || "1970-01-01T00:00:00.000Z");
+      if (leftSyncAt !== rightSyncAt) {
+        return leftSyncAt.localeCompare(rightSyncAt);
+      }
+
+      const leftTagged = left.tags_marker?.includes("|seller_tro|") || left.tags_marker?.includes("|tro|") || left.tags_marker?.includes("|schedule_a|");
+      const rightTagged = right.tags_marker?.includes("|seller_tro|") || right.tags_marker?.includes("|tro|") || right.tags_marker?.includes("|schedule_a|");
+      if (leftTagged !== rightTagged) {
+        return leftTagged ? -1 : 1;
+      }
+
+      if (isBankruptcyLike(left) !== isBankruptcyLike(right)) {
+        return isBankruptcyLike(left) ? 1 : -1;
+      }
+
+      const leftLatestGap = Math.max(0, parseDocketNumber(left.latest_docket_number) - Number(left.docket_count || 0));
+      const rightLatestGap = Math.max(0, parseDocketNumber(right.latest_docket_number) - Number(right.docket_count || 0));
+      if (leftLatestGap !== rightLatestGap) {
+        return rightLatestGap - leftLatestGap;
+      }
+
+      return compareCaseActivityDesc(
+        left.latest_docket_filed_at || left.date_filed || left.updated_at,
+        right.latest_docket_filed_at || right.date_filed || right.updated_at
+      );
+    });
+
     const selected = [];
     const groupAuthorityCache = new Map();
 
-    for (const row of candidateRows) {
+    for (const row of prioritizedRows) {
       if (selected.length >= limit) {
         break;
       }
@@ -2175,6 +2239,13 @@ export class Store {
 
     const chunkSize = 900;
     const coverage = new Map();
+    const numericOrderSql = `
+      CASE
+        WHEN TRIM(COALESCE(NULLIF(document_number, ''), NULLIF(entry_number, ''), '')) GLOB '[0-9]*'
+        THEN CAST(COALESCE(NULLIF(document_number, ''), NULLIF(entry_number, '')) AS INTEGER)
+        ELSE NULL
+      END
+    `;
 
     for (let index = 0; index < ids.length; index += chunkSize) {
       const chunk = ids.slice(index, index + chunkSize);
@@ -2186,7 +2257,10 @@ export class Store {
             COUNT(*) AS total_entries,
             SUM(CASE WHEN primary_source = 'courtlistener' THEN 1 ELSE 0 END) AS courtlistener_entries,
             SUM(CASE WHEN primary_source = '${PRIORITY_FEED_ENTRY_SOURCE}' THEN 1 ELSE 0 END) AS priority_entries,
-            SUM(CASE WHEN primary_source = 'pacermonitor' THEN 1 ELSE 0 END) AS pacermonitor_entries
+            SUM(CASE WHEN primary_source = 'pacermonitor' THEN 1 ELSE 0 END) AS pacermonitor_entries,
+            COUNT(DISTINCT ${numericOrderSql}) AS numbered_entries,
+            MIN(${numericOrderSql}) AS first_number,
+            MAX(${numericOrderSql}) AS last_number
           FROM docket_entries
           WHERE case_id IN (${placeholders})
           GROUP BY case_id
@@ -2194,11 +2268,18 @@ export class Store {
         .all(...chunk);
 
       for (const row of rows) {
-        coverage.set(Number(row.case_id), {
+        const baseCoverage = {
           totalEntries: Number(row.total_entries || 0),
           courtlistenerEntries: Number(row.courtlistener_entries || 0),
           priorityFeedEntries: Number(row.priority_entries || 0),
-          pacermonitorEntries: Number(row.pacermonitor_entries || 0)
+          pacermonitorEntries: Number(row.pacermonitor_entries || 0),
+          numberedEntries: Number(row.numbered_entries || 0),
+          firstNumber: Number(row.first_number || 0),
+          lastNumber: Number(row.last_number || 0)
+        };
+        coverage.set(Number(row.case_id), {
+          ...baseCoverage,
+          ...getCoverageGapPressure(baseCoverage)
         });
       }
     }
@@ -2258,29 +2339,36 @@ export class Store {
     ).filter((row) => hasConcretePriorityFeedLink(row) || getPriorityFeedRowCount(row) > 0);
 
     if (preferKnownPriorityFeed) {
+      const gapRetryBefore = Date.now() - Math.min(staleAfterHours, 4) * 60 * 60 * 1000;
       const entryCounts = this.getEntryCoverageForCaseIds(knownPriorityFeedRows.map((row) => row.id));
       return knownPriorityFeedRows
         .map((row) => {
           const coverage = entryCounts.get(Number(row.id)) || {
             totalEntries: 0,
-            priorityFeedEntries: 0
+            priorityFeedEntries: 0,
+            gapPriorityScore: 0,
+            hasContinuityGap: false
           };
           const syncedAt = getPriorityFeedSyncedAt(row) ? Date.parse(getPriorityFeedSyncedAt(row)) : 0;
           const priorityFeedRowCount = getPriorityFeedRowCount(row);
           const hasPriorityFeedUrl = hasConcretePriorityFeedLink(row);
           const minimumExpectedEntries = Math.max(12, Number(row.docket_count || 0), priorityFeedRowCount, 6);
           const missingMarked = isPriorityFeedMissing(row);
-          const isFreshlyMissing = missingMarked && syncedAt && syncedAt >= staleBefore;
+          const hasRecentGapIssue = isGapPriorityCase(row) && Number(coverage.gapPriorityScore || 0) > 0;
+          const freshnessCutoff = hasRecentGapIssue ? gapRetryBefore : staleBefore;
+          const isFreshlyMissing = missingMarked && syncedAt && syncedAt >= freshnessCutoff;
           const needsCompletion = priorityFeedRowCount > 0
             ? coverage.totalEntries < priorityFeedRowCount
             : hasPriorityFeedUrl
               ? coverage.priorityFeedEntries === 0 || coverage.totalEntries < minimumExpectedEntries
               : false;
-          const isStale = !syncedAt || syncedAt < staleBefore;
+          const isStale = !syncedAt || syncedAt < freshnessCutoff;
           const shouldSync = !isFreshlyMissing && (needsCompletion || isStale);
           return {
             row,
             needsCompletion,
+            hasRecentGapIssue,
+            gapPriorityScore: Number(coverage.gapPriorityScore || 0),
             neverSynced: !syncedAt,
             isStale,
             isFreshlyMissing,
@@ -2294,6 +2382,14 @@ export class Store {
         .sort((left, right) => {
           if (left.needsCompletion !== right.needsCompletion) {
             return left.needsCompletion ? -1 : 1;
+          }
+
+          if (left.hasRecentGapIssue !== right.hasRecentGapIssue) {
+            return left.hasRecentGapIssue ? -1 : 1;
+          }
+
+          if (left.gapPriorityScore !== right.gapPriorityScore) {
+            return right.gapPriorityScore - left.gapPriorityScore;
           }
 
           if (left.neverSynced !== right.neverSynced) {
@@ -2364,7 +2460,9 @@ export class Store {
       .map((row) => {
         const coverage = entryCounts.get(Number(row.id)) || {
           totalEntries: 0,
-          priorityFeedEntries: 0
+          priorityFeedEntries: 0,
+          gapPriorityScore: 0,
+          hasContinuityGap: false
         };
         const hasCivilDocketNumber = /\b\d{2}-cv-\d{3,6}\b/i.test(String(row.docket_number || ""));
         const syncedAt = getPriorityFeedSyncedAt(row) ? Date.parse(getPriorityFeedSyncedAt(row)) : 0;
@@ -2375,7 +2473,11 @@ export class Store {
         const hasLawFirmSource = hasTrackedLawFirmSource(row);
         const minimumExpectedEntries = Math.max(12, Number(row.docket_count || 0), 6);
         const missingMarked = isPriorityFeedMissing(row);
-        const isFreshlyMissing = missingMarked && syncedAt && syncedAt >= staleBefore;
+        const hasRecentGapIssue = isGapPriorityCase(row) && Number(coverage.gapPriorityScore || 0) > 0;
+        const freshnessCutoff = hasRecentGapIssue
+          ? Date.now() - Math.min(staleAfterHours, 4) * 60 * 60 * 1000
+          : staleBefore;
+        const isFreshlyMissing = missingMarked && syncedAt && syncedAt >= freshnessCutoff;
         const isPriorityFeedBacklog = !hasKnownPriorityFeedSource && Number(row.docket_count || 0) >= 8;
 
         const needsCompletion = priorityFeedRowCount > 0
@@ -2383,7 +2485,7 @@ export class Store {
           : hasPriorityFeedUrl
             ? coverage.priorityFeedEntries === 0 || coverage.totalEntries < minimumExpectedEntries
             : !hasKnownPriorityFeedSource && coverage.totalEntries < minimumExpectedEntries;
-        const isStale = !syncedAt || syncedAt < staleBefore;
+        const isStale = !syncedAt || syncedAt < freshnessCutoff;
         const shouldSync = hasCivilDocketNumber && !isFreshlyMissing && (
           needsCompletion ||
           !hasKnownPriorityFeedSource ||
@@ -2392,7 +2494,7 @@ export class Store {
         );
         const activityAtRaw = row.latest_docket_filed_at || row.date_filed || row.updated_at;
 
-        const priority = needsCompletion
+        let priority = needsCompletion
           ? hasPriorityFeedUrl
             ? 0
             : hasLawFirmSource
@@ -2404,14 +2506,19 @@ export class Store {
               ? Number(row.docket_count || 0) >= 20
                 ? 4
                 : 5
-          : !hasKnownPriorityFeedSource
-            ? 6
-            : 7;
+            : !hasKnownPriorityFeedSource
+              ? 6
+              : 7;
+        if (hasRecentGapIssue) {
+          priority -= 2;
+        }
 
         return {
           row,
           priority,
           shouldSync,
+          hasRecentGapIssue,
+          gapPriorityScore: Number(coverage.gapPriorityScore || 0),
           totalEntries: coverage.totalEntries,
           hasPriorityFeedCoverage: hasKnownPriorityFeedSource,
           hasPriorityFeedUrl,
@@ -2428,6 +2535,10 @@ export class Store {
         return left.priority - right.priority;
       }
 
+      if (left.gapPriorityScore !== right.gapPriorityScore) {
+        return right.gapPriorityScore - left.gapPriorityScore;
+      }
+
       const activityCompare = compareCaseActivityDesc(left.activityAtRaw, right.activityAtRaw);
       if (activityCompare !== 0) {
         return activityCompare;
@@ -2439,6 +2550,10 @@ export class Store {
     const backlogOrdered = rows.slice().sort((left, right) => {
       if (left.priority !== right.priority) {
         return left.priority - right.priority;
+      }
+
+      if (left.gapPriorityScore !== right.gapPriorityScore) {
+        return right.gapPriorityScore - left.gapPriorityScore;
       }
 
       if (left.hasPriorityFeedUrl !== right.hasPriorityFeedUrl) {
@@ -2476,6 +2591,10 @@ export class Store {
           return left.priority - right.priority;
         }
 
+        if (left.gapPriorityScore !== right.gapPriorityScore) {
+          return right.gapPriorityScore - left.gapPriorityScore;
+        }
+
         if (left.hasPriorityFeedUrl !== right.hasPriorityFeedUrl) {
           return left.hasPriorityFeedUrl ? -1 : 1;
         }
@@ -2494,6 +2613,10 @@ export class Store {
           return left.priority - right.priority;
         }
 
+        if (left.gapPriorityScore !== right.gapPriorityScore) {
+          return right.gapPriorityScore - left.gapPriorityScore;
+        }
+
         if (Number(left.row.docket_count || 0) !== Number(right.row.docket_count || 0)) {
           return Number(right.row.docket_count || 0) - Number(left.row.docket_count || 0);
         }
@@ -2508,6 +2631,10 @@ export class Store {
     const legacyOrdered = rows
       .filter((item) => item.isPriorityFeedBacklog && !item.hasLawFirmSource)
       .sort((left, right) => {
+        if (left.gapPriorityScore !== right.gapPriorityScore) {
+          return right.gapPriorityScore - left.gapPriorityScore;
+        }
+
         if (Number(left.row.docket_count || 0) !== Number(right.row.docket_count || 0)) {
           return Number(right.row.docket_count || 0) - Number(left.row.docket_count || 0);
         }
@@ -2594,12 +2721,15 @@ export class Store {
           totalEntries: 0,
           courtlistenerEntries: 0,
           priorityFeedEntries: 0,
-          pacermonitorEntries: 0
+          pacermonitorEntries: 0,
+          gapPriorityScore: 0,
+          hasContinuityGap: false
         };
         const hasCivilDocketNumber = /\b\d{2}-cv-\d{3,6}\b/i.test(String(row.docket_number || ""));
         const activityAtRaw = row.latest_docket_filed_at || row.date_filed || row.updated_at;
         const activityAtMs = Number.isFinite(Date.parse(activityAtRaw || "")) ? Date.parse(activityAtRaw || "") : 0;
         const isRecentCase = activityAtMs >= recentCutoff;
+        const hasRecentGapIssue = isGapPriorityCase(row) && Number(coverage.gapPriorityScore || 0) > 0;
         const priorityFeedRowCount = getPriorityFeedRowCount(row);
         const expectedEntries = Math.max(
           row.insights?.is_seller_case ? 12 : 8,
@@ -2631,16 +2761,20 @@ export class Store {
           !isBlockedFresh &&
           !isFresh;
 
-        const priority = needsPriorityFeedLevelCompletion
+        let priority = needsPriorityFeedLevelCompletion
           ? 0
           : row.insights?.is_seller_case
             ? 1
             : 2;
+        if (hasRecentGapIssue) {
+          priority -= 1;
+        }
 
         return {
           row,
           priority,
           gap,
+          gapPriorityScore: Number(coverage.gapPriorityScore || 0),
           activityAtRaw,
           totalEntries: coverage.totalEntries,
           shouldSync
@@ -2651,6 +2785,10 @@ export class Store {
       .sort((left, right) => {
         if (left.priority !== right.priority) {
           return left.priority - right.priority;
+        }
+
+        if (left.gapPriorityScore !== right.gapPriorityScore) {
+          return right.gapPriorityScore - left.gapPriorityScore;
         }
 
         if (left.gap !== right.gap) {

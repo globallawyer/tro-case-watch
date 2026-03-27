@@ -157,7 +157,7 @@ export const config = {
     workerCatalogMaxRounds: envInt("WORKER_CATALOG_MAX_ROUNDS", 100),
     workerCatalogIdleRounds: envInt("WORKER_CATALOG_IDLE_ROUNDS", 5),
     workerCatalogSleepMs: envInt("WORKER_CATALOG_SLEEP_MS", 2000),
-    workerCatalogBatchSize: envInt("WORKER_CATALOG_BATCH_SIZE", 2)
+    workerCatalogBatchSize: envInt("WORKER_CATALOG_BATCH_SIZE", 4)
   },
   courtListener: {
     baseUrl: env("COURTLISTENER_BASE_URL", "https://www.courtlistener.com/api/rest/v4"),
@@ -174,7 +174,7 @@ export const config = {
     maxCasesPerRun: envAnyInt(["PRIORITY_FEED_MAX_CASES_PER_RUN", buildLegacyPriorityFeedEnvKey("MAX_CASES_PER_RUN")], 8),
     backfillMaxCasesPerRun: envAnyInt(
       ["PRIORITY_FEED_BACKFILL_MAX_CASES_PER_RUN", buildLegacyPriorityFeedEnvKey("BACKFILL_MAX_CASES_PER_RUN")],
-      120
+      160
     ),
     staleAfterHours: envAnyInt(["PRIORITY_FEED_STALE_AFTER_HOURS", buildLegacyPriorityFeedEnvKey("STALE_AFTER_HOURS")], 12),
     discoveryStaleAfterHours: envAnyInt(
@@ -241,7 +241,7 @@ export const config = {
     minIntervalMs: envInt("PACERMONITOR_MIN_INTERVAL_MS", 2000),
     timeoutMs: envInt("PACERMONITOR_TIMEOUT_MS", 15000),
     maxCasesPerRun: envInt("PACERMONITOR_MAX_CASES_PER_RUN", 2),
-    backfillMaxCasesPerRun: envInt("PACERMONITOR_BACKFILL_MAX_CASES_PER_RUN", 6),
+    backfillMaxCasesPerRun: envInt("PACERMONITOR_BACKFILL_MAX_CASES_PER_RUN", 10),
     staleAfterHours: envInt("PACERMONITOR_STALE_AFTER_HOURS", 24),
     blockedRetryAfterHours: envInt("PACERMONITOR_BLOCKED_RETRY_AFTER_HOURS", 12),
     notFoundRetryAfterHours: envInt("PACERMONITOR_NOT_FOUND_RETRY_AFTER_HOURS", 6),
