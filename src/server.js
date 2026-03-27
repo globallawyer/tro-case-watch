@@ -14,6 +14,7 @@ import { LawFirmClient } from "./providers/lawfirm.js";
 import { CatalogClient } from "./providers/catalog.js";
 import { PacerAdapter } from "./providers/pacer.js";
 import { PacerMonitorAdapter } from "./providers/pacermonitor.js";
+import { DocketAlarmClient } from "./providers/docketalarm.js";
 import {
   FALLBACK_PROVIDER_KEY,
   OFFICIAL_DOCKET_PROVIDER_KEY,
@@ -50,6 +51,7 @@ const courtFeeds = new CourtFeedClient(config.courtFeeds);
 const lawFirms = new LawFirmClient(config.lawFirms);
 const priorityFeed = new CatalogClient(config.priorityFeed);
 const pacerMonitor = new PacerMonitorAdapter(config.pacerMonitor);
+const docketAlarm = new DocketAlarmClient(config.docketAlarm);
 const pacer = new PacerAdapter(config.pacer, store);
 const translator = new TranslationService(config.translation, store);
 const syncService = new CaseSyncService({
@@ -60,6 +62,7 @@ const syncService = new CaseSyncService({
   courtListener,
   priorityFeed,
   pacerMonitor,
+  docketAlarm,
   pacer,
   translator
 });
@@ -1004,6 +1007,9 @@ function serializeAdminStatus(status = {}) {
       fallback: status.providers?.pacermonitor
         ? { enabled: Boolean(status.providers.pacermonitor.enabled), state: status.providers.pacermonitor.state || null }
         : null,
+      docketalarm: status.providers?.docketalarm
+        ? { enabled: Boolean(status.providers.docketalarm.enabled), state: status.providers.docketalarm.state || null }
+        : null,
       courtfeeds: status.providers?.courtfeeds
         ? { enabled: Boolean(status.providers.courtfeeds.enabled), state: status.providers.courtfeeds.state || null }
         : null,
@@ -1363,6 +1369,7 @@ async function handleApi(request, response, pathname, searchParams) {
       requestedProviders.filter((item) =>
         item === "courtlistener" ||
         item === "pacermonitor" ||
+        item === "docketalarm" ||
         item === OFFICIAL_DOCKET_PROVIDER_KEY ||
         item === PRIORITY_FEED_PROVIDER_KEY ||
         item === FALLBACK_PROVIDER_KEY
@@ -1492,7 +1499,7 @@ async function main() {
           .split(",")
           .map((value) => value.trim())
           .filter(Boolean)
-      : ["courtlistener", PRIORITY_FEED_SOURCE, "pacermonitor"];
+      : ["courtlistener", PRIORITY_FEED_SOURCE, "pacermonitor", "docketalarm"];
 
     if (providers.includes("courtlistener")) {
       await syncService.enrichCaseWithCourtListener(caseId, { force: true });
@@ -1504,6 +1511,10 @@ async function main() {
 
     if (providers.includes("pacermonitor")) {
       await syncService.enrichCaseWithPacerMonitor(caseId, { force: true });
+    }
+
+    if (providers.includes("docketalarm")) {
+      await syncService.enrichCaseWithDocketAlarm(caseId, { force: true });
     }
 
     console.log(`[sync] enriched case ${caseId} with ${providers.join(",")}`);
@@ -1625,6 +1636,12 @@ async function main() {
     if (rawMode === "pacermonitor") {
       const result = await syncService.syncPacerMonitorRecent("backfill");
       console.log(`[sync] completed pacermonitor ${JSON.stringify(result)}`);
+      process.exit(0);
+    }
+
+    if (rawMode === "docketalarm") {
+      const result = await syncService.syncDocketAlarmRecent("backfill");
+      console.log(`[sync] completed docketalarm ${JSON.stringify(result)}`);
       process.exit(0);
     }
 

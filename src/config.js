@@ -247,5 +247,20 @@ export const config = {
     notFoundRetryAfterHours: envInt("PACERMONITOR_NOT_FOUND_RETRY_AFTER_HOURS", 6),
     recentWindowDays: envInt("PACERMONITOR_RECENT_WINDOW_DAYS", 45),
     maxSearchQueries: envInt("PACERMONITOR_MAX_SEARCH_QUERIES", 5)
+  },
+  docketAlarm: {
+    enabled: envBool("DOCKETALARM_ENABLED", false),
+    baseUrl: env("DOCKETALARM_BASE_URL", "https://www.docketalarm.com"),
+    username: env("DOCKETALARM_USERNAME", ""),
+    password: env("DOCKETALARM_PASSWORD", ""),
+    clientMatter: env("DOCKETALARM_CLIENT_MATTER", "tro-case-watch"),
+    minIntervalMs: envInt("DOCKETALARM_MIN_INTERVAL_MS", 2000),
+    timeoutMs: envInt("DOCKETALARM_TIMEOUT_MS", 20000),
+    maxCasesPerRun: envInt("DOCKETALARM_MAX_CASES_PER_RUN", 2),
+    backfillMaxCasesPerRun: envInt("DOCKETALARM_BACKFILL_MAX_CASES_PER_RUN", 8),
+    staleAfterHours: envInt("DOCKETALARM_STALE_AFTER_HOURS", 24),
+    notFoundRetryAfterHours: envInt("DOCKETALARM_NOT_FOUND_RETRY_AFTER_HOURS", 6),
+    useCachedDockets: envBool("DOCKETALARM_USE_CACHED_DOCKETS", true),
+    testMode: envBool("DOCKETALARM_TEST_MODE", false)
   }
 };

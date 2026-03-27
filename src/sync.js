@@ -440,7 +440,7 @@ function deriveParties(result) {
 }
 
 export class CaseSyncService {
-  constructor({ config, store, courtFeeds, lawFirms, courtListener, priorityFeed, pacerMonitor, pacer, translator }) {
+  constructor({ config, store, courtFeeds, lawFirms, courtListener, priorityFeed, pacerMonitor, docketAlarm, pacer, translator }) {
     this.config = config;
     this.store = store;
     this.courtFeeds = courtFeeds;
@@ -448,6 +448,7 @@ export class CaseSyncService {
     this.courtListener = courtListener;
     this.priorityFeed = priorityFeed;
     this.pacerMonitor = pacerMonitor;
+    this.docketAlarm = docketAlarm;
     this.pacer = pacer;
     this.translator = translator;
     this.state = {
@@ -484,6 +485,7 @@ export class CaseSyncService {
         },
         priorityFeed: this.priorityFeed.getStatus(),
         pacermonitor: this.pacerMonitor.getStatus(),
+        docketalarm: this.docketAlarm.getStatus(),
         pacer: this.pacer.getStatus(),
         translation: {
           enabled: this.translator.isEnabled(),
@@ -539,6 +541,7 @@ export class CaseSyncService {
       docketEntriesUpserted: 0,
       docketCasesSynced: 0,
       priorityFeedCasesSynced: 0,
+      docketAlarmCasesSynced: 0,
       translationsApplied: 0,
       notes: []
     };
@@ -616,6 +619,16 @@ export class CaseSyncService {
         }
       } catch (error) {
         stats.notes.push(`PACERMonitor 补源跳过：${error.message}`);
+      }
+
+      try {
+        const docketAlarmResult = await this.syncDocketAlarmRecent(mode);
+        stats.docketAlarmCasesSynced += docketAlarmResult.syncedCases || 0;
+        if (docketAlarmResult.note) {
+          stats.notes.push(docketAlarmResult.note);
+        }
+      } catch (error) {
+        stats.notes.push(`Docket Alarm 补源跳过：${error.message}`);
       }
 
       try {
@@ -1455,6 +1468,29 @@ export class CaseSyncService {
     });
   }
 
+  async enrichCaseWithDocketAlarm(caseId, { force = false } = {}) {
+    return this.store.batchMutations(async () => {
+      const caseRow = this.store.getCase(caseId);
+      if (!caseRow || !this.docketAlarm.enabled || !this.docketAlarm.hasCredentials()) {
+        return { enriched: false, reason: "not-applicable" };
+      }
+
+      const syncedAt = caseRow.raw?.docketalarm?.syncedAt ? Date.parse(caseRow.raw.docketalarm.syncedAt) : 0;
+      const state = String(caseRow.raw?.docketalarm?.state || "").toLowerCase();
+      const retryHours =
+        state === "not_found"
+          ? this.config.docketAlarm.notFoundRetryAfterHours
+          : this.config.docketAlarm.staleAfterHours;
+      const staleAfterMs = retryHours * 60 * 60 * 1000;
+
+      if (!force && syncedAt && Date.now() - syncedAt < staleAfterMs) {
+        return { enriched: false, reason: "fresh" };
+      }
+
+      return this.syncSingleDocketAlarmCase(caseRow);
+    });
+  }
+
   async syncPriorityFeedRecent(mode = "recent") {
     return this.store.batchMutations(async () => {
       if (!this.priorityFeed.enabled) {
@@ -1723,6 +1759,88 @@ export class CaseSyncService {
     });
   }
 
+  async syncDocketAlarmRecent(mode = "recent") {
+    return this.store.batchMutations(async () => {
+      if (!this.docketAlarm.enabled) {
+        return {
+          syncedCases: 0,
+          note: "Docket Alarm 官方 API 补源已关闭。"
+        };
+      }
+
+      if (!this.docketAlarm.hasCredentials()) {
+        return {
+          syncedCases: 0,
+          note: "Docket Alarm 已启用，但缺少账号凭据。"
+        };
+      }
+
+      const maxCases =
+        mode === "backfill"
+          ? this.config.docketAlarm.backfillMaxCasesPerRun
+          : this.config.docketAlarm.maxCasesPerRun;
+      const candidatePool = this.store.getCasesNeedingPacerMonitorSync(Math.max(maxCases * 6, maxCases), {
+        staleAfterHours: this.config.pacerMonitor.staleAfterHours,
+        blockedRetryAfterHours: this.config.pacerMonitor.blockedRetryAfterHours,
+        notFoundRetryAfterHours: this.config.pacerMonitor.notFoundRetryAfterHours,
+        recentWindowDays: this.config.pacerMonitor.recentWindowDays
+      });
+
+      const staleBefore = Date.now() - this.config.docketAlarm.staleAfterHours * 60 * 60 * 1000;
+      const notFoundBefore = Date.now() - this.config.docketAlarm.notFoundRetryAfterHours * 60 * 60 * 1000;
+      const candidates = candidatePool
+        .filter((caseRow) => {
+          const syncedAt = caseRow.raw?.docketalarm?.syncedAt ? Date.parse(caseRow.raw.docketalarm.syncedAt) : 0;
+          const state = String(caseRow.raw?.docketalarm?.state || "").toLowerCase();
+          const freshnessCutoff = state === "not_found" ? notFoundBefore : staleBefore;
+          return !syncedAt || syncedAt < freshnessCutoff;
+        })
+        .slice(0, maxCases);
+
+      let syncedCases = 0;
+      let notFoundCases = 0;
+      let emptyCases = 0;
+      let failedCases = 0;
+
+      for (const caseRow of candidates) {
+        try {
+          const result = await this.syncSingleDocketAlarmCase(caseRow);
+          if (result.enriched) {
+            syncedCases += 1;
+            continue;
+          }
+
+          if (result.reason === "not_found") {
+            notFoundCases += 1;
+          } else if (result.reason === "empty") {
+            emptyCases += 1;
+          }
+        } catch {
+          failedCases += 1;
+        }
+      }
+
+      if (syncedCases) {
+        return {
+          syncedCases,
+          note: `Docket Alarm 本轮通过官方 API 补齐 ${syncedCases} 个案件${notFoundCases ? `，${notFoundCases} 个案件暂未找到` : ""}${emptyCases ? `，${emptyCases} 个案件缓存副本暂无时间线` : ""}${failedCases ? `，${failedCases} 个案件待重试` : ""}。`
+        };
+      }
+
+      if (notFoundCases || emptyCases || failedCases) {
+        return {
+          syncedCases: 0,
+          note: `Docket Alarm 本轮未补齐成功${notFoundCases ? `，${notFoundCases} 个案件暂未找到` : ""}${emptyCases ? `，${emptyCases} 个案件缓存副本暂无时间线` : ""}${failedCases ? `，${failedCases} 个案件待重试` : ""}。`
+        };
+      }
+
+      return {
+        syncedCases: 0,
+        note: "Docket Alarm 本轮没有需要补齐的案件。"
+      };
+    });
+  }
+
   async syncSinglePriorityFeedCase(caseRow) {
     const payload = await this.priorityFeed.enrichCase(caseRow);
     if (!payload || !payload.entries.length) {
@@ -1930,6 +2048,122 @@ export class CaseSyncService {
         page_count: null,
         pacer_doc_id: null,
         raw: entry,
+        last_synced_at: timestamp
+      });
+    }
+
+    return {
+      enriched: true,
+      entries: payload.entries.length,
+      url: payload.url
+    };
+  }
+
+  async syncSingleDocketAlarmCase(caseRow) {
+    if (this.store.caseGroupHasPriorityFeedAuthority(caseRow)) {
+      return { enriched: false, reason: "priority-authoritative" };
+    }
+
+    const payload = await this.docketAlarm.enrichCase(caseRow);
+    const timestamp = new Date().toISOString();
+    if (!payload) {
+      return { enriched: false, reason: "not-applicable" };
+    }
+
+    const mergedRaw = {
+      ...(caseRow.raw || {}),
+      docketalarm: {
+        ...(caseRow.raw?.docketalarm || {}),
+        caseUrl: payload.url || caseRow.raw?.docketalarm?.caseUrl || null,
+        title: payload.title || null,
+        court: payload.court || null,
+        docket: payload.docket || caseRow.docket_number || null,
+        rowCount: payload.entries?.length || 0,
+        state: payload.state || "empty",
+        syncedAt: payload.syncedAt || timestamp
+      }
+    };
+
+    let latestEntryNumber = caseRow.latest_docket_number || null;
+    let latestFiledAt = caseRow.latest_docket_filed_at || null;
+    let latestSummary = caseRow.recent_activity_summary || null;
+
+    for (const entry of payload.entries || []) {
+      const candidateNumber = entry.row_number || null;
+      const candidateFiledAt = entry.filed_at || null;
+      const nextLatestNumber = higherOrderValue(latestEntryNumber, candidateNumber);
+      const nextLatestFiledAt = laterIso(latestFiledAt, candidateFiledAt);
+
+      if (nextLatestNumber !== latestEntryNumber || nextLatestFiledAt !== latestFiledAt) {
+        latestSummary = entry.description || latestSummary;
+      }
+
+      latestEntryNumber = nextLatestNumber;
+      latestFiledAt = nextLatestFiledAt;
+    }
+
+    this.store.upsertCase({
+      source_case_key: caseRow.source_case_key,
+      primary_source: caseRow.primary_source,
+      source_case_id: caseRow.source_case_id,
+      courtlistener_docket_id: caseRow.courtlistener_docket_id,
+      pacer_case_id: caseRow.pacer_case_id,
+      court_id: caseRow.court_id,
+      court_name: caseRow.court_name,
+      case_name: caseRow.case_name,
+      docket_number: caseRow.docket_number,
+      date_filed: caseRow.date_filed,
+      date_terminated: caseRow.date_terminated,
+      cause: caseRow.cause,
+      nature_of_suit: caseRow.nature_of_suit,
+      status: caseRow.status,
+      tags_marker: caseRow.tags_marker,
+      docket_url: caseRow.docket_url,
+      source_urls: [...(caseRow.source_urls || []), payload.url].filter(Boolean),
+      plaintiffs: caseRow.plaintiffs || [],
+      defendants: caseRow.defendants || [],
+      recent_activity_summary: latestSummary,
+      latest_docket_filed_at: latestFiledAt,
+      latest_docket_number: latestEntryNumber,
+      docket_count: Math.max(caseRow.docket_count || 0, payload.entries?.length || 0),
+      last_seen_at: timestamp,
+      last_synced_at: timestamp,
+      last_docket_sync_at: caseRow.last_docket_sync_at,
+      raw: mergedRaw
+    });
+
+    if (!payload.entries?.length) {
+      return {
+        enriched: false,
+        reason: payload.state || "empty",
+        url: payload.url || null
+      };
+    }
+
+    this.store.deleteDocketEntriesBySourceForRelatedCases(caseRow, "docketalarm");
+
+    for (const entry of payload.entries) {
+      const digest = crypto
+        .createHash("sha1")
+        .update(`${payload.url}|${entry.row_number}|${entry.filed_at}|${entry.description}`)
+        .digest("hex")
+        .slice(0, 16);
+
+      this.store.upsertDocketEntry({
+        case_id: caseRow.id,
+        source_entry_key: `docketalarm:${caseRow.id}:${entry.row_number || "na"}:${digest}`,
+        primary_source: "docketalarm",
+        source_entry_id: String(entry.row_number || ""),
+        document_type: "Docket Alarm Docket Entry",
+        entry_number: String(entry.row_number || ""),
+        document_number: String(entry.row_number || ""),
+        filed_at: entry.filed_at,
+        description: entry.description,
+        absolute_url: entry.absolute_url || payload.url,
+        is_available: 0,
+        page_count: null,
+        pacer_doc_id: null,
+        raw: entry.raw || entry,
         last_synced_at: timestamp
       });
     }
