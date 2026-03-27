@@ -449,7 +449,15 @@ export class CaseSyncService {
     this.priorityFeed = priorityFeed;
     this.pacerMonitor = pacerMonitor;
     this.docketAlarm = docketAlarm;
-    this.uniCourt = uniCourt;
+    this.uniCourt = uniCourt || {
+      enabled: false,
+      hasCredentials() {
+        return false;
+      },
+      getStatus() {
+        return { enabled: false, state: "disabled" };
+      }
+    };
     this.pacer = pacer;
     this.translator = translator;
     this.state = {
@@ -1507,6 +1515,10 @@ export class CaseSyncService {
   async enrichCaseWithUniCourt(caseId, { force = false } = {}) {
     return this.store.batchMutations(async () => {
       const caseRow = this.store.getCase(caseId);
+      const uniCourtConfig = this.config.uniCourt || {
+        staleAfterHours: 24,
+        notFoundRetryAfterHours: 24
+      };
       if (!caseRow || !this.uniCourt.enabled || !this.uniCourt.hasCredentials()) {
         return { enriched: false, reason: "not-applicable" };
       }
@@ -1515,8 +1527,8 @@ export class CaseSyncService {
       const state = String(caseRow.raw?.unicourt?.state || "").toLowerCase();
       const retryHours =
         state === "not_found"
-          ? this.config.uniCourt.notFoundRetryAfterHours
-          : this.config.uniCourt.staleAfterHours;
+          ? uniCourtConfig.notFoundRetryAfterHours
+          : uniCourtConfig.staleAfterHours;
       const staleAfterMs = retryHours * 60 * 60 * 1000;
 
       if (!force && syncedAt && Date.now() - syncedAt < staleAfterMs) {
@@ -1879,6 +1891,12 @@ export class CaseSyncService {
 
   async syncUniCourtRecent(mode = "recent") {
     return this.store.batchMutations(async () => {
+      const uniCourtConfig = this.config.uniCourt || {
+        maxCasesPerRun: 0,
+        backfillMaxCasesPerRun: 0,
+        staleAfterHours: 24,
+        notFoundRetryAfterHours: 24
+      };
       if (!this.uniCourt.enabled) {
         return {
           syncedCases: 0,
@@ -1895,8 +1913,8 @@ export class CaseSyncService {
 
       const maxCases =
         mode === "backfill"
-          ? this.config.uniCourt.backfillMaxCasesPerRun
-          : this.config.uniCourt.maxCasesPerRun;
+          ? uniCourtConfig.backfillMaxCasesPerRun
+          : uniCourtConfig.maxCasesPerRun;
       const candidatePool = this.store.getCasesNeedingSupplementalDocketSync(
         Math.max(maxCases * 8, maxCases),
         {
@@ -1904,8 +1922,8 @@ export class CaseSyncService {
         }
       );
 
-      const staleBefore = Date.now() - this.config.uniCourt.staleAfterHours * 60 * 60 * 1000;
-      const notFoundBefore = Date.now() - this.config.uniCourt.notFoundRetryAfterHours * 60 * 60 * 1000;
+      const staleBefore = Date.now() - uniCourtConfig.staleAfterHours * 60 * 60 * 1000;
+      const notFoundBefore = Date.now() - uniCourtConfig.notFoundRetryAfterHours * 60 * 60 * 1000;
       const candidates = candidatePool
         .filter((caseRow) => {
           const syncedAt = caseRow.raw?.unicourt?.syncedAt ? Date.parse(caseRow.raw.unicourt.syncedAt) : 0;
