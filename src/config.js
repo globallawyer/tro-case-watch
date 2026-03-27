@@ -140,6 +140,26 @@ export const config = {
       "headlesschrome"
     ])
   },
+  email: {
+    host: env("SMTP_HOST", ""),
+    port: envInt("SMTP_PORT", 465),
+    secure: envBool("SMTP_SECURE", true),
+    user: env("SMTP_USER", ""),
+    pass: env("SMTP_PASS", ""),
+    from: env("SMTP_FROM", "")
+  },
+  reports: {
+    dailyEmail: {
+      enabled: envBool("DAILY_EMAIL_REPORT_ENABLED", false),
+      to: env("DAILY_EMAIL_REPORT_TO", "599214243@qq.com"),
+      timeZone: env("DAILY_EMAIL_REPORT_TIME_ZONE", "Asia/Shanghai"),
+      hour: envInt("DAILY_EMAIL_REPORT_HOUR", 23),
+      minute: envInt("DAILY_EMAIL_REPORT_MINUTE", 59),
+      caseLimit: envInt("DAILY_EMAIL_REPORT_CASE_LIMIT", 12),
+      checkIntervalMs: envInt("DAILY_EMAIL_REPORT_CHECK_INTERVAL_MS", 60 * 1000),
+      startupDelayMs: envInt("DAILY_EMAIL_REPORT_STARTUP_DELAY_MS", 90 * 1000)
+    }
+  },
   sync: {
     enableScheduler: envBool("ENABLE_SCHEDULER", true),
     enableBackfillScheduler: envBool("ENABLE_BACKFILL_SCHEDULER", true),

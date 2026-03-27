@@ -3216,6 +3216,103 @@ export class Store {
     return value;
   }
 
+  getDailyEmailReport({ startIso, endIso, caseLimit = 12 } = {}) {
+    const newCasesCount = Number(
+      this.db
+        .prepare(`
+          SELECT COUNT(*) AS n
+          FROM cases
+          WHERE created_at >= ?
+            AND created_at < ?
+        `)
+        .get(startIso, endIso)?.n || 0
+    );
+
+    const newDocketEntriesCount = Number(
+      this.db
+        .prepare(`
+          SELECT COUNT(*) AS n
+          FROM docket_entries
+          WHERE created_at >= ?
+            AND created_at < ?
+        `)
+        .get(startIso, endIso)?.n || 0
+    );
+
+    const items = this.db
+      .prepare(`
+        SELECT
+          c.id,
+          c.docket_number,
+          c.case_name,
+          c.court_id,
+          c.court_name,
+          c.date_filed,
+          c.created_at,
+          c.recent_activity_summary,
+          c.recent_activity_summary_zh,
+          CASE
+            WHEN c.created_at >= ? AND c.created_at < ? THEN 1
+            ELSE 0
+          END AS is_new_case,
+          COUNT(DISTINCT de.id) AS new_entry_count,
+          MAX(de.created_at) AS last_entry_created_at
+        FROM cases c
+        LEFT JOIN docket_entries de
+          ON de.case_id = c.id
+         AND de.created_at >= ?
+         AND de.created_at < ?
+        WHERE (
+          c.created_at >= ?
+          AND c.created_at < ?
+        )
+        OR EXISTS (
+          SELECT 1
+          FROM docket_entries de2
+          WHERE de2.case_id = c.id
+            AND de2.created_at >= ?
+            AND de2.created_at < ?
+        )
+        GROUP BY c.id
+        ORDER BY
+          is_new_case DESC,
+          new_entry_count DESC,
+          COALESCE(MAX(de.created_at), c.created_at) DESC,
+          c.id DESC
+        LIMIT ?
+      `)
+      .all(
+        startIso,
+        endIso,
+        startIso,
+        endIso,
+        startIso,
+        endIso,
+        startIso,
+        endIso,
+        Math.max(1, Number(caseLimit || 12))
+      )
+      .map((row) => ({
+        id: Number(row.id),
+        docket_number: row.docket_number || null,
+        case_name: row.case_name || null,
+        court_id: row.court_id || null,
+        court_name: row.court_name || null,
+        date_filed: row.date_filed || null,
+        created_at: row.created_at || null,
+        is_new_case: Boolean(Number(row.is_new_case || 0)),
+        new_entry_count: Number(row.new_entry_count || 0),
+        last_entry_created_at: row.last_entry_created_at || null,
+        summary: row.recent_activity_summary_zh || row.recent_activity_summary || null
+      }));
+
+    return {
+      newCasesCount,
+      newDocketEntriesCount,
+      items
+    };
+  }
+
   mergeTagMarkers(existing, incoming) {
     const tags = new Set();
 

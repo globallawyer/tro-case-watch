@@ -27,6 +27,7 @@ import {
 import { TranslationService } from "./translation.js";
 import { CaseSyncService } from "./sync.js";
 import { docketLooksLike } from "./insights.js";
+import { DailyEmailReportService } from "./daily-report.js";
 
 const mimeTypes = {
   ".css": "text/css; charset=utf-8",
@@ -54,6 +55,7 @@ const pacerMonitor = new PacerMonitorAdapter(config.pacerMonitor);
 const docketAlarm = new DocketAlarmClient(config.docketAlarm);
 const pacer = new PacerAdapter(config.pacer, store);
 const translator = new TranslationService(config.translation, store);
+const dailyEmailReport = new DailyEmailReportService({ config, store });
 const syncService = new CaseSyncService({
   config,
   store,
@@ -1663,9 +1665,24 @@ async function main() {
       process.exit(0);
     }
 
+    if (rawMode === "daily-report") {
+      const result = await dailyEmailReport.maybeSendScheduledReport();
+      console.log(`[sync] completed daily-report ${JSON.stringify(result)}`);
+      process.exit(0);
+    }
+
     const mode = rawMode === "backfill" ? "backfill" : "recent";
     await syncService.run(mode);
     console.log(`[sync] completed ${mode}`);
+    process.exit(0);
+  }
+
+  const sendDailyReportIndex = process.argv.indexOf("--send-daily-report");
+  if (sendDailyReportIndex !== -1) {
+    const dateIndex = process.argv.indexOf("--date");
+    const localDate = dateIndex !== -1 ? String(process.argv[dateIndex + 1] || "").trim() : undefined;
+    const result = await dailyEmailReport.sendReport({ localDate, force: true });
+    console.log(`[sync] completed send-daily-report ${JSON.stringify(result)}`);
     process.exit(0);
   }
 
@@ -1697,6 +1714,16 @@ async function main() {
 
       spawnDetachedTask(["--sync-only", "backfill"]);
     }, config.sync.backfillIntervalMs);
+  }
+
+  if (config.reports?.dailyEmail?.enabled) {
+    setTimeout(() => {
+      spawnDetachedTask(["--sync-only", "daily-report"]);
+    }, config.reports.dailyEmail.startupDelayMs);
+
+    setInterval(() => {
+      spawnDetachedTask(["--sync-only", "daily-report"]);
+    }, config.reports.dailyEmail.checkIntervalMs);
   }
 }
 
