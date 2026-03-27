@@ -97,7 +97,6 @@ function renderHero(status) {
   const cards = [
     heroCard("站内总库/当前监控池", `${totals.total_cases || 0} / ${totals.watchlist_cases || 0}`),
     heroCard("TRO诉讼/Schedule A案件数", `${totals.tro_cases || 0} / ${totals.schedule_a_cases || 0}`),
-    heroCard("卖家相关", totals.seller_cases || 0),
     heroCard("今日新增收录", totals.today_added_watchlist || 0),
     heroCard(
       "最近同步",
