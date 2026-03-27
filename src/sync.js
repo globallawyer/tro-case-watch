@@ -2128,6 +2128,64 @@ export class CaseSyncService {
     const docket = await this.courtListener.fetchDocket(docketId);
     const entries = await this.courtListener.fetchDocketEntries(docketId);
     const metadataOnlyMode = !entries.length && !this.courtListener.hasDocketEntriesAccess();
+    const timestamp = new Date().toISOString();
+    let latestEntryNumber = caseRow.latest_docket_number || null;
+    let latestFiledAt = valueOf(docket.date_last_filing, caseRow.latest_docket_filed_at);
+
+    for (const entry of entries) {
+      latestEntryNumber = higherOrderValue(
+        latestEntryNumber,
+        valueOf(entry.document_number, entry.documentNumber, entry.entry_number, entry.entryNumber)
+      );
+      latestFiledAt = laterIso(
+        latestFiledAt,
+        valueOf(entry.date_filed, entry.entry_date_filed, entry.filed_at)
+      );
+    }
+
+    const mergedRaw = {
+      ...(caseRow.raw || {}),
+      ...docket,
+      courtlistener: {
+        ...(caseRow.raw?.courtlistener || {}),
+        ...docket,
+        docketId,
+        docketEntryCount: entries.length,
+        docketEntriesAccess: this.courtListener.hasDocketEntriesAccess(),
+        syncedAt: timestamp
+      }
+    };
+
+    for (const entry of entries) {
+      this.store.upsertDocketEntry({
+        case_id: caseRow.id,
+        source_entry_key: `courtlistener:docket-entry:${entry.id ?? `${docketId}:${entry.entry_number ?? entry.document_number ?? Date.now()}`}`,
+        primary_source: "courtlistener",
+        source_entry_id: valueOf(entry.id),
+        document_type: valueOf(entry.document_type, entry.documentType),
+        entry_number: valueOf(entry.entry_number, entry.entryNumber),
+        document_number: valueOf(entry.document_number, entry.documentNumber),
+        filed_at: valueOf(entry.date_filed, entry.entry_date_filed, entry.filed_at),
+        description: valueOf(entry.description, entry.short_description, entry.docket_text, entry.text),
+        absolute_url: this.courtListener.absoluteUrl(valueOf(entry.absolute_url)),
+        is_available: entry.is_available === undefined ? null : entry.is_available ? 1 : 0,
+        page_count: valueOf(entry.page_count),
+        pacer_doc_id: valueOf(entry.pacer_doc_id),
+        raw: entry,
+        last_synced_at: timestamp
+      });
+    }
+
+    const coverage = this.store.getEntryCoverageForCaseIds([caseRow.id]).get(caseRow.id) || null;
+    const stabilizedLatestNumber = higherOrderValue(
+      latestEntryNumber,
+      coverage?.lastNumber ? String(coverage.lastNumber) : null
+    );
+    const stabilizedDocketCount = Math.max(
+      caseRow.docket_count || 0,
+      entries.length,
+      coverage?.totalEntries || 0
+    );
 
     this.store.upsertCase({
       source_case_key: caseRow.source_case_key,
@@ -2146,38 +2204,18 @@ export class CaseSyncService {
       status: valueOf(docket.date_terminated, docket.dateTerminated) ? "terminated" : caseRow.status,
       tags_marker: caseRow.tags_marker,
       docket_url: valueOf(this.courtListener.absoluteUrl(docket.absolute_url), caseRow.docket_url),
-      source_urls: caseRow.source_urls || [],
+      source_urls: [...(caseRow.source_urls || []), this.courtListener.absoluteUrl(docket.absolute_url)].filter(Boolean),
       plaintiffs: caseRow.plaintiffs || [],
       defendants: caseRow.defendants || [],
       recent_activity_summary: caseRow.recent_activity_summary,
-      latest_docket_filed_at: valueOf(docket.date_last_filing, caseRow.latest_docket_filed_at),
-      latest_docket_number: caseRow.latest_docket_number,
-      docket_count: Math.max(caseRow.docket_count || 0, entries.length),
-      last_seen_at: new Date().toISOString(),
-      last_synced_at: new Date().toISOString(),
-      last_docket_sync_at: new Date().toISOString(),
-      raw: docket
+      latest_docket_filed_at: latestFiledAt,
+      latest_docket_number: stabilizedLatestNumber,
+      docket_count: stabilizedDocketCount,
+      last_seen_at: timestamp,
+      last_synced_at: timestamp,
+      last_docket_sync_at: timestamp,
+      raw: mergedRaw
     });
-
-    for (const entry of entries) {
-      this.store.upsertDocketEntry({
-        case_id: caseRow.id,
-        source_entry_key: `courtlistener:docket-entry:${entry.id ?? `${docketId}:${entry.entry_number ?? entry.document_number ?? Date.now()}`}`,
-        primary_source: "courtlistener",
-        source_entry_id: valueOf(entry.id),
-        document_type: valueOf(entry.document_type, entry.documentType),
-        entry_number: valueOf(entry.entry_number, entry.entryNumber),
-        document_number: valueOf(entry.document_number, entry.documentNumber),
-        filed_at: valueOf(entry.date_filed, entry.entry_date_filed, entry.filed_at),
-        description: valueOf(entry.description, entry.short_description, entry.docket_text, entry.text),
-        absolute_url: this.courtListener.absoluteUrl(valueOf(entry.absolute_url)),
-        is_available: entry.is_available === undefined ? null : entry.is_available ? 1 : 0,
-        page_count: valueOf(entry.page_count),
-        pacer_doc_id: valueOf(entry.pacer_doc_id),
-        raw: entry,
-        last_synced_at: new Date().toISOString()
-      });
-    }
 
     this.store.touchCaseDocketSync(caseRow.id);
 
