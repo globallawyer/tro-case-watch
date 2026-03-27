@@ -194,23 +194,17 @@ a {
   color: rgba(21, 32, 41, 0.5);
 }
 
-.hero-lead {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 18px;
-  align-items: start;
-}
-
 .hero-heading {
   min-width: 0;
 }
 
 .hero-copy h1 {
   margin: 0;
-  max-width: 15.5ch;
+  max-width: none;
   font-family: var(--font-display);
-  font-size: clamp(1.85rem, 3vw, 3.32rem);
+  font-size: clamp(2rem, 3.35vw, 3.6rem);
   line-height: 1.03;
+  letter-spacing: -0.02em;
 }
 
 .hero-text {
@@ -226,67 +220,12 @@ a {
   align-content: start;
 }
 
-.hero-link-strip {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: 10px;
-  max-width: 320px;
+.hero-line {
+  display: block;
 }
 
-.inline-link {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 38px;
-  padding: 0 14px;
-  border-radius: 999px;
-  border: 1px solid rgba(21, 32, 41, 0.08);
-  text-decoration: none;
-  font-size: 0.86rem;
-  font-weight: 700;
-  background: rgba(255, 255, 255, 0.8);
-}
-
-.inline-link:hover {
-  transform: translateY(-1px);
-  filter: saturate(1.08);
-}
-
-.link-amber {
-  color: var(--amber-500);
-  background: rgba(239, 191, 118, 0.16);
-  border-color: rgba(174, 105, 23, 0.16);
-}
-
-.link-amber:hover {
-  color: #8f5710;
-  background: rgba(239, 191, 118, 0.28);
-  box-shadow: 0 12px 24px rgba(174, 105, 23, 0.12);
-}
-
-.link-blue {
-  color: var(--blue-500);
-  background: rgba(198, 220, 255, 0.28);
-  border-color: rgba(39, 95, 165, 0.16);
-}
-
-.link-blue:hover {
-  color: #194d91;
-  background: rgba(198, 220, 255, 0.46);
-  box-shadow: 0 12px 24px rgba(39, 95, 165, 0.12);
-}
-
-.link-green {
-  color: var(--green-500);
-  background: rgba(191, 230, 201, 0.3);
-  border-color: rgba(47, 122, 70, 0.18);
-}
-
-.link-green:hover {
-  color: #1f6636;
-  background: rgba(191, 230, 201, 0.48);
-  box-shadow: 0 12px 24px rgba(47, 122, 70, 0.12);
+.hero-line:last-child {
+  padding-left: 0.28ch;
 }
 
 .lookup-form {
@@ -816,15 +755,6 @@ a {
   .hero-panel,
   .content-grid {
     grid-template-columns: 1fr;
-  }
-
-  .hero-lead {
-    grid-template-columns: 1fr;
-  }
-
-  .hero-link-strip {
-    justify-content: flex-start;
-    max-width: none;
   }
 
   .contact-card {
