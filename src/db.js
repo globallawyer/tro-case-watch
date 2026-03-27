@@ -100,6 +100,148 @@ function isCivilLike(caseLike = {}) {
     /\b\d+:\d{2}-cv-\d{3,6}\b/i.test(String(caseLike.docket_number || ""));
 }
 
+const CRIMINAL_CASE_TERMS = [
+  "criminal",
+  "indictment",
+  "grand jury",
+  "sentencing",
+  "supervised release",
+  "probation violation",
+  "search warrant",
+  "arrest warrant",
+  "united states v.",
+  "usa v."
+];
+
+const HABEAS_CASE_TERMS = [
+  "habeas",
+  "2254",
+  "2255",
+  "2241",
+  "prisoner petition",
+  "warden"
+];
+
+const IMMIGRATION_CASE_TERMS = [
+  "immigration",
+  "asylum",
+  "removal proceeding",
+  "deport",
+  "deportation",
+  "uscis",
+  "ice detention"
+];
+
+const INJURY_CASE_TERMS = [
+  "personal injury",
+  "wrongful death",
+  "bodily injury",
+  "medical malpractice",
+  "product liability",
+  "premises liability",
+  "slip and fall",
+  "motor vehicle",
+  "auto accident"
+];
+
+function includesOneOf(text, patterns = []) {
+  return patterns.some((pattern) => text.includes(pattern));
+}
+
+function normalizeRetentionText(caseLike = {}) {
+  return normalizeText([
+    caseLike.case_name,
+    caseLike.court_name,
+    caseLike.docket_number,
+    caseLike.cause,
+    caseLike.nature_of_suit,
+    caseLike.recent_activity_summary,
+    caseLike.recent_activity_summary_zh,
+    ...(Array.isArray(caseLike.plaintiffs) ? caseLike.plaintiffs : []),
+    ...(Array.isArray(caseLike.defendants) ? caseLike.defendants : []),
+    JSON.stringify(caseLike.raw || {})
+  ].filter(Boolean).join(" | "));
+}
+
+function hasAuthoritativeTargetSignal(caseLike = {}) {
+  const caseName = normalizeText(caseLike.case_name || "");
+  return Boolean(
+    caseHasPriorityFeedUrl(caseLike) ||
+    caseName.includes("schedule a") ||
+    caseName.includes("unincorporated associations")
+  );
+}
+
+function hasTargetWatchlistSignals(caseLike = {}, insights = null) {
+  const derived = insights || deriveCaseInsights(caseLike);
+  const tags = Array.isArray(caseLike.tags)
+    ? caseLike.tags
+    : String(caseLike.tags_marker || "")
+      .split("|")
+      .map((item) => item.trim())
+      .filter(Boolean);
+
+  return Boolean(
+    hasAuthoritativeTargetSignal(caseLike) ||
+    tags.includes("seller_tro") ||
+    tags.includes("schedule_a") ||
+    derived?.is_schedule_a_case ||
+    derived?.is_seller_case ||
+    (derived?.is_tro_case && Number(derived?.seller_relevance_score || 0) >= 4)
+  );
+}
+
+function getCaseRetentionDecision(caseLike = {}) {
+  const insights = caseLike.insights || deriveCaseInsights(caseLike);
+  const docketNumber = String(caseLike.docket_number || "").toLowerCase();
+  const text = normalizeRetentionText({
+    ...caseLike,
+    insights
+  });
+  const authoritativeTargetSignal = hasAuthoritativeTargetSignal(caseLike);
+  const reasons = [];
+
+  if (!isCivilLike(caseLike)) {
+    reasons.push("non-cv-docket");
+  }
+
+  if (isBankruptcyLike(caseLike) || insights?.is_bankruptcy_case) {
+    reasons.push("bankruptcy");
+  }
+
+  if (!authoritativeTargetSignal) {
+    if (
+      /\b\d{2}-(cr|mj|mc|po)-\d{1,6}\b/i.test(docketNumber) ||
+      /\b\d+:\d{2}-(cr|mj|mc|po)-\d{1,6}\b/i.test(docketNumber) ||
+      includesOneOf(text, CRIMINAL_CASE_TERMS)
+    ) {
+      reasons.push("criminal");
+    }
+
+    if (includesOneOf(text, HABEAS_CASE_TERMS)) {
+      reasons.push("habeas");
+    }
+
+    if (includesOneOf(text, IMMIGRATION_CASE_TERMS)) {
+      reasons.push("immigration");
+    }
+
+    if (includesOneOf(text, INJURY_CASE_TERMS)) {
+      reasons.push("injury");
+    }
+  }
+
+  if (!reasons.length && isCivilLike(caseLike) && !hasTargetWatchlistSignals(caseLike, insights)) {
+    reasons.push("general-civil");
+  }
+
+  return {
+    retain: reasons.length === 0,
+    reasons,
+    insights
+  };
+}
+
 function hasSparsePublicCoverage(caseLike = {}) {
   const latestNumber = parseDocketNumber(caseLike.latest_docket_number);
   const knownEntries = Number(caseLike.docket_count || 0);
@@ -163,6 +305,14 @@ function laterIso(left, right) {
   }
 
   return String(left).localeCompare(String(right)) >= 0 ? left : right;
+}
+
+function chunkArray(values = [], size = 500) {
+  const chunks = [];
+  for (let index = 0; index < values.length; index += size) {
+    chunks.push(values.slice(index, index + size));
+  }
+  return chunks;
 }
 
 function higherOrderValue(left, right) {
@@ -1539,6 +1689,19 @@ export class Store {
           }
         });
 
+        if (!savedCase) {
+          const allIds = ordered
+            .map((row) => Number(row.id))
+            .filter((value) => Number.isFinite(value) && value > 0);
+          if (allIds.length) {
+            const allPlaceholders = allIds.map(() => "?").join(", ");
+            this.db.prepare(`DELETE FROM cases WHERE id IN (${allPlaceholders})`).run(...allIds);
+          }
+          groupsProcessed += 1;
+          casesMerged += ordered.length;
+          continue;
+        }
+
         const placeholders = duplicateIds.map(() => "?").join(", ");
         const movedResult = this.db
           .prepare(`UPDATE docket_entries SET case_id = ? WHERE case_id IN (${placeholders})`)
@@ -1559,17 +1722,44 @@ export class Store {
   }
 
   upsertCase(record) {
-    const existing = this.db
-      .prepare(
-        "SELECT id, created_at, tags_marker, source_urls_json, plaintiffs_json, defendants_json FROM cases WHERE source_case_key = ?"
-      )
-      .get(record.source_case_key);
+    const existing = hydrateCase(
+      this.db
+        .prepare("SELECT * FROM cases WHERE source_case_key = ?")
+        .get(record.source_case_key)
+    );
 
     const mergedTags = this.mergeTagMarkers(existing?.tags_marker, record.tags_marker);
-    const mergedUrls = this.mergeJsonArrays(existing?.source_urls_json, record.source_urls);
-    const mergedPlaintiffs = this.mergeJsonArrays(existing?.plaintiffs_json, record.plaintiffs);
-    const mergedDefendants = this.mergeJsonArrays(existing?.defendants_json, record.defendants);
+    const mergedUrls = this.mergeJsonArrays(existing?.source_urls, record.source_urls);
+    const mergedPlaintiffs = this.mergeJsonArrays(existing?.plaintiffs, record.plaintiffs);
+    const mergedDefendants = this.mergeJsonArrays(existing?.defendants, record.defendants);
     const timestamp = nowIso();
+    const candidate = {
+      ...existing,
+      ...record,
+      tags_marker: mergedTags,
+      tags: mergedTags
+        .split("|")
+        .map((item) => item.trim())
+        .filter(Boolean),
+      source_urls: mergedUrls,
+      plaintiffs: mergedPlaintiffs,
+      defendants: mergedDefendants,
+      recent_activity_summary: record.recent_activity_summary ?? existing?.recent_activity_summary ?? null,
+      recent_activity_summary_zh: record.recent_activity_summary_zh ?? existing?.recent_activity_summary_zh ?? null,
+      raw: {
+        ...(existing?.raw || {}),
+        ...(record.raw || {})
+      }
+    };
+    const retention = getCaseRetentionDecision(candidate);
+
+    if (!retention.retain) {
+      if (existing?.id) {
+        this.db.prepare("DELETE FROM cases WHERE id = ?").run(existing.id);
+        this.invalidateCaseViews();
+      }
+      return null;
+    }
 
     this.db
       .prepare(`
@@ -1714,6 +1904,117 @@ export class Store {
       .prepare("UPDATE cases SET last_docket_sync_at = ?, updated_at = ? WHERE id = ?")
       .run(nowIso(), nowIso(), caseId);
     this.invalidateCaseViews();
+  }
+
+  listNonWatchlistCases({
+    startDate = null,
+    limit = 50
+  } = {}) {
+    const rows = this.db
+      .prepare(`
+        SELECT *
+        FROM cases
+        ORDER BY COALESCE(latest_docket_filed_at, date_filed, updated_at) DESC, updated_at DESC
+      `)
+      .all()
+      .map(buildCaseView)
+      .filter((row) => !startDate || !row.date_filed || String(row.date_filed) >= String(startDate))
+      .filter((row) => !getCaseRetentionDecision(row).retain)
+      .map((row) => ({
+        id: row.id,
+        docket_number: row.docket_number,
+        case_name: row.case_name,
+        court_id: row.court_id,
+        court_name: row.court_name,
+        date_filed: row.date_filed,
+        reasons: getCaseRetentionDecision(row).reasons
+      }));
+
+    return limit > 0 ? rows.slice(0, limit) : rows;
+  }
+
+  async purgeNonWatchlistCases({
+    startDate = null,
+    limit = 0,
+    dryRun = false
+  } = {}) {
+    const candidates = this.db
+      .prepare(`
+        SELECT *
+        FROM cases
+        ORDER BY COALESCE(latest_docket_filed_at, date_filed, updated_at) DESC, updated_at DESC
+      `)
+      .all()
+      .map(buildCaseView)
+      .filter((row) => !startDate || !row.date_filed || String(row.date_filed) >= String(startDate))
+      .map((row) => ({
+        row,
+        retention: getCaseRetentionDecision(row)
+      }))
+      .filter(({ retention }) => !retention.retain);
+
+    const selected = limit > 0 ? candidates.slice(0, limit) : candidates;
+    const ids = selected
+      .map(({ row }) => Number(row.id))
+      .filter((value) => Number.isFinite(value) && value > 0);
+    const reasonCounts = {};
+
+    for (const { retention } of selected) {
+      for (const reason of retention.reasons) {
+        reasonCounts[reason] = (reasonCounts[reason] || 0) + 1;
+      }
+    }
+
+    if (!ids.length) {
+      return {
+        dryRun,
+        deletedCases: 0,
+        deletedEntries: 0,
+        reasonCounts,
+        sample: []
+      };
+    }
+
+    let deletedEntries = 0;
+    for (const chunk of chunkArray(ids, 400)) {
+      const placeholders = chunk.map(() => "?").join(", ");
+      deletedEntries += Number(
+        this.db.prepare(`SELECT COUNT(*) AS n FROM docket_entries WHERE case_id IN (${placeholders})`).get(...chunk)?.n || 0
+      );
+    }
+    const sample = selected.slice(0, 25).map(({ row, retention }) => ({
+      id: row.id,
+      docket_number: row.docket_number,
+      case_name: row.case_name,
+      court_id: row.court_id,
+      date_filed: row.date_filed,
+      reasons: retention.reasons
+    }));
+
+    if (dryRun) {
+      return {
+        dryRun: true,
+        deletedCases: ids.length,
+        deletedEntries,
+        reasonCounts,
+        sample
+      };
+    }
+
+    await this.batchMutations(async () => {
+      for (const chunk of chunkArray(ids, 400)) {
+        const placeholders = chunk.map(() => "?").join(", ");
+        this.db.prepare(`DELETE FROM cases WHERE id IN (${placeholders})`).run(...chunk);
+      }
+    });
+
+    return {
+      dryRun: false,
+      deletedCases: ids.length,
+      deletedEntries,
+      reasonCounts,
+      sample
+    };
   }
 
   deleteDocketEntriesBySource(caseId, primarySource) {
@@ -3678,7 +3979,8 @@ export class Store {
   }
 
   mergeJsonArrays(existingJson, incoming) {
-    const merged = new Set(parseJson(existingJson, []).map(normalizeSourceUrl));
+    const base = Array.isArray(existingJson) ? existingJson : parseJson(existingJson, []);
+    const merged = new Set(base.map(normalizeSourceUrl));
     for (const item of incoming || []) {
       const normalized = normalizeSourceUrl(item);
       if (normalized) {

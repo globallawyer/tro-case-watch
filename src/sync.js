@@ -907,6 +907,10 @@ export class CaseSyncService {
         raw: mergedRaw
       });
 
+      if (!savedCase) {
+        continue;
+      }
+
       casesUpserted += 1;
 
       const entryKey = `courtfeed:${item.courtId}:${item.guid || `${item.caseId || item.reportCaseId}:${item.sequenceNumber || item.documentNumber}`}`;
@@ -1194,6 +1198,10 @@ export class CaseSyncService {
         last_docket_sync_at: existingCase?.last_docket_sync_at || null,
         raw: mergedRaw
       });
+
+      if (!savedCase) {
+        continue;
+      }
 
       casesUpserted += 1;
 
@@ -1712,6 +1720,10 @@ export class CaseSyncService {
         })
       });
 
+      if (!savedCase) {
+        continue;
+      }
+
       if (!existingCase || !existingCase.source_urls?.some((url) => sourceUrlUsesPriorityFeed(url))) {
         discoveredCases += 1;
         if (existingCase) {
@@ -2036,7 +2048,7 @@ export class CaseSyncService {
       syncedAt: payload.syncedAt
     });
 
-    this.store.upsertCase({
+    const savedCase = this.store.upsertCase({
       source_case_key: caseRow.source_case_key,
       primary_source: caseRow.primary_source,
       source_case_id: caseRow.source_case_id,
@@ -2067,6 +2079,10 @@ export class CaseSyncService {
       raw: mergedRaw
     });
 
+    if (!savedCase) {
+      return { enriched: false, reason: "filtered" };
+    }
+
     for (const entry of payload.entries) {
       const digest = crypto
         .createHash("sha1")
@@ -2075,8 +2091,8 @@ export class CaseSyncService {
         .slice(0, 16);
 
       this.store.upsertDocketEntry({
-        case_id: caseRow.id,
-        source_entry_key: `${PRIORITY_FEED_ENTRY_SOURCE}:${caseRow.id}:${entry.row_number}:${digest}`,
+        case_id: savedCase.id,
+        source_entry_key: `${PRIORITY_FEED_ENTRY_SOURCE}:${savedCase.id}:${entry.row_number}:${digest}`,
         primary_source: PRIORITY_FEED_ENTRY_SOURCE,
         source_entry_id: String(entry.row_number || ""),
         document_type: "优先目录 Entry",
@@ -2124,7 +2140,7 @@ export class CaseSyncService {
       }
     };
 
-    this.store.upsertCase({
+    const savedCase = this.store.upsertCase({
       source_case_key: caseRow.source_case_key,
       primary_source: caseRow.primary_source,
       source_case_id: caseRow.source_case_id,
@@ -2154,6 +2170,14 @@ export class CaseSyncService {
       raw: mergedRaw
     });
 
+    if (!savedCase) {
+      return {
+        enriched: false,
+        reason: "filtered",
+        url: payload.url || null
+      };
+    }
+
     if (!payload.entries?.length) {
       return {
         enriched: false,
@@ -2170,8 +2194,8 @@ export class CaseSyncService {
         .slice(0, 16);
 
       this.store.upsertDocketEntry({
-        case_id: caseRow.id,
-        source_entry_key: `pacermonitor:${caseRow.id}:${entry.row_number || "na"}:${digest}`,
+        case_id: savedCase.id,
+        source_entry_key: `pacermonitor:${savedCase.id}:${entry.row_number || "na"}:${digest}`,
         primary_source: "pacermonitor",
         source_entry_id: String(entry.row_number || ""),
         document_type: "PACERMonitor Docket Entry",
@@ -2234,7 +2258,7 @@ export class CaseSyncService {
       latestFiledAt = nextLatestFiledAt;
     }
 
-    this.store.upsertCase({
+    const savedCase = this.store.upsertCase({
       source_case_key: caseRow.source_case_key,
       primary_source: caseRow.primary_source,
       source_case_id: caseRow.source_case_id,
@@ -2264,6 +2288,14 @@ export class CaseSyncService {
       raw: mergedRaw
     });
 
+    if (!savedCase) {
+      return {
+        enriched: false,
+        reason: "filtered",
+        url: payload.url || null
+      };
+    }
+
     if (!payload.entries?.length) {
       return {
         enriched: false,
@@ -2282,8 +2314,8 @@ export class CaseSyncService {
         .slice(0, 16);
 
       this.store.upsertDocketEntry({
-        case_id: caseRow.id,
-        source_entry_key: `docketalarm:${caseRow.id}:${entry.row_number || "na"}:${digest}`,
+        case_id: savedCase.id,
+        source_entry_key: `docketalarm:${savedCase.id}:${entry.row_number || "na"}:${digest}`,
         primary_source: "docketalarm",
         source_entry_id: String(entry.row_number || ""),
         document_type: "Docket Alarm Docket Entry",
@@ -2300,8 +2332,8 @@ export class CaseSyncService {
       });
     }
 
-    const coverage = this.store.getEntryCoverageForCaseIds([caseRow.id]).get(caseRow.id) || null;
-    this.store.upsertCase({
+    const coverage = this.store.getEntryCoverageForCaseIds([savedCase.id]).get(savedCase.id) || null;
+    const refreshedCase = this.store.upsertCase({
       source_case_key: caseRow.source_case_key,
       primary_source: caseRow.primary_source,
       source_case_id: caseRow.source_case_id,
@@ -2330,6 +2362,14 @@ export class CaseSyncService {
       last_docket_sync_at: caseRow.last_docket_sync_at,
       raw: mergedRaw
     });
+
+    if (!refreshedCase) {
+      return {
+        enriched: false,
+        reason: "filtered",
+        url: payload.url || null
+      };
+    }
 
     return {
       enriched: true,
@@ -2378,7 +2418,7 @@ export class CaseSyncService {
       latestFiledAt = nextLatestFiledAt;
     }
 
-    this.store.upsertCase({
+    const savedCase = this.store.upsertCase({
       source_case_key: caseRow.source_case_key,
       primary_source: caseRow.primary_source,
       source_case_id: caseRow.source_case_id,
@@ -2408,6 +2448,14 @@ export class CaseSyncService {
       raw: mergedRaw
     });
 
+    if (!savedCase) {
+      return {
+        enriched: false,
+        reason: "filtered",
+        url: payload.url || null
+      };
+    }
+
     if (!payload.entries?.length) {
       return {
         enriched: false,
@@ -2426,8 +2474,8 @@ export class CaseSyncService {
         .slice(0, 16);
 
       this.store.upsertDocketEntry({
-        case_id: caseRow.id,
-        source_entry_key: `unicourt:${caseRow.id}:${entry.row_number || "na"}:${digest}`,
+        case_id: savedCase.id,
+        source_entry_key: `unicourt:${savedCase.id}:${entry.row_number || "na"}:${digest}`,
         primary_source: "unicourt",
         source_entry_id: String(entry.row_number || ""),
         document_type: "UniCourt Docket Entry",
@@ -2444,8 +2492,8 @@ export class CaseSyncService {
       });
     }
 
-    const coverage = this.store.getEntryCoverageForCaseIds([caseRow.id]).get(caseRow.id) || null;
-    this.store.upsertCase({
+    const coverage = this.store.getEntryCoverageForCaseIds([savedCase.id]).get(savedCase.id) || null;
+    const refreshedCase = this.store.upsertCase({
       source_case_key: caseRow.source_case_key,
       primary_source: caseRow.primary_source,
       source_case_id: caseRow.source_case_id,
@@ -2474,6 +2522,14 @@ export class CaseSyncService {
       last_docket_sync_at: caseRow.last_docket_sync_at,
       raw: mergedRaw
     });
+
+    if (!refreshedCase) {
+      return {
+        enriched: false,
+        reason: "filtered",
+        url: payload.url || null
+      };
+    }
 
     return {
       enriched: true,
@@ -2577,6 +2633,10 @@ export class CaseSyncService {
           courtlistener: result
         }
       });
+
+      if (!savedCase) {
+        continue;
+      }
 
       casesUpserted += 1;
 

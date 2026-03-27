@@ -1445,6 +1445,38 @@ async function handleApi(request, response, pathname, searchParams) {
     });
   }
 
+  if (request.method === "POST" && pathname === "/api/admin/purge-non-watchlist") {
+    if (!authorize(request)) {
+      return sendJson(response, 401, { error: "Unauthorized" });
+    }
+
+    const body = await readRequestBody(request);
+    const limit = Math.max(Number(body.limit || 0), 0);
+    const dryRun = body.dryRun === undefined ? true : Boolean(body.dryRun);
+    const startDate = String(body.startDate || "").trim();
+    const args = ["--sync-only", "purge-non-watchlist"];
+    if (dryRun) {
+      args.push("--dry-run");
+    }
+    if (limit > 0) {
+      args.push("--limit", String(limit));
+    }
+    if (startDate) {
+      args.push("--start-date", startDate);
+    }
+
+    spawnDetachedTask(args);
+    clearPublicResponseCache();
+
+    return sendJson(response, 202, {
+      accepted: true,
+      mode: "purge-non-watchlist",
+      dryRun,
+      limit,
+      startDate: startDate || null
+    });
+  }
+
   if (request.method === "POST" && pathname === "/api/admin/enrich-case") {
     if (!authorize(request)) {
       return sendJson(response, 401, { error: "Unauthorized" });
@@ -1766,6 +1798,21 @@ async function main() {
         limit
       });
       console.log(`[sync] completed reconcile-duplicates ${JSON.stringify(result)}`);
+      process.exit(0);
+    }
+
+    if (rawMode === "purge-non-watchlist") {
+      const limitIndex = process.argv.indexOf("--limit");
+      const startDateIndex = process.argv.indexOf("--start-date");
+      const limit = limitIndex !== -1 ? Math.max(Number(process.argv[limitIndex + 1] || 0), 0) : 0;
+      const startDate = startDateIndex !== -1 ? String(process.argv[startDateIndex + 1] || "").trim() : "";
+      const dryRun = process.argv.includes("--dry-run");
+      const result = await store.purgeNonWatchlistCases({
+        limit,
+        dryRun,
+        startDate: startDate || null
+      });
+      console.log(`[sync] completed purge-non-watchlist ${JSON.stringify(result)}`);
       process.exit(0);
     }
 
