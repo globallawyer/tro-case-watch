@@ -394,6 +394,36 @@ function compareCaseRowsForCanonicalChoice(left, right) {
   );
 }
 
+function compareCaseListFreshness(left, right) {
+  const leftHasDocketUpdate = Boolean(left?.latest_docket_filed_at);
+  const rightHasDocketUpdate = Boolean(right?.latest_docket_filed_at);
+  if (leftHasDocketUpdate !== rightHasDocketUpdate) {
+    return leftHasDocketUpdate ? -1 : 1;
+  }
+
+  const docketActivityDiff = compareIsoDesc(left?.latest_docket_filed_at, right?.latest_docket_filed_at);
+  if (docketActivityDiff !== 0) {
+    return docketActivityDiff;
+  }
+
+  const updatedAtDiff = compareIsoDesc(left?.updated_at, right?.updated_at);
+  if (updatedAtDiff !== 0) {
+    return updatedAtDiff;
+  }
+
+  const filedAtDiff = compareIsoDesc(left?.date_filed, right?.date_filed);
+  if (filedAtDiff !== 0) {
+    return filedAtDiff;
+  }
+
+  const docketCountDiff = Number(right?.docket_count || 0) - Number(left?.docket_count || 0);
+  if (docketCountDiff !== 0) {
+    return docketCountDiff;
+  }
+
+  return Number(right?.id || 0) - Number(left?.id || 0);
+}
+
 function mergeArraysNormalized(...lists) {
   const merged = new Map();
   for (const list of lists) {
@@ -510,12 +540,7 @@ function collapseDuplicateCases(rows) {
 
   const merged = [...grouped.values()].map(mergeDuplicateCaseGroup);
   const combined = [...passthrough, ...merged];
-  combined.sort((left, right) =>
-    compareIsoDesc(
-      left.latest_docket_filed_at || left.date_filed || left.updated_at,
-      right.latest_docket_filed_at || right.date_filed || right.updated_at
-    ) || compareIsoDesc(left.updated_at, right.updated_at)
-  );
+  combined.sort(compareCaseListFreshness);
   return combined;
 }
 
@@ -1956,7 +1981,13 @@ export class Store {
         SELECT *
         FROM cases
         WHERE ${whereSql}
-        ORDER BY COALESCE(latest_docket_filed_at, date_filed, updated_at) DESC, updated_at DESC
+        ORDER BY
+          CASE WHEN latest_docket_filed_at IS NOT NULL THEN 0 ELSE 1 END ASC,
+          latest_docket_filed_at DESC,
+          updated_at DESC,
+          date_filed DESC,
+          docket_count DESC,
+          id DESC
         LIMIT ?
         OFFSET ?
       `)
@@ -3570,12 +3601,7 @@ export class Store {
       }
     }
 
-    return (
-      compareIsoDesc(
-        left.latest_docket_filed_at || left.date_filed || left.updated_at,
-        right.latest_docket_filed_at || right.date_filed || right.updated_at
-      ) || compareIsoDesc(left.updated_at, right.updated_at)
-    );
+    return compareCaseListFreshness(left, right);
   }
 
   searchPriority(row, searchTerm) {
