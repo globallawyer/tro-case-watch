@@ -164,7 +164,7 @@ function renderTroDailyUpdates(payload = {}) {
           ${loopItems
             .map(
               (item) => `
-                <a class="tro-briefing-item" href="${item.url || "#"}" ${item.url ? 'target="_blank" rel="noreferrer"' : ""}>
+                <a class="tro-briefing-item" href="${item.href || "/#wechat-contact"}">
                   <span class="tro-briefing-source">${troDailyUpdatesMeta(item)}</span>
                   <strong>${item.title || "今日动态"}</strong>
                   ${item.summary ? `<span class="tro-briefing-summary">${item.summary}</span>` : ""}

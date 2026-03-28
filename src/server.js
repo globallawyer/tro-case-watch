@@ -782,6 +782,52 @@ function sanitizePublicUrl(value) {
   }
 }
 
+function resolveTroDailyUpdateCaseId(item = {}) {
+  const numericCaseId = Number(item.caseId || 0);
+  if (numericCaseId > 0 && store.getCase(numericCaseId)) {
+    return numericCaseId;
+  }
+
+  const docketNumber = String(item.docketNumber || "").trim();
+  if (docketNumber) {
+    const payload = store.listCases({
+      startDate: "2020-01-01",
+      category: "all",
+      search: docketNumber,
+      page: 1,
+      pageSize: 5
+    });
+
+    const normalizedNeedle = docketNumber.toLowerCase().replace(/\s+/g, "");
+    const exact = (payload.items || []).find((candidate) =>
+      String(candidate.docket_number || "").toLowerCase().replace(/\s+/g, "") === normalizedNeedle
+    );
+    if (exact?.id) {
+      return Number(exact.id);
+    }
+
+    if (payload.items?.[0]?.id) {
+      return Number(payload.items[0].id);
+    }
+  }
+
+  const caseName = String(item.caseName || "").trim();
+  if (caseName) {
+    const payload = store.listCases({
+      startDate: "2020-01-01",
+      category: "all",
+      search: caseName,
+      page: 1,
+      pageSize: 3
+    });
+    if (payload.items?.[0]?.id) {
+      return Number(payload.items[0].id);
+    }
+  }
+
+  return null;
+}
+
 function serializeTroDailyUpdates(payload = {}) {
   const items = Array.isArray(payload.items) ? payload.items : [];
   return {
@@ -789,16 +835,23 @@ function serializeTroDailyUpdates(payload = {}) {
     total: Number(payload.total || items.length || 0),
     items: items
       .slice(0, Number(config.reports.troDailyUpdates.maxItems || 3))
-      .map((item) => ({
+      .map((item) => {
+        const matchedCaseId = resolveTroDailyUpdateCaseId(item);
+        const href = matchedCaseId ? `/case/${matchedCaseId}` : "/#wechat-contact";
+        return {
         id: String(item.id || ""),
         title: sanitizePublicText(item.title) || "今日动态",
         summary: sanitizePublicText(item.summary) || null,
         url: sanitizePublicUrl(item.url),
+        href,
+        matchedCaseId,
+        docketNumber: sanitizePublicText(item.docketNumber) || null,
         sources: Array.isArray(item.sources) ? item.sources.map((value) => sanitizePublicText(value)).filter(Boolean) : [],
         publishedAt: item.publishedAt || null,
         heat: Number(item.heat || 0),
         caseRefs: Array.isArray(item.caseRefs) ? item.caseRefs.map((value) => sanitizePublicText(value)).filter(Boolean) : []
-      }))
+      };
+      })
   };
 }
 

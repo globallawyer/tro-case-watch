@@ -41,6 +41,9 @@ function normalizeItem(item = {}, index = 0) {
   const summary = normalizeText(item.summary || item.note || item.description || "");
   const sources = normalizeSources(item);
   const url = normalizeUrl(item.url || item.link || item.href || "");
+  const docketNumber = normalizeText(item.docketNumber || item.docket_number || "");
+  const caseName = normalizeText(item.caseName || item.case_name || "");
+  const caseId = Number(item.caseId ?? item.case_id ?? 0);
   const publishedAt = normalizeText(item.publishedAt || item.published_at || item.date || "");
   const heat = Number(item.heat ?? item.score ?? item.priority ?? 0);
   const caseRefs = Array.isArray(item.caseRefs)
@@ -57,6 +60,9 @@ function normalizeItem(item = {}, index = 0) {
     summary,
     sources,
     url,
+    docketNumber: docketNumber || null,
+    caseName: caseName || null,
+    caseId: Number.isFinite(caseId) && caseId > 0 ? caseId : null,
     publishedAt: publishedAt || null,
     heat: Number.isFinite(heat) ? heat : 0,
     caseRefs
