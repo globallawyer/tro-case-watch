@@ -127,6 +127,47 @@ const PRIORITY_FEED_DISCOVERY_STOP_WORDS = new Set([
 ]);
 
 const FULL_CATALOG_START_DATE = "1900-01-01";
+const COURTLISTENER_NEGATIVE_TERMS = {
+  bankruptcy: [
+    "bankruptcy",
+    "debtor",
+    "chapter 7",
+    "chapter 11",
+    "chapter 13",
+    "trustee",
+    "schedule a/b"
+  ],
+  habeas: [
+    "habeas",
+    "2254",
+    "2255",
+    "2241",
+    "prisoner petition",
+    "warden"
+  ],
+  immigration: [
+    "immigration",
+    "asylum",
+    "removal proceeding",
+    "deport",
+    "deportation",
+    "uscis",
+    "ice detention",
+    "alien detainee"
+  ],
+  injury: [
+    "personal injury",
+    "wrongful death",
+    "bodily injury",
+    "medical malpractice",
+    "product liability",
+    "premises liability",
+    "slip and fall",
+    "motor vehicle",
+    "auto accident"
+  ]
+};
+const COURTLISTENER_IP_CAUSE_PATTERNS = [/\b15:1114\b/i, /\b15:1125\b/i, /\b17:501\b/i, /\b35:271\b/i];
 
 function normalizeLookupText(value) {
   return normalizeText(value).replace(/[^\w]+/g, " ").replace(/\s+/g, " ").trim();
@@ -437,6 +478,73 @@ function deriveParties(result) {
       })
     ])
   };
+}
+
+function includesAny(text, values = []) {
+  return values.some((value) => text.includes(value));
+}
+
+function hasTargetSignals({ text = "", tags = [], cause = "", natureOfSuit = "", existingCase = null } = {}) {
+  const existingTags = new Set(Array.isArray(existingCase?.tags) ? existingCase.tags : []);
+  return Boolean(
+    tags.length > 0 ||
+    existingTags.has("tro") ||
+    existingTags.has("schedule_a") ||
+    existingTags.has("seller_tro") ||
+    /\b(820|830|840)\b/.test(natureOfSuit) ||
+    COURTLISTENER_IP_CAUSE_PATTERNS.some((pattern) => pattern.test(cause)) ||
+    text.includes("schedule a") ||
+    text.includes("unincorporated associations") ||
+    text.includes("temporary restraining order") ||
+    text.includes("trademark") ||
+    text.includes("copyright") ||
+    text.includes("patent") ||
+    text.includes("lanham act") ||
+    text.includes("counterfeit") ||
+    text.includes("infringement")
+  );
+}
+
+function shouldTrackCourtListenerResult(result, existingCase, tags) {
+  const docketNumber = String(valueOf(result.docketNumber, existingCase?.docket_number) || "");
+  if (!/\b\d{2}-cv-\d{3,6}\b/i.test(docketNumber) && !/\b\d+:\d{2}-cv-\d{3,6}\b/i.test(docketNumber)) {
+    return false;
+  }
+
+  const cause = normalizeText(valueOf(result.cause, existingCase?.cause) || "");
+  const natureOfSuit = normalizeText(valueOf(result.nature_of_suit, result.suitNature, existingCase?.nature_of_suit) || "");
+  const court = normalizeText(valueOf(result.court, existingCase?.court_name) || "");
+  const text = normalizeText([
+    result.caseName,
+    result.case_name_full,
+    result.court,
+    result.cause,
+    result.nature_of_suit,
+    result.suitNature,
+    ...(result.party || []),
+    ...((result.recap_documents || []).map((item) => item.short_description || item.description || "")),
+    existingCase?.case_name,
+    existingCase?.cause,
+    existingCase?.nature_of_suit
+  ].join(" | "));
+
+  const hasNegativeSignal =
+    docketNumber.toLowerCase().includes("-bk-") ||
+    court.includes("bankruptcy") ||
+    includesAny(text, COURTLISTENER_NEGATIVE_TERMS.bankruptcy) ||
+    includesAny(text, COURTLISTENER_NEGATIVE_TERMS.habeas) ||
+    includesAny(text, COURTLISTENER_NEGATIVE_TERMS.immigration) ||
+    includesAny(text, COURTLISTENER_NEGATIVE_TERMS.injury);
+
+  if (hasNegativeSignal) {
+    return false;
+  }
+
+  if (existingCase) {
+    return hasTargetSignals({ text, tags, cause, natureOfSuit, existingCase });
+  }
+
+  return hasTargetSignals({ text, tags, cause, natureOfSuit });
 }
 
 export class CaseSyncService {
@@ -3037,6 +3145,11 @@ export class CaseSyncService {
         docketNumber: valueOf(result.docketNumber),
         startDate: this.config.sync.startDate
       });
+
+      if (!shouldTrackCourtListenerResult(result, existingCase, tags)) {
+        continue;
+      }
+
       const savedCase = this.store.upsertCase({
         source_case_key: existingCase?.source_case_key || `courtlistener:${result.docket_id}`,
         primary_source: "courtlistener",
