@@ -1655,28 +1655,50 @@ async function main() {
           .filter(Boolean)
       : ["courtlistener", PRIORITY_FEED_SOURCE, "pacermonitor", "docketalarm", "unicourt"];
 
+    const completedProviders = [];
+    const failedProviders = [];
+
+    const runProvider = async (provider, task) => {
+      try {
+        await task();
+        completedProviders.push(provider);
+      } catch (error) {
+        failedProviders.push({
+          provider,
+          error: error?.message || String(error)
+        });
+        console.warn(`[sync] provider ${provider} failed for case ${caseId}: ${error?.message || error}`);
+      }
+    };
+
     if (providers.includes("courtlistener")) {
-      await syncService.enrichCaseWithCourtListener(caseId, { force: true });
+      await runProvider("courtlistener", () => syncService.enrichCaseWithCourtListener(caseId, { force: true }));
     }
 
     if (providers.includes(PRIORITY_FEED_SOURCE)) {
-      await syncService.enrichCaseWithPriorityFeed(caseId, { force: true });
+      await runProvider(PRIORITY_FEED_SOURCE, () => syncService.enrichCaseWithPriorityFeed(caseId, { force: true }));
     }
 
     if (providers.includes("pacermonitor")) {
-      await syncService.enrichCaseWithPacerMonitor(caseId, { force: true });
+      await runProvider("pacermonitor", () => syncService.enrichCaseWithPacerMonitor(caseId, { force: true }));
     }
 
     if (providers.includes("docketalarm")) {
-      await syncService.enrichCaseWithDocketAlarm(caseId, { force: true });
+      await runProvider("docketalarm", () => syncService.enrichCaseWithDocketAlarm(caseId, { force: true }));
     }
 
     if (providers.includes("unicourt")) {
-      await syncService.enrichCaseWithUniCourt(caseId, { force: true });
+      await runProvider("unicourt", () => syncService.enrichCaseWithUniCourt(caseId, { force: true }));
     }
 
-    console.log(`[sync] enriched case ${caseId} with ${providers.join(",")}`);
-    process.exit(0);
+    console.log(JSON.stringify({
+      caseId,
+      requestedProviders: providers,
+      completedProviders,
+      failedProviders
+    }));
+    console.log(`[sync] enriched case ${caseId} with ${completedProviders.join(",") || "none"}`);
+    process.exit(completedProviders.length ? 0 : 1);
   }
 
   const syncOnlyIndex = process.argv.indexOf("--sync-only");
