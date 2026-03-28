@@ -26,12 +26,14 @@ const pageIndicator = document.querySelector("#page-indicator");
 const courtFilter = document.querySelector("#court-filter");
 const lookupForm = document.querySelector("#lookup-form");
 const lookupInput = document.querySelector("#lookup-input");
+const lookupSubmitButton = lookupForm?.querySelector('button[type="submit"]');
 const troDailyUpdates = document.querySelector("#tro-daily-updates");
 const prevPageButton = document.querySelector("#prev-page");
 const nextPageButton = document.querySelector("#next-page");
 const refreshButton = document.querySelector("#refresh-button");
 const contentGrid = document.querySelector(".content-grid");
 const copyWechatButton = document.querySelector("#copy-wechat-button");
+const qrCards = Array.from(document.querySelectorAll(".frost-card"));
 const statusPollMs = 5 * 60 * 1000;
 const troDailyUpdatesPollMs = 30 * 60 * 1000;
 const apiBase = "";
@@ -235,6 +237,40 @@ function revealResultsIfNeeded() {
       block: "start"
     });
   }
+}
+
+function thawLookupSurface() {
+  if (!lookupForm) {
+    return;
+  }
+
+  lookupForm.classList.remove("is-frozen");
+}
+
+function bindQrCardFrost() {
+  if (!qrCards.length) {
+    return;
+  }
+
+  qrCards.forEach((card) => {
+    card.classList.remove("is-thawed");
+
+    card.addEventListener("pointerenter", () => {
+      card.classList.add("is-thawed");
+    });
+
+    card.addEventListener("pointerleave", () => {
+      card.classList.remove("is-thawed");
+    });
+
+    card.addEventListener("focusin", () => {
+      card.classList.add("is-thawed");
+    });
+
+    card.addEventListener("focusout", () => {
+      card.classList.remove("is-thawed");
+    });
+  });
 }
 
 function renderCourtOptions(courts) {
@@ -841,6 +877,10 @@ async function loadCaseDetail(caseId, { summaryItem = null, focus = false, updat
 
 lookupForm.addEventListener("submit", (event) => {
   event.preventDefault();
+  thawLookupSurface();
+  window.requestAnimationFrame(() => {
+    revealResultsIfNeeded();
+  });
   state.search = lookupInput.value.trim();
   state.page = 1;
   loadCases({
@@ -852,6 +892,12 @@ lookupForm.addEventListener("submit", (event) => {
     }
   }).catch(console.error);
 });
+
+if (lookupSubmitButton) {
+  lookupSubmitButton.addEventListener("pointerdown", () => {
+    thawLookupSurface();
+  });
+}
 
 courtFilter.addEventListener("change", (event) => {
   state.court = String(event.target.value || "");
@@ -933,6 +979,7 @@ if (copyWechatButton) {
 }
 
 async function boot() {
+  bindQrCardFrost();
   const routeCaseId = getRouteCaseId();
   if (routeCaseId) {
     state.selectedCaseId = routeCaseId;

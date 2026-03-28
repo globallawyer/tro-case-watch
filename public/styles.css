@@ -334,6 +334,7 @@ a {
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 12px;
   margin-top: 14px;
+  position: relative;
 }
 
 .lookup-form input {
@@ -344,6 +345,76 @@ a {
   border-radius: 18px;
   background: rgba(255, 255, 255, 0.94);
   font-size: 1rem;
+  transition:
+    filter 0.28s ease,
+    box-shadow 0.28s ease,
+    border-color 0.28s ease,
+    transform 0.28s ease;
+}
+
+.lookup-form::before,
+.lookup-form::after,
+.frost-card::before,
+.frost-card::after {
+  pointer-events: none;
+}
+
+.lookup-form.is-frozen::before {
+  content: "";
+  position: absolute;
+  inset: -6px;
+  border-radius: 24px;
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.42), rgba(198, 220, 255, 0.24), rgba(255, 255, 255, 0.16)),
+    repeating-linear-gradient(
+      135deg,
+      rgba(255, 255, 255, 0.22) 0,
+      rgba(255, 255, 255, 0.22) 10px,
+      rgba(198, 220, 255, 0.08) 10px,
+      rgba(198, 220, 255, 0.08) 18px
+    );
+  border: 1px solid rgba(198, 220, 255, 0.44);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.72),
+    0 18px 30px rgba(125, 163, 214, 0.12);
+  backdrop-filter: blur(8px);
+  opacity: 1;
+  transition: opacity 0.28s ease, transform 0.28s ease;
+}
+
+.lookup-form.is-frozen::after {
+  content: "点击查 Docket 解冻";
+  position: absolute;
+  right: 16px;
+  top: -10px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: #2f5f8e;
+  background: rgba(255, 255, 255, 0.86);
+  border: 1px solid rgba(198, 220, 255, 0.5);
+  box-shadow: 0 10px 20px rgba(125, 163, 214, 0.12);
+  transition: opacity 0.28s ease, transform 0.28s ease;
+}
+
+.lookup-form.is-frozen input,
+.lookup-form.is-frozen .action-button {
+  border-color: rgba(198, 220, 255, 0.56);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.84),
+    0 0 0 1px rgba(198, 220, 255, 0.18);
+  filter: saturate(0.82) brightness(1.04);
+}
+
+.lookup-form.is-frozen input {
+  transform: translateY(-1px);
+}
+
+.lookup-form:not(.is-frozen)::before,
+.lookup-form:not(.is-frozen)::after {
+  opacity: 0;
+  transform: translateY(-6px);
 }
 
 .search-tools {
@@ -539,6 +610,74 @@ a {
   background: var(--white);
   box-shadow: 0 14px 34px rgba(8, 15, 21, 0.06);
   text-align: center;
+}
+
+.frost-card {
+  position: relative;
+  overflow: hidden;
+}
+
+.frost-card::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.58), rgba(198, 220, 255, 0.28), rgba(255, 255, 255, 0.12)),
+    repeating-linear-gradient(
+      135deg,
+      rgba(255, 255, 255, 0.24) 0,
+      rgba(255, 255, 255, 0.24) 9px,
+      rgba(198, 220, 255, 0.12) 9px,
+      rgba(198, 220, 255, 0.12) 16px
+    );
+  border: 1px solid rgba(198, 220, 255, 0.34);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.74);
+  backdrop-filter: blur(8px);
+  opacity: 1;
+  transition: opacity 0.22s ease;
+}
+
+.frost-card::after {
+  content: "悬停解冻";
+  position: absolute;
+  left: 50%;
+  top: 10px;
+  transform: translateX(-50%);
+  padding: 3px 9px;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  color: #2f5f8e;
+  background: rgba(255, 255, 255, 0.9);
+  border: 1px solid rgba(198, 220, 255, 0.44);
+  opacity: 0.94;
+  transition: opacity 0.22s ease, transform 0.22s ease;
+}
+
+.frost-card .qr-image,
+.frost-card p {
+  transition: filter 0.22s ease, transform 0.22s ease, opacity 0.22s ease;
+}
+
+.frost-card:not(.is-thawed) .qr-image,
+.frost-card:not(.is-thawed) p {
+  filter: blur(1.5px) saturate(0.74) brightness(1.04);
+}
+
+.frost-card.is-thawed::before,
+.frost-card:hover::before,
+.frost-card.is-thawed::after,
+.frost-card:hover::after {
+  opacity: 0;
+}
+
+.frost-card.is-thawed .qr-image,
+.frost-card:hover .qr-image,
+.frost-card.is-thawed p,
+.frost-card:hover p {
+  filter: none;
+  transform: none;
 }
 
 .qr-card p {
