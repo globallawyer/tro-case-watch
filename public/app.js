@@ -247,6 +247,7 @@ function thawLookupSurface() {
   }
 
   lookupForm.classList.remove("is-frozen");
+  lookupForm.classList.add("is-thawed");
 }
 
 function thawQrSurface({ persist = false } = {}) {
