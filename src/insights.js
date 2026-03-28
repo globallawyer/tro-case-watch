@@ -66,6 +66,14 @@ const BANKRUPTCY_TERMS = [
   "trustee"
 ];
 
+const PATENT_TERMS = ["patent", "design patent"];
+const TRADEMARK_TERMS = ["trademark", "lanham act", "counterfeit", "trade dress"];
+const COPYRIGHT_TERMS = ["copyright"];
+
+const PATENT_CAUSE_PATTERNS = [/\b35:271\b/i, /\b35:281\b/i, /\b35:283\b/i];
+const TRADEMARK_CAUSE_PATTERNS = [/\b15:1114\b/i, /\b15:1116\b/i, /\b15:1117\b/i, /\b15:1125\b/i];
+const COPYRIGHT_CAUSE_PATTERNS = [/\b17:501\b/i];
+
 const COMPANY_SUFFIX = /\b(llc|incorporated|inc|corp|corporation|company|co|ltd|limited|gmbh|pllc|llp|lp|p\.a\.|s\.a\.|sarl|b\.v\.)\b\.?,?/gi;
 
 function normalize(value) {
@@ -163,6 +171,44 @@ function countMatches(text, patterns) {
 
 function includesOne(text, patterns) {
   return patterns.some((pattern) => text.includes(pattern));
+}
+
+function countRegexMatches(text, patterns) {
+  return patterns.reduce((count, pattern) => count + (pattern.test(text) ? 1 : 0), 0);
+}
+
+function deriveIpCaseType(caseLike, text) {
+  const cause = normalizeText(caseLike.cause || "");
+  const natureOfSuit = normalizeText(caseLike.nature_of_suit || "");
+  const combined = [text, cause, natureOfSuit].filter(Boolean).join(" | ");
+  const scores = {
+    Patent: 0,
+    Trademark: 0,
+    Copyright: 0
+  };
+
+  if (/\b(830|835)\b/.test(natureOfSuit)) scores.Patent += 4;
+  if (/\b840\b/.test(natureOfSuit)) scores.Trademark += 4;
+  if (/\b820\b/.test(natureOfSuit)) scores.Copyright += 4;
+
+  scores.Patent += countRegexMatches(cause, PATENT_CAUSE_PATTERNS) * 3;
+  scores.Trademark += countRegexMatches(cause, TRADEMARK_CAUSE_PATTERNS) * 3;
+  scores.Copyright += countRegexMatches(cause, COPYRIGHT_CAUSE_PATTERNS) * 3;
+
+  scores.Patent += countMatches(combined, PATENT_TERMS);
+  scores.Trademark += countMatches(combined, TRADEMARK_TERMS);
+  scores.Copyright += countMatches(combined, COPYRIGHT_TERMS);
+
+  const ranked = Object.entries(scores).sort((left, right) => right[1] - left[1]);
+  if (!ranked[0] || ranked[0][1] <= 0) {
+    return null;
+  }
+
+  if (ranked[1] && ranked[1][1] === ranked[0][1]) {
+    return null;
+  }
+
+  return ranked[0][0];
 }
 
 function sanitizeDefendants(caseLike, plaintiffNames = []) {
@@ -412,6 +458,7 @@ export function deriveCaseInsights(caseLike) {
     isTroCase,
     defendantCount
   });
+  const ipCaseTypeLabel = deriveIpCaseType(caseLike, text);
 
   const badges = [];
   if (isScheduleACase) badges.push("Schedule A");
@@ -431,6 +478,7 @@ export function deriveCaseInsights(caseLike) {
     is_tro_case: isTroCase,
     is_seller_case: sellerRelevant,
     is_bankruptcy_case: hasBankruptcyTerm,
+    ip_case_type_label: ipCaseTypeLabel,
     status,
     highlights,
     action_items: actionItems,

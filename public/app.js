@@ -199,6 +199,40 @@ function displayEntryType(entry) {
   return type;
 }
 
+const PLAINTIFF_TAB_TERM_REPLACEMENTS = [
+  ["专利", "Patent"],
+  ["商标", "Trademark"],
+  ["版权", "Copyright"],
+  ["原告", "Plaintiff"],
+  ["品牌", "Brand"],
+  ["律所", "Counsel"],
+  ["待识别", "Unknown"]
+];
+
+function translatePlaintiffTabValue(value) {
+  let text = String(value ?? "").trim();
+  for (const [source, target] of PLAINTIFF_TAB_TERM_REPLACEMENTS) {
+    text = text.replaceAll(source, target);
+  }
+  return text;
+}
+
+function formatPlaintiffBrandValue(item) {
+  const insights = item.insights || {};
+  const baseValue = translatePlaintiffTabValue(insights.brand_name || insights.plaintiff_name || "待识别");
+  const caseTypeLabel = String(insights.ip_case_type_label || "").trim();
+
+  if (!caseTypeLabel) {
+    return baseValue;
+  }
+
+  if (baseValue === "Unknown") {
+    return caseTypeLabel;
+  }
+
+  return `${baseValue} · ${caseTypeLabel}`;
+}
+
 function renderCaseRow(item) {
   const insights = item.insights || {};
   const plaintiff = insights.brand_name || insights.plaintiff_name || item.case_name || "未命名案件";
@@ -397,8 +431,8 @@ function renderDetail(item) {
   const hydrationPending = item.hydration_pending?.pending;
   const timelineSummary = entries.length ? timelineSourceSummary(entries) : "当前只有案件级摘要";
   const summaryCards = [
-    { label: "原告/品牌", value: insights.brand_name || insights.plaintiff_name || "待识别" },
-    { label: "原告律所", value: insights.lead_law_firm || "待识别" },
+    { label: "Plaintiff / Brand", value: formatPlaintiffBrandValue(item) },
+    { label: "Plaintiff Counsel", value: translatePlaintiffTabValue(insights.lead_law_firm || "待识别") },
     { label: "程序阶段", value: insights.status?.label || "持续观察" },
     { label: "被告数量", value: insights.defendant_count || 0 },
     { label: "站内 docket", value: entries.length ? `${entries.length} 条` : "仅案件摘要" }
