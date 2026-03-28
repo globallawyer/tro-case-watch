@@ -30,6 +30,7 @@ import { TranslationService } from "./translation.js";
 import { CaseSyncService } from "./sync.js";
 import { docketLooksLike } from "./insights.js";
 import { DailyEmailReportService } from "./daily-report.js";
+import { TroDailyRoundupService } from "./tro-daily-roundup.js";
 import { loadTroDailyUpdates } from "./tro-daily-updates.js";
 
 const mimeTypes = {
@@ -61,6 +62,7 @@ const uniCourt = new UniCourtClient(config.uniCourt);
 const pacer = new PacerAdapter(config.pacer, store);
 const translator = new TranslationService(config.translation, store);
 const dailyEmailReport = new DailyEmailReportService({ config, store });
+const troDailyRoundup = new TroDailyRoundupService({ config, store });
 const syncService = new CaseSyncService({
   config,
   store,
@@ -2000,6 +2002,12 @@ async function main() {
       process.exit(0);
     }
 
+    if (rawMode === "tro-daily-roundup") {
+      const result = await troDailyRoundup.maybeSendScheduledRoundup();
+      console.log(`[sync] completed tro-daily-roundup ${JSON.stringify(result)}`);
+      process.exit(0);
+    }
+
     const mode = rawMode === "backfill" ? "backfill" : "recent";
     await syncService.run(mode);
     console.log(`[sync] completed ${mode}`);
@@ -2012,6 +2020,15 @@ async function main() {
     const localDate = dateIndex !== -1 ? String(process.argv[dateIndex + 1] || "").trim() : undefined;
     const result = await dailyEmailReport.sendReport({ localDate, force: true });
     console.log(`[sync] completed send-daily-report ${JSON.stringify(result)}`);
+    process.exit(0);
+  }
+
+  const sendTroDailyRoundupIndex = process.argv.indexOf("--send-tro-daily-roundup");
+  if (sendTroDailyRoundupIndex !== -1) {
+    const dateIndex = process.argv.indexOf("--date");
+    const localDate = dateIndex !== -1 ? String(process.argv[dateIndex + 1] || "").trim() : undefined;
+    const result = await troDailyRoundup.sendRoundup({ localDate, force: true });
+    console.log(`[sync] completed send-tro-daily-roundup ${JSON.stringify(result)}`);
     process.exit(0);
   }
 
@@ -2053,6 +2070,16 @@ async function main() {
     setInterval(() => {
       spawnDetachedTask(["--sync-only", "daily-report"]);
     }, config.reports.dailyEmail.checkIntervalMs);
+  }
+
+  if (config.reports?.troDailyRoundup?.enabled) {
+    setTimeout(() => {
+      spawnDetachedTask(["--sync-only", "tro-daily-roundup"]);
+    }, config.reports.troDailyRoundup.startupDelayMs);
+
+    setInterval(() => {
+      spawnDetachedTask(["--sync-only", "tro-daily-roundup"]);
+    }, config.reports.troDailyRoundup.checkIntervalMs);
   }
 }
 

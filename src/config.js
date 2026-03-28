@@ -168,6 +168,20 @@ export const config = {
       checkIntervalMs: envInt("DAILY_EMAIL_REPORT_CHECK_INTERVAL_MS", 60 * 1000),
       startupDelayMs: envInt("DAILY_EMAIL_REPORT_STARTUP_DELAY_MS", 90 * 1000)
     },
+    troDailyRoundup: {
+      enabled: envBool("TRO_DAILY_ROUNDUP_ENABLED", false),
+      to: env("TRO_DAILY_ROUNDUP_TO", env("DAILY_EMAIL_REPORT_TO", "599214243@qq.com")),
+      timeZone: env("TRO_DAILY_ROUNDUP_TIME_ZONE", "Asia/Shanghai"),
+      hour: envInt("TRO_DAILY_ROUNDUP_HOUR", 20),
+      minute: envInt("TRO_DAILY_ROUNDUP_MINUTE", 0),
+      itemLimit: envInt("TRO_DAILY_ROUNDUP_ITEM_LIMIT", 3),
+      timeoutMs: envInt("TRO_DAILY_ROUNDUP_TIMEOUT_MS", 12_000),
+      candidateLimit: envInt("TRO_DAILY_ROUNDUP_CANDIDATE_LIMIT", 24),
+      perSourceFetchLimit: envInt("TRO_DAILY_ROUNDUP_PER_SOURCE_FETCH_LIMIT", 8),
+      checkIntervalMs: envInt("TRO_DAILY_ROUNDUP_CHECK_INTERVAL_MS", 60 * 1000),
+      startupDelayMs: envInt("TRO_DAILY_ROUNDUP_STARTUP_DELAY_MS", 120 * 1000),
+      sourcesPath: env("TRO_DAILY_ROUNDUP_SOURCES_PATH", path.join(dataDir, "tro-daily-sources.json"))
+    },
     troDailyUpdates: {
       path: env("TRO_DAILY_UPDATES_PATH", path.join(dataDir, "tro-daily-updates.json")),
       maxItems: envInt("TRO_DAILY_UPDATES_MAX_ITEMS", 3),

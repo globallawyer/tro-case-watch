@@ -17,6 +17,7 @@
     "sync:catalog": "node src/server.js --sync-only catalog",
     "sync:catalog:drain": "node src/server.js --sync-only catalog-until-idle",
     "sync:courts": "node src/server.js --sync-only courtfeeds",
-    "sync:lawfirms": "node src/server.js --sync-only lawfirms"
+    "sync:lawfirms": "node src/server.js --sync-only lawfirms",
+    "report:tro-roundup": "node src/server.js --send-tro-daily-roundup"
   }
 }
