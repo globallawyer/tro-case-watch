@@ -33,6 +33,7 @@ const nextPageButton = document.querySelector("#next-page");
 const refreshButton = document.querySelector("#refresh-button");
 const contentGrid = document.querySelector(".content-grid");
 const copyWechatButton = document.querySelector("#copy-wechat-button");
+const contactChips = Array.from(document.querySelectorAll(".contact-methods .contact-chip"));
 const qrCards = Array.from(document.querySelectorAll(".frost-card"));
 const statusPollMs = 5 * 60 * 1000;
 const troDailyUpdatesPollMs = 30 * 60 * 1000;
@@ -247,6 +248,24 @@ function thawLookupSurface() {
   lookupForm.classList.remove("is-frozen");
 }
 
+function thawQrSurface({ persist = false } = {}) {
+  if (!qrCards.length) {
+    return;
+  }
+
+  qrCards.forEach((card) => {
+    card.classList.add("is-thawed");
+    if (persist) {
+      card.classList.add("is-forced-thawed");
+    }
+  });
+}
+
+function thawInteractiveSurfaces({ persistQr = false } = {}) {
+  thawLookupSurface();
+  thawQrSurface({ persist: persistQr });
+}
+
 function bindQrCardFrost() {
   if (!qrCards.length) {
     return;
@@ -260,6 +279,9 @@ function bindQrCardFrost() {
     });
 
     card.addEventListener("pointerleave", () => {
+      if (card.classList.contains("is-forced-thawed")) {
+        return;
+      }
       card.classList.remove("is-thawed");
     });
 
@@ -268,6 +290,9 @@ function bindQrCardFrost() {
     });
 
     card.addEventListener("focusout", () => {
+      if (card.classList.contains("is-forced-thawed")) {
+        return;
+      }
       card.classList.remove("is-thawed");
     });
   });
@@ -877,7 +902,7 @@ async function loadCaseDetail(caseId, { summaryItem = null, focus = false, updat
 
 lookupForm.addEventListener("submit", (event) => {
   event.preventDefault();
-  thawLookupSurface();
+  thawInteractiveSurfaces();
   window.requestAnimationFrame(() => {
     revealResultsIfNeeded();
   });
@@ -895,9 +920,19 @@ lookupForm.addEventListener("submit", (event) => {
 
 if (lookupSubmitButton) {
   lookupSubmitButton.addEventListener("pointerdown", () => {
-    thawLookupSurface();
+    thawInteractiveSurfaces();
   });
 }
+
+contactChips.forEach((chip) => {
+  chip.addEventListener("pointerdown", () => {
+    thawInteractiveSurfaces({ persistQr: true });
+  });
+
+  chip.addEventListener("focus", () => {
+    thawInteractiveSurfaces({ persistQr: true });
+  });
+});
 
 courtFilter.addEventListener("change", (event) => {
   state.court = String(event.target.value || "");

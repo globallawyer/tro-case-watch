@@ -666,15 +666,19 @@ a {
 }
 
 .frost-card.is-thawed::before,
+.frost-card.is-forced-thawed::before,
 .frost-card:hover::before,
 .frost-card.is-thawed::after,
+.frost-card.is-forced-thawed::after,
 .frost-card:hover::after {
   opacity: 0;
 }
 
 .frost-card.is-thawed .qr-image,
+.frost-card.is-forced-thawed .qr-image,
 .frost-card:hover .qr-image,
 .frost-card.is-thawed p,
+.frost-card.is-forced-thawed p,
 .frost-card:hover p {
   filter: none;
   transform: none;
