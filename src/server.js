@@ -10,6 +10,7 @@ import { config } from "./config.js";
 import { Store } from "./db.js";
 import { CourtListenerClient } from "./providers/courtlistener.js";
 import { CourtFeedClient } from "./providers/courtfeed.js";
+import { RecentFilingsClient } from "./providers/recentfilings.js";
 import { LawFirmClient } from "./providers/lawfirm.js";
 import { CatalogClient } from "./providers/catalog.js";
 import { PacerAdapter } from "./providers/pacer.js";
@@ -50,6 +51,7 @@ ensureSeedDatabase();
 const store = createStoreWithRecovery();
 const courtListener = new CourtListenerClient(config.courtListener);
 const courtFeeds = new CourtFeedClient(config.courtFeeds);
+const recentFilings = new RecentFilingsClient(config.recentFilings);
 const lawFirms = new LawFirmClient(config.lawFirms);
 const priorityFeed = new CatalogClient(config.priorityFeed);
 const pacerMonitor = new PacerMonitorAdapter(config.pacerMonitor);
@@ -62,6 +64,7 @@ const syncService = new CaseSyncService({
   config,
   store,
   courtFeeds,
+  recentFilings,
   lawFirms,
   courtListener,
   priorityFeed,
@@ -1068,6 +1071,9 @@ function serializeAdminStatus(status = {}) {
       fallback: status.providers?.pacermonitor
         ? { enabled: Boolean(status.providers.pacermonitor.enabled), state: status.providers.pacermonitor.state || null }
         : null,
+      pacer: status.providers?.pacer
+        ? { enabled: Boolean(status.providers.pacer.enabled), state: status.providers.pacer.state || null }
+        : null,
       docketalarm: status.providers?.docketalarm
         ? { enabled: Boolean(status.providers.docketalarm.enabled), state: status.providers.docketalarm.state || null }
         : null,
@@ -1076,6 +1082,9 @@ function serializeAdminStatus(status = {}) {
         : null,
       courtfeeds: status.providers?.courtfeeds
         ? { enabled: Boolean(status.providers.courtfeeds.enabled), state: status.providers.courtfeeds.state || null }
+        : null,
+      recentfilings: status.providers?.recentfilings
+        ? { enabled: Boolean(status.providers.recentfilings.enabled), state: status.providers.recentfilings.state || null }
         : null,
       advisories: status.providers?.lawfirms
         ? { enabled: Boolean(status.providers.lawfirms.enabled), state: status.providers.lawfirms.state || null }
@@ -1358,6 +1367,20 @@ async function handleApi(request, response, pathname, searchParams) {
     return sendJson(response, 202, {
       accepted: true,
       mode: "fallback-sync"
+    });
+  }
+
+  if (request.method === "POST" && pathname === "/api/admin/pacer-sync") {
+    if (!authorize(request)) {
+      return sendJson(response, 401, { error: "Unauthorized" });
+    }
+
+    spawnDetachedTask(["--sync-only", "pacer"]);
+    clearPublicResponseCache();
+
+    return sendJson(response, 202, {
+      accepted: true,
+      mode: "pacer-sync"
     });
   }
 
@@ -1762,6 +1785,12 @@ async function main() {
       process.exit(0);
     }
 
+    if (rawMode === "recentfilings") {
+      const result = await syncService.syncRecentFilingsRecent("recent");
+      console.log(`[sync] completed recentfilings ${JSON.stringify(result)}`);
+      process.exit(0);
+    }
+
     if (rawMode === "lawfirms") {
       const result = await syncService.syncLawFirmRecent("recent");
       console.log(`[sync] completed lawfirms ${JSON.stringify(result)}`);
@@ -1771,6 +1800,12 @@ async function main() {
     if (rawMode === "pacermonitor") {
       const result = await syncService.syncPacerMonitorRecent("backfill");
       console.log(`[sync] completed pacermonitor ${JSON.stringify(result)}`);
+      process.exit(0);
+    }
+
+    if (rawMode === "pacer") {
+      const result = await syncService.syncPacerRecent("backfill");
+      console.log(`[sync] completed pacer ${JSON.stringify(result)}`);
       process.exit(0);
     }
 

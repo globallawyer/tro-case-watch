@@ -440,10 +440,20 @@ function deriveParties(result) {
 }
 
 export class CaseSyncService {
-  constructor({ config, store, courtFeeds, lawFirms, courtListener, priorityFeed, pacerMonitor, docketAlarm, uniCourt, pacer, translator }) {
+  constructor({ config, store, courtFeeds, recentFilings, lawFirms, courtListener, priorityFeed, pacerMonitor, docketAlarm, uniCourt, pacer, translator }) {
     this.config = config;
     this.store = store;
     this.courtFeeds = courtFeeds;
+    this.recentFilings = recentFilings || {
+      enabled: false,
+      maxLookupsPerRun: 0,
+      getStatus() {
+        return { enabled: false, state: "disabled", trackedCourts: 0, sources: [] };
+      },
+      listSources() {
+        return [];
+      }
+    };
     this.lawFirms = lawFirms;
     this.courtListener = courtListener;
     this.priorityFeed = priorityFeed;
@@ -486,6 +496,7 @@ export class CaseSyncService {
       backfill: this.getBackfillStatus(),
       providers: {
         courtfeeds: this.courtFeeds.getStatus(),
+        recentfilings: this.recentFilings.getStatus(),
         lawfirms: this.lawFirms.getStatus(),
         courtlistener: {
           searchEnabled: true,
@@ -543,6 +554,10 @@ export class CaseSyncService {
       courtFeedCasesUpserted: 0,
       courtFeedEntriesUpserted: 0,
       courtFeedLookups: 0,
+      recentFilingsCasesUpserted: 0,
+      recentFilingsLookups: 0,
+      pacerCasesUpserted: 0,
+      pacerPagesFetched: 0,
       lawFirmCasesUpserted: 0,
       lawFirmEntriesUpserted: 0,
       lawFirmLookups: 0,
@@ -574,6 +589,18 @@ export class CaseSyncService {
       }
 
       try {
+        const recentFilingsResult = await this.syncRecentFilingsRecent(mode);
+        stats.recentFilingsCasesUpserted += recentFilingsResult.casesUpserted || 0;
+        stats.recentFilingsLookups += recentFilingsResult.lookupsTriggered || 0;
+        discoverySourceAvailable = discoverySourceAvailable || (recentFilingsResult.successfulSources || 0) > 0;
+        if (recentFilingsResult.note) {
+          stats.notes.push(recentFilingsResult.note);
+        }
+      } catch (error) {
+        stats.notes.push(`官方近期立案页补源跳过：${error.message}`);
+      }
+
+      try {
         const lawFirmResult = await this.syncLawFirmRecent(mode);
         stats.lawFirmCasesUpserted += lawFirmResult.casesUpserted || 0;
         stats.lawFirmEntriesUpserted += lawFirmResult.docketEntriesUpserted || 0;
@@ -584,6 +611,20 @@ export class CaseSyncService {
         }
       } catch (error) {
         stats.notes.push(`律所官网补源跳过：${error.message}`);
+      }
+
+      try {
+        const pacerResult = await this.syncPacerRecent(mode);
+        stats.pacerCasesUpserted += pacerResult.casesUpserted || 0;
+        stats.pacerPagesFetched += pacerResult.pagesFetched || 0;
+        discoverySourceAvailable = discoverySourceAvailable ||
+          Number(pacerResult.casesUpserted || 0) > 0 ||
+          Number(pacerResult.pagesFetched || 0) > 0;
+        if (pacerResult.note) {
+          stats.notes.push(pacerResult.note);
+        }
+      } catch (error) {
+        stats.notes.push(`PACER 官方发现跳过：${error.message}`);
       }
 
       let successfulPresets = 0;
@@ -657,13 +698,6 @@ export class CaseSyncService {
         stats.translationsApplied += translationResult.translated || 0;
       } catch (error) {
         stats.notes.push(`翻译链路跳过：${error.message}`);
-      }
-
-      try {
-        const pacerResult = await this.pacer.syncRecent();
-        stats.notes.push(pacerResult.note);
-      } catch (error) {
-        stats.notes.push(`PACER 跳过：${error.message}`);
       }
 
       this.store.finishSyncRun(runId, "succeeded", stats);
@@ -775,6 +809,116 @@ export class CaseSyncService {
     return text.includes(normalizeText(term));
   }
 
+  classifyPacerDiscoveryCase(item) {
+    return classifyCase(
+      {
+        caseName: item.caseTitle,
+        case_name_full: item.caseTitle,
+        court: item.courtName,
+        cause: item.natureOfSuit,
+        party: [],
+        recap_documents: [
+          {
+            short_description: item.natureOfSuit
+          }
+        ]
+      },
+      []
+    );
+  }
+
+  shouldTrackPacerDiscoveryCase(item, existingCase, tags) {
+    if (!/\b\d{2}-cv-\d{3,6}\b/i.test(String(item.caseNumberFull || ""))) {
+      return false;
+    }
+
+    if (existingCase) {
+      return true;
+    }
+
+    const text = normalizeText([item.caseTitle, item.natureOfSuit].join(" | "));
+    return Boolean(
+      tags.length > 0 ||
+      /\b(820|830|840)\b/.test(String(item.natureOfSuit || "")) ||
+      text.includes("schedule a") ||
+      text.includes("unincorporated associations") ||
+      text.includes("trademark") ||
+      text.includes("copyright") ||
+      text.includes("patent") ||
+      text.includes("infringement")
+    );
+  }
+
+  ingestPacerDiscoveryResults(items = []) {
+    let casesUpserted = 0;
+    const timestamp = new Date().toISOString();
+
+    for (const item of items) {
+      const existingCase = this.store.findCaseByCourtAndDocket({
+        courtId: valueOf(item.courtId),
+        courtName: valueOf(item.courtName),
+        docketNumber: valueOf(item.caseNumberFull),
+        startDate: this.config.sync.startDate
+      });
+      const tags = this.classifyPacerDiscoveryCase(item);
+      if (!this.shouldTrackPacerDiscoveryCase(item, existingCase, tags)) {
+        continue;
+      }
+
+      const parties = deriveParties({
+        caseName: item.caseTitle,
+        party: []
+      });
+      const mergedRaw = {
+        ...(existingCase?.raw || {}),
+        pacer: {
+          ...(existingCase?.raw?.pacer || {}),
+          ...item.raw,
+          caseLink: item.caseLink || null,
+          courtId: item.pacerCourtId || item.courtId || null,
+          syncedAt: timestamp
+        }
+      };
+
+      const savedCase = this.store.upsertCase({
+        source_case_key: existingCase?.source_case_key || `pacer:${item.pacerCourtId || item.courtId}:${item.caseId || item.caseNumberFull}`,
+        primary_source: existingCase?.primary_source || "pacer",
+        source_case_id: existingCase?.source_case_id || item.caseId || item.caseNumberFull,
+        courtlistener_docket_id: existingCase?.courtlistener_docket_id ?? null,
+        pacer_case_id: valueOf(item.caseId, existingCase?.pacer_case_id),
+        court_id: valueOf(existingCase?.court_id, item.courtId),
+        court_name: valueOf(existingCase?.court_name, item.courtName),
+        case_name: valueOf(item.caseTitle, existingCase?.case_name),
+        docket_number: valueOf(item.caseNumberFull, existingCase?.docket_number),
+        date_filed: valueOf(item.dateFiled, existingCase?.date_filed),
+        date_terminated: valueOf(item.dateTermed, existingCase?.date_terminated),
+        cause: valueOf(existingCase?.cause),
+        nature_of_suit: valueOf(item.natureOfSuit, existingCase?.nature_of_suit),
+        status: item.dateTermed ? "terminated" : existingCase?.status || "open",
+        tags_marker: buildTagsMarker([...(existingCase?.tags || []), ...tags]),
+        docket_url: valueOf(item.caseLink, existingCase?.docket_url),
+        source_urls: [...(existingCase?.source_urls || []), item.caseLink].filter(Boolean),
+        plaintiffs: parties.plaintiffs.length ? parties.plaintiffs : existingCase?.plaintiffs || [],
+        defendants: parties.defendants.length ? parties.defendants : existingCase?.defendants || [],
+        recent_activity_summary: existingCase?.recent_activity_summary || item.natureOfSuit || null,
+        latest_docket_filed_at: valueOf(existingCase?.latest_docket_filed_at, item.dateFiled),
+        latest_docket_number: existingCase?.latest_docket_number || null,
+        docket_count: Math.max(existingCase?.docket_count || 0, 0),
+        last_seen_at: timestamp,
+        last_synced_at: timestamp,
+        raw: mergedRaw
+      });
+
+      if (savedCase) {
+        casesUpserted += 1;
+      }
+    }
+
+    return {
+      casesUpserted
+    };
+  }
+
   buildCourtFeedCaseIndex() {
     const rows = this.store.getHydratedCases(this.config.sync.startDate);
     const index = new Map();
@@ -793,6 +937,165 @@ export class CaseSyncService {
     }
 
     return index;
+  }
+
+  classifyRecentFilingsItem(item) {
+    return classifyCase(
+      {
+        caseName: item.caseName,
+        case_name_full: item.caseName,
+        court: item.courtName,
+        cause: item.cause,
+        nature_of_suit: item.natureOfSuit,
+        party: [],
+        recap_documents: [
+          {
+            short_description: item.category || "Official Recent Filing",
+            description: [item.natureOfSuit, item.cause, item.judge].filter(Boolean).join(" | ")
+          }
+        ]
+      },
+      []
+    );
+  }
+
+  shouldTrackRecentFilingsItem(item, existingCase, tags) {
+    const docketNumber = String(item.docketNumber || "");
+    if (!/\b\d{2}-cv-\d{3,6}\b/i.test(docketNumber)) {
+      return false;
+    }
+
+    if (existingCase) {
+      return true;
+    }
+
+    const text = normalizeText(
+      [
+        item.caseName,
+        item.category,
+        item.natureOfSuit,
+        item.cause
+      ].join(" | ")
+    );
+
+    return (
+      tags.length > 0 ||
+      /\b(820|830|840)\b/.test(text) ||
+      /\bschedule a\b/.test(text) ||
+      /\btemporary restraining order\b/.test(text) ||
+      /\btrademark\b|\bcopyright\b|\bpatent\b|\blanham act\b|\bcounterfeit\b|\binfringement\b/.test(text)
+    );
+  }
+
+  ingestRecentFilingsItems(sourceResult, caseIndex) {
+    let casesUpserted = 0;
+    const lookupCandidates = new Map();
+    const timestamp = new Date().toISOString();
+
+    for (const item of sourceResult.items || []) {
+      const primaryKey = buildCourtDocketKey(item.courtId, item.docketNumber);
+      const fallbackKey = buildCourtDocketKey(item.courtName, item.docketNumber);
+      const existingCase = caseIndex.get(primaryKey) || caseIndex.get(fallbackKey) || null;
+      const tags = this.classifyRecentFilingsItem(item);
+
+      if (!this.shouldTrackRecentFilingsItem(item, existingCase, tags)) {
+        continue;
+      }
+
+      const parties = deriveParties({
+        caseName: item.caseName,
+        party: []
+      });
+      const mergedRaw = {
+        ...(existingCase?.raw || {}),
+        recent_filings: {
+          ...(existingCase?.raw?.recent_filings || {}),
+          [item.sourceId]: {
+            sourceUrl: item.sourceUrl,
+            caseUrl: item.caseUrl,
+            docketUrl: item.docketUrl,
+            rawDocketNumber: item.rawDocketNumber || item.docketNumber,
+            judge: item.judge || null,
+            category: item.category || null,
+            dateFiled: item.dateFiled || null,
+            natureOfSuit: item.natureOfSuit || null,
+            cause: item.cause || null,
+            pacerCaseId: item.pacerCaseId || null,
+            syncedAt: timestamp,
+            note: sourceResult.note || null
+          }
+        }
+      };
+
+      const savedCase = this.store.upsertCase({
+        source_case_key:
+          existingCase?.source_case_key ||
+          `recentfilings:${item.sourceId}:${normalizeDocket(item.docketNumber)}`,
+        primary_source: existingCase?.primary_source || "recentfilings",
+        source_case_id: existingCase?.source_case_id || item.pacerCaseId || item.caseUrl || item.docketNumber,
+        courtlistener_docket_id: existingCase?.courtlistener_docket_id ?? null,
+        pacer_case_id: existingCase?.pacer_case_id ?? item.pacerCaseId ?? null,
+        court_id: item.courtId || existingCase?.court_id || null,
+        court_name: item.courtName || existingCase?.court_name || null,
+        case_name: item.caseName || existingCase?.case_name || null,
+        docket_number: item.docketNumber || existingCase?.docket_number || null,
+        date_filed: existingCase?.date_filed || item.dateFiled || null,
+        date_terminated: existingCase?.date_terminated || null,
+        cause: existingCase?.cause || item.cause || null,
+        nature_of_suit: existingCase?.nature_of_suit || item.natureOfSuit || null,
+        status: existingCase?.status || "open",
+        tags_marker: buildTagsMarker([...(existingCase?.tags || []), ...tags]),
+        docket_url: item.caseUrl || item.docketUrl || existingCase?.docket_url || null,
+        source_urls: [
+          ...(existingCase?.source_urls || []),
+          item.sourceUrl,
+          item.caseUrl,
+          item.docketUrl
+        ].filter(Boolean),
+        plaintiffs: existingCase?.plaintiffs?.length ? existingCase.plaintiffs : parties.plaintiffs,
+        defendants: existingCase?.defendants?.length ? existingCase.defendants : parties.defendants,
+        recent_activity_summary:
+          existingCase?.recent_activity_summary ||
+          [item.category, item.natureOfSuit, item.cause].filter(Boolean).join(" | ") ||
+          sourceResult.note ||
+          null,
+        latest_docket_filed_at: laterIso(existingCase?.latest_docket_filed_at, item.dateFiled) || null,
+        latest_docket_number: existingCase?.latest_docket_number || null,
+        docket_count: existingCase?.docket_count || 0,
+        last_seen_at: item.dateFiled || timestamp,
+        last_synced_at: timestamp,
+        last_docket_sync_at: existingCase?.last_docket_sync_at || null,
+        raw: mergedRaw
+      });
+
+      if (!savedCase) {
+        continue;
+      }
+
+      casesUpserted += 1;
+
+      for (const key of [primaryKey, fallbackKey].filter(Boolean)) {
+        caseIndex.set(key, savedCase);
+      }
+
+      if (!savedCase.courtlistener_docket_id && item.docketNumber) {
+        const lookupKey = buildCourtDocketKey(item.courtId, item.docketNumber) || buildCourtDocketKey(item.courtName, item.docketNumber);
+        if (lookupKey && !lookupCandidates.has(lookupKey)) {
+          lookupCandidates.set(lookupKey, {
+            docketNumber: item.docketNumber,
+            caseName: item.caseName,
+            courtName: item.courtName,
+            priority: tags.includes("seller_tro") ? 0 : tags.includes("tro") || tags.includes("schedule_a") ? 1 : 2,
+            filedAt: item.dateFiled || timestamp
+          });
+        }
+      }
+    }
+
+    return {
+      casesUpserted,
+      lookupCandidates
+    };
   }
 
   classifyCourtFeedItem(item) {
@@ -963,6 +1266,10 @@ export class CaseSyncService {
 
   async lookupCourtFeedCandidates(candidates) {
     return this.lookupDiscoveryCandidates(candidates, this.courtFeeds.maxLookupsPerRun);
+  }
+
+  async lookupRecentFilingsCandidates(candidates) {
+    return this.lookupDiscoveryCandidates(candidates, this.recentFilings.maxLookupsPerRun);
   }
 
   async lookupLawFirmCandidates(candidates) {
@@ -1287,6 +1594,8 @@ export class CaseSyncService {
         };
       }
 
+      await this.courtFeeds.ensureFeedsLoaded();
+
       const caseIndex = this.buildCourtFeedCaseIndex();
       const lookupCandidates = new Map();
       let successfulFeeds = 0;
@@ -1357,6 +1666,62 @@ export class CaseSyncService {
     });
   }
 
+  async syncRecentFilingsRecent(mode = "recent") {
+    return this.store.batchMutations(async () => {
+      if (!this.recentFilings.enabled) {
+        return {
+          successfulSources: 0,
+          failedSources: 0,
+          casesUpserted: 0,
+          lookupsTriggered: 0,
+          note: "官方近期立案页补源已关闭。"
+        };
+      }
+
+      const caseIndex = this.buildCourtFeedCaseIndex();
+      const lookupCandidates = new Map();
+      let successfulSources = 0;
+      let failedSources = 0;
+      let casesUpserted = 0;
+
+      for (const source of this.recentFilings.listSources()) {
+        try {
+          const sourceResult = await this.recentFilings.fetchRecentForCourt(source);
+          const ingest = this.ingestRecentFilingsItems(sourceResult, caseIndex);
+          casesUpserted += ingest.casesUpserted;
+
+          for (const [key, value] of ingest.lookupCandidates.entries()) {
+            if (!lookupCandidates.has(key)) {
+              lookupCandidates.set(key, value);
+            }
+          }
+
+          successfulSources += 1;
+        } catch {
+          failedSources += 1;
+        }
+      }
+
+      const lookupResult =
+        mode === "recent" && lookupCandidates.size
+          ? await this.lookupRecentFilingsCandidates(lookupCandidates)
+          : { lookupsTriggered: 0, imported: 0, matched: 0 };
+
+      const note =
+        successfulSources || failedSources
+          ? `官方近期立案页本轮巡检 ${successfulSources} 个法院${failedSources ? `，${failedSources} 个法院页暂时失败` : ""}；补进 ${casesUpserted} 条案件线索${lookupResult.lookupsTriggered ? `，并触发 ${lookupResult.lookupsTriggered} 次 CourtListener 精确补抓` : ""}。`
+          : "官方近期立案页当前没有已配置法院。";
+
+      return {
+        successfulSources,
+        failedSources,
+        casesUpserted,
+        lookupsTriggered: lookupResult.lookupsTriggered,
+        note
+      };
+    });
+  }
+
   async syncLawFirmRecent(mode = "recent") {
     return this.store.batchMutations(async () => {
       if (!this.lawFirms.enabled) {
@@ -1413,6 +1778,35 @@ export class CaseSyncService {
         docketEntriesUpserted,
         lookupsTriggered: lookupResult.lookupsTriggered,
         note
+      };
+    });
+  }
+
+  async syncPacerRecent(mode = "recent") {
+    return this.store.batchMutations(async () => {
+      if (!this.pacer.config.enabled) {
+        return {
+          casesUpserted: 0,
+          pagesFetched: 0,
+          note: "PACER 官方发现链路已关闭。"
+        };
+      }
+
+      if (!this.pacer.hasCredentials()) {
+        return {
+          casesUpserted: 0,
+          pagesFetched: 0,
+          note: "PACER 已启用，但缺少登录凭据。"
+        };
+      }
+
+      const result = await this.pacer.discoverRecentCases({ mode });
+      const ingest = this.ingestPacerDiscoveryResults(result.items || []);
+
+      return {
+        casesUpserted: ingest.casesUpserted,
+        pagesFetched: result.pagesFetched || 0,
+        note: result.note
       };
     });
   }
@@ -2109,6 +2503,48 @@ export class CaseSyncService {
       });
     }
 
+    const coverage = this.store.getEntryCoverageForCaseIds([savedCase.id]).get(savedCase.id) || null;
+    const refreshedCase = this.store.upsertCase({
+      source_case_key: caseRow.source_case_key,
+      primary_source: caseRow.primary_source,
+      source_case_id: caseRow.source_case_id,
+      courtlistener_docket_id: caseRow.courtlistener_docket_id,
+      pacer_case_id: caseRow.pacer_case_id,
+      court_id: caseRow.court_id,
+      court_name: caseRow.court_name,
+      case_name: caseRow.case_name,
+      docket_number: caseRow.docket_number,
+      date_filed: caseRow.date_filed,
+      date_terminated: caseRow.date_terminated,
+      cause: caseRow.cause,
+      nature_of_suit: caseRow.nature_of_suit,
+      status: caseRow.status,
+      tags_marker: caseRow.tags_marker,
+      docket_url: caseRow.docket_url,
+      source_urls: [...(caseRow.source_urls || []), payload.url].filter(Boolean),
+      plaintiffs: caseRow.plaintiffs || [],
+      defendants: caseRow.defendants || [],
+      recent_activity_summary: payload.entries?.[0]?.description || caseRow.recent_activity_summary,
+      latest_docket_filed_at: payload.entries?.[0]?.filed_at || caseRow.latest_docket_filed_at,
+      latest_docket_number: higherOrderValue(
+        payload.entries?.[0]?.row_number || caseRow.latest_docket_number,
+        coverage?.lastNumber ? String(coverage.lastNumber) : null
+      ),
+      docket_count: Math.max(payload.entries?.length || 0, coverage?.totalEntries || 0),
+      last_seen_at: timestamp,
+      last_synced_at: timestamp,
+      last_docket_sync_at: caseRow.last_docket_sync_at,
+      raw: mergedRaw
+    });
+
+    if (!refreshedCase) {
+      return {
+        enriched: false,
+        reason: "filtered",
+        url: payload.url || null
+      };
+    }
+
     return {
       enriched: true,
       entries: payload.entries.length,
@@ -2356,7 +2792,7 @@ export class CaseSyncService {
       recent_activity_summary: latestSummary,
       latest_docket_filed_at: latestFiledAt,
       latest_docket_number: higherOrderValue(latestEntryNumber, coverage?.lastNumber ? String(coverage.lastNumber) : null),
-      docket_count: Math.max(caseRow.docket_count || 0, payload.entries?.length || 0, coverage?.totalEntries || 0),
+      docket_count: Math.max(payload.entries?.length || 0, coverage?.totalEntries || 0),
       last_seen_at: timestamp,
       last_synced_at: timestamp,
       last_docket_sync_at: caseRow.last_docket_sync_at,
@@ -2516,7 +2952,7 @@ export class CaseSyncService {
       recent_activity_summary: latestSummary,
       latest_docket_filed_at: latestFiledAt,
       latest_docket_number: higherOrderValue(latestEntryNumber, coverage?.lastNumber ? String(coverage.lastNumber) : null),
-      docket_count: Math.max(caseRow.docket_count || 0, payload.entries?.length || 0, coverage?.totalEntries || 0),
+      docket_count: Math.max(payload.entries?.length || 0, coverage?.totalEntries || 0),
       last_seen_at: timestamp,
       last_synced_at: timestamp,
       last_docket_sync_at: caseRow.last_docket_sync_at,
@@ -2782,11 +3218,7 @@ export class CaseSyncService {
       latestEntryNumber,
       coverage?.lastNumber ? String(coverage.lastNumber) : null
     );
-    const stabilizedDocketCount = Math.max(
-      caseRow.docket_count || 0,
-      entries.length,
-      coverage?.totalEntries || 0
-    );
+    const stabilizedDocketCount = Math.max(entries.length, coverage?.totalEntries || 0);
 
     this.store.upsertCase({
       source_case_key: caseRow.source_case_key,

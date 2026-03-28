@@ -1,3 +1,5 @@
+import { fetchPacerCourtDirectory } from "../court-directory.js";
+
 const DEFAULT_COURT_FEEDS = [
   {
     id: "ilnd",
@@ -221,29 +223,63 @@ function parseFeedItem(block, feed) {
 export class CourtFeedClient {
   constructor(config) {
     this.enabled = Boolean(config.enabled);
+    this.lookupUrl = String(config.lookupUrl || "").trim();
     this.timeoutMs = Number(config.timeoutMs || 15000);
     this.minIntervalMs = Number(config.minIntervalMs || 1000);
     this.maxItemsPerFeed = Number(config.maxItemsPerFeed || 100);
     this.maxLookupsPerRun = Number(config.maxLookupsPerRun || 12);
-    const selectedIds = new Set((config.courts || []).map((value) => String(value || "").trim().toLowerCase()).filter(Boolean));
-    this.feeds = DEFAULT_COURT_FEEDS.filter((feed) => !selectedIds.size || selectedIds.has(feed.id));
+    this.selectedIds = new Set((config.courts || []).map((value) => String(value || "").trim().toLowerCase()).filter(Boolean));
+    this.feeds = DEFAULT_COURT_FEEDS.filter((feed) => !this.selectedIds.size || this.selectedIds.has(feed.id));
+    this.dynamicFeeds = null;
+    this.lookupError = null;
     this.lastRequestAt = 0;
   }
 
   getStatus() {
     return {
       enabled: this.enabled,
-      trackedCourts: this.feeds.length,
-      feeds: this.feeds.map((feed) => ({
+      trackedCourts: this.listFeeds().length,
+      note: this.lookupError ? `PACER 法院目录暂不可用，回退到静态 RSS 列表：${this.lookupError.message}` : null,
+      feeds: this.listFeeds().map((feed) => ({
         id: feed.id,
         court_id: feed.courtId,
-        court_name: feed.courtName
+        court_name: feed.courtName,
+        pacer_court_id: feed.pacerCourtId || null
       }))
     };
   }
 
   listFeeds() {
-    return this.feeds.map((feed) => ({ ...feed }));
+    const feeds = this.dynamicFeeds?.length ? this.dynamicFeeds : this.feeds;
+    return feeds.map((feed) => ({ ...feed }));
+  }
+
+  async ensureFeedsLoaded() {
+    if (!this.enabled || !this.lookupUrl || this.dynamicFeeds?.length) {
+      return;
+    }
+
+    try {
+      const entries = await fetchPacerCourtDirectory(this.lookupUrl, { timeoutMs: this.timeoutMs });
+      const feeds = entries
+        .filter((entry) => String(entry.type || "").toLowerCase() === "district")
+        .filter((entry) => entry.rssUrl)
+        .filter((entry) => !this.selectedIds.size || this.selectedIds.has(entry.slug))
+        .map((entry) => ({
+          id: entry.slug,
+          courtId: entry.slug,
+          pacerCourtId: entry.pacerCourtId,
+          courtName: entry.courtName || entry.title || entry.slug,
+          feedUrl: entry.rssUrl
+        }));
+
+      if (feeds.length) {
+        this.dynamicFeeds = feeds;
+      }
+      this.lookupError = null;
+    } catch (error) {
+      this.lookupError = error;
+    }
   }
 
   async fetchFeed(feed) {

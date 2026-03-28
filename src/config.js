@@ -218,6 +218,7 @@ export const config = {
   },
   courtFeeds: {
     enabled: envBool("COURT_FEEDS_ENABLED", true),
+    lookupUrl: env("COURT_FEEDS_LOOKUP_URL", "https://pacer.uscourts.gov/file-case/court-cmecf-lookup/data.json"),
     timeoutMs: envInt("COURT_FEEDS_TIMEOUT_MS", 15000),
     minIntervalMs: envInt("COURT_FEEDS_MIN_INTERVAL_MS", 1000),
     maxItemsPerFeed: envInt("COURT_FEEDS_MAX_ITEMS_PER_FEED", 80),
@@ -240,6 +241,14 @@ export const config = {
       "wawd"
     ])
   },
+  recentFilings: {
+    enabled: envBool("RECENT_FILINGS_ENABLED", true),
+    timeoutMs: envInt("RECENT_FILINGS_TIMEOUT_MS", 20000),
+    minIntervalMs: envInt("RECENT_FILINGS_MIN_INTERVAL_MS", 1200),
+    maxItemsPerCourt: envInt("RECENT_FILINGS_MAX_ITEMS_PER_COURT", 120),
+    maxLookupsPerRun: envInt("RECENT_FILINGS_MAX_LOOKUPS_PER_RUN", 12),
+    courts: envList("RECENT_FILINGS_TARGETS", ["ilnd", "cand", "flsd"])
+  },
   lawFirms: {
     enabled: envBool("LAW_FIRM_SITES_ENABLED", true),
     timeoutMs: envInt("LAW_FIRM_SITES_TIMEOUT_MS", 15000),
@@ -257,6 +266,24 @@ export const config = {
   },
   pacer: {
     enabled: envBool("PACER_ENABLED", false),
+    authUrl: env("PACER_AUTH_URL", "https://pacer.login.uscourts.gov/services/cso-auth"),
+    baseUrl: env("PACER_PCL_BASE_URL", "https://pcl.uscourts.gov/pcl-public-api/rest"),
+    courtLookupUrl: env("PACER_COURT_LOOKUP_URL", "https://pacer.uscourts.gov/file-case/court-cmecf-lookup/data.json"),
+    loginId: envAny(["PACER_LOGIN_ID", "PACER_USERNAME"], ""),
+    password: envAny(["PACER_PASSWORD", "PACER_PASS"], ""),
+    clientCode: env("PACER_CLIENT_CODE", ""),
+    otpCode: envAny(["PACER_OTP_CODE", "PACER_OTP_TOKEN"], ""),
+    requestSource: env("PACER_REQUEST_SOURCE", "tro-case-watch"),
+    timeoutMs: envInt("PACER_TIMEOUT_MS", 20000),
+    minIntervalMs: envInt("PACER_MIN_INTERVAL_MS", 1500),
+    recentWindowDays: envInt("PACER_RECENT_WINDOW_DAYS", 3),
+    backfillWindowDays: envInt("PACER_BACKFILL_WINDOW_DAYS", 14),
+    maxPagesPerRun: envInt("PACER_MAX_PAGES_PER_RUN", 2),
+    backfillMaxPagesPerRun: envInt("PACER_BACKFILL_MAX_PAGES_PER_RUN", 6),
+    caseTypes: envList("PACER_CASE_TYPES", ["cv"]),
+    natureOfSuit: envList("PACER_NATURE_OF_SUIT", ["820", "830", "840"]),
+    courtIds: envList("PACER_COURT_IDS", []),
+    estimatedCostUsdPerRequest: envFloat("PACER_ESTIMATED_COST_USD_PER_REQUEST", 0.10),
     dailyBudgetUsd: envFloat("PACER_DAILY_BUDGET_USD", 15),
     perRunBudgetUsd: envFloat("PACER_PER_RUN_BUDGET_USD", 3),
     maxCasesPerRun: envInt("PACER_MAX_CASES_PER_RUN", 2)
