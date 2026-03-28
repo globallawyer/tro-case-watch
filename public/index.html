@@ -1,13 +1,13 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
   <head>
     <meta name="robots" content="noindex, nofollow, noarchive" />
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>TRO Scarecrow Docket</title>
+    <title>TRO稻草人 Docket</title>
     <meta
       name="description"
-      content="TRO / Schedule A case and docket search for cross-border sellers. Search by docket number, brand, or plaintiff counsel and open the on-site timeline directly."
+      content="面向跨境电商卖家的 TRO / Schedule A 案件与 Docket 查询。支持输入案号、品牌、原告律所，直接查看站内时间线。"
     />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -21,10 +21,10 @@
     <div class="page-shell">
       <header class="topbar">
         <div class="brand-block">
-          <img class="brand-mark" src="/assets/brand-logo.jpeg" alt="TRO Scarecrow logo" />
+          <img class="brand-mark" src="/assets/brand-logo.jpeg" alt="TRO稻草人 logo" />
           <div>
-            <strong>TRO Scarecrow Docket</strong>
-            <p>On-site TRO / Schedule A search for cross-border sellers</p>
+            <strong>TRO稻草人 Docket</strong>
+            <p>跨境电商 TRO / Schedule A 站内检索台</p>
           </div>
         </div>
         <div class="topbar-actions">
@@ -33,14 +33,14 @@
             href="https://www.uspto.gov/trademarks/search"
             target="_blank"
             rel="noreferrer"
-            >USPTO Trademark Search</a
+            >USPTO 商标查询</a
           >
           <a
             class="action-button secondary utility-link"
             href="https://www.uspto.gov/patents/search/patent-public-search"
             target="_blank"
             rel="noreferrer"
-            >USPTO Patent Search</a
+            >USPTO 专利查询</a
           >
         </div>
       </header>
@@ -51,28 +51,28 @@
             <div class="hero-heading">
               <p class="eyebrow">Cross-Border Seller Docket Lookup</p>
               <h1>
-                <span class="hero-line">Search by docket number, brand, or counsel,</span>
-                <span class="hero-line">then open the on-site docket timeline directly.</span>
+                <span class="hero-line">输入案号、品牌或律所，</span>
+                <span class="hero-line">直接看站内 Docket 时间线。</span>
               </h1>
             </div>
             <p class="hero-text">
-              This page focuses on TRO litigation only. Once a case matches, the panel on the right opens the on-site docket directly, without sending you to an external timeline.
+              当前页面只保留一类检索视图: TRO诉讼案件。命中案件后，右侧直接展示站内 Docket，不需要再跳转到外部页面看时间线。
             </p>
             <form class="lookup-form" id="lookup-form">
               <input
                 id="lookup-input"
                 name="lookup"
                 type="search"
-                placeholder="For example: 1:25-cv-10191 / 25-cv-10191 / Pandaloon / Sriplaw"
+                placeholder="例如 1:25-cv-10191 / 25-cv-10191 / Pandaloon / Sriplaw"
                 autocomplete="off"
               />
-              <button class="action-button" type="submit">Search Docket</button>
+              <button class="action-button" type="submit">查 Docket</button>
             </form>
             <div class="search-tools">
               <label class="tool-field">
-                <span>Court Filter</span>
+                <span>法院筛选</span>
                 <select name="court" id="court-filter">
-                  <option value="">All Courts</option>
+                  <option value="">全部法院</option>
                 </select>
               </label>
             </div>
@@ -81,65 +81,65 @@
 
           <aside class="contact-card">
             <div class="panel-head">
-              <h2>TRO Scarecrow Team</h2>
+              <h2>TRO稻草人团队</h2>
             </div>
             <div class="contact-methods">
-              <button class="contact-chip" id="copy-wechat-button" type="button">Add WeChat for Group Settlement</button>
-              <a class="contact-chip" href="mailto:599214243@qq.com">Email Us for Complaints and Defendant Lists</a>
+              <button class="contact-chip" id="copy-wechat-button" type="button">加微信组团和解</button>
+              <a class="contact-chip" href="mailto:599214243@qq.com">发邮件获取诉状和被告名单</a>
             </div>
             <div class="contact-grid">
               <article class="qr-card">
                 <img
                   class="qr-image"
                   src="/assets/wechat-qr.png"
-                  alt="TRO Scarecrow Team WeChat QR"
+                  alt="TRO稻草人团队微信二维码"
                 />
-                <p>WeChat: mylearnedfriend</p>
+                <p>微信：mylearnedfriend</p>
               </article>
               <article class="qr-card">
                 <img
                   class="qr-image"
                   src="/assets/official-account-qr.png"
-                  alt="TRO Scarecrow Official Account QR"
+                  alt="TRO稻草人公众号二维码"
                 />
-                <p>Official Account: TRO Scarecrow</p>
+                <p>公众号：TRO稻草人</p>
               </article>
             </div>
-            <p class="contact-note">Scan the QR code or use the button to contact the legal team.</p>
+            <p class="contact-note">扫码或点击按钮联系律师团队</p>
           </aside>
         </section>
 
         <section class="content-grid">
           <article class="panel cases-panel">
             <div class="panel-head">
-              <h2>Case List</h2>
-              <p id="cases-summary">Loading data...</p>
+              <h2>案件列表</h2>
+              <p id="cases-summary">正在读取数据…</p>
             </div>
             <div class="results-head">
-              <span>Docket / Plaintiff / Counsel / Court / Latest Activity</span>
+              <span>案号 / 原告 / 律所 / 法院 / 最近节点</span>
             </div>
             <div class="case-list" id="case-list"></div>
             <div class="pagination-row">
-              <button class="page-button" id="prev-page" type="button">Previous</button>
+              <button class="page-button" id="prev-page" type="button">上一页</button>
               <span id="page-indicator">-</span>
-              <button class="page-button" id="next-page" type="button">Next</button>
+              <button class="page-button" id="next-page" type="button">下一页</button>
             </div>
           </article>
 
           <aside class="panel detail-panel" id="detail-panel">
             <div class="panel-head">
-              <h2>Docket View</h2>
-              <p>Select a case on the left to open the on-site timeline on the right.</p>
+              <h2>Docket 展示页</h2>
+              <p>点左侧案件后，右侧直接展示站内时间线。</p>
             </div>
             <div class="detail-empty">
-              <h3>No Case Selected</h3>
-              <p>The panel will show the plaintiff/brand, counsel, court, case stage, and on-site docket timeline.</p>
+              <h3>还没有选中案件</h3>
+              <p>会显示原告品牌、律所、法院、案件状态和站内 Docket 时间线。</p>
             </div>
           </aside>
         </section>
       </main>
     </div>
 
-    <script src="/app.js?v=20260328e" type="module"></script>
+    <script src="/app.js?v=20260313d" type="module"></script>
   </body>
   </html>

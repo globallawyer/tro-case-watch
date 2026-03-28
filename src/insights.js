@@ -213,7 +213,7 @@ function deriveStatus(caseLike, text) {
   ) {
     return {
       key: "closed",
-      label: "Dismissal / Closure Seen",
+      label: "已出现撤案/结案",
       tone: "muted"
     };
   }
@@ -221,7 +221,7 @@ function deriveStatus(caseLike, text) {
   if (text.includes("preliminary injunction") && (text.includes("grant") || text.includes("grants"))) {
     return {
       key: "pi",
-      label: "PI Entered",
+      label: "已到 PI / 初步禁令",
       tone: "danger"
     };
   }
@@ -232,7 +232,7 @@ function deriveStatus(caseLike, text) {
   ) {
     return {
       key: "tro_granted",
-      label: "TRO Granted",
+      label: "TRO 已下发",
       tone: "danger"
     };
   }
@@ -240,7 +240,7 @@ function deriveStatus(caseLike, text) {
   if (text.includes("motion for temporary restraining order")) {
     return {
       key: "tro_pending",
-      label: "TRO Pending",
+      label: "TRO 申请中",
       tone: "warn"
     };
   }
@@ -248,7 +248,7 @@ function deriveStatus(caseLike, text) {
   if (text.includes("notice of settlement")) {
     return {
       key: "settlement",
-      label: "Settlement Signal",
+      label: "有和解迹象",
       tone: "good"
     };
   }
@@ -256,14 +256,14 @@ function deriveStatus(caseLike, text) {
   if (text.includes("service") || text.includes("summons")) {
     return {
       key: "service",
-      label: "Service in Progress",
+      label: "送达推进中",
       tone: "warn"
     };
   }
 
   return {
     key: "watch",
-    label: "Monitoring",
+    label: "持续观察",
     tone: "neutral"
   };
 }
@@ -272,31 +272,31 @@ function buildHighlights(text) {
   const items = [];
 
   if (text.includes("order granting ex parte application for entry of temporary restraining order")) {
-    items.push("TRO Order Seen");
+    items.push("已看到 TRO 签发文书");
   } else if (text.includes("motion for temporary restraining order")) {
-    items.push("TRO Motion Filed");
+    items.push("已出现 TRO 申请");
   }
 
   if (text.includes("extend temporary restraining order")) {
-    items.push("TRO Extension Watch");
+    items.push("TRO 延长期限值得关注");
   }
 
   if (text.includes("preliminary injunction") && (text.includes("grant") || text.includes("grants"))) {
-    items.push("PI Entered");
+    items.push("已进入 PI / 初步禁令");
   } else if (text.includes("preliminary injunction")) {
-    items.push("PI Activity");
+    items.push("已出现 PI 相关节点");
   }
 
   if (text.includes("certificate of service") || text.includes("service")) {
-    items.push("Service in Progress");
+    items.push("送达程序在推进");
   }
 
   if (text.includes("settlement")) {
-    items.push("Settlement Signal");
+    items.push("已有和解迹象");
   }
 
   if (text.includes("dismiss")) {
-    items.push("Dismissal Signal");
+    items.push("已有撤案/驳回迹象");
   }
 
   return [...new Set(items)].slice(0, 4);
@@ -304,58 +304,58 @@ function buildHighlights(text) {
 
 function buildActionItems(statusKey) {
   if (statusKey === "tro_granted") {
-    return ["Confirm whether the TRO has been entered", "Watch the PI hearing and response deadlines", "Verify the restraint scope and defendant list"];
+    return ["先核对 TRO 是否已签发", "继续盯 PI 听证和答辩期限", "确认冻结范围和被告名单"];
   }
 
   if (statusKey === "pi") {
-    return ["Check whether the PI covers all defendants", "Watch follow-up settlement or dismissal activity", "Confirm whether account restraints are still active"];
+    return ["重点查看 PI 是否覆盖全部被告", "关注后续 settlement / dismissal", "核对是否仍有账户冻结"];
   }
 
   if (statusKey === "settlement") {
-    return ["Keep watching for dismissal activity", "Confirm whether your store was separately removed", "Preserve settlement or dismissal evidence"];
+    return ["继续盯是否有 dismissal", "核对你店铺是否已被单独移出", "保留和解或撤诉证据"];
   }
 
   if (statusKey === "closed") {
-    return ["Verify the court's final order", "Confirm whether marketplace restraints have been lifted", "Keep dismissal or closure records"];
+    return ["核对法院终局文书", "继续确认平台是否已解除冻结", "留存撤案或结案材料"];
   }
 
   if (statusKey === "service") {
-    return ["Track when service is completed", "Watch whether TRO or PI activity follows immediately", "Confirm whether a defendant list has appeared"];
+    return ["盯住送达完成时间", "关注 TRO / PI 是否紧接着推进", "确认是否已出现被告名单"];
   }
 
-  return ["Focus on TRO filings", "Focus on PI / Preliminary Injunction activity", "Focus on settlement or dismissal signals"];
+  return ["重点盯 TRO 文书", "重点盯 PI / Preliminary Injunction", "重点盯 settlement / dismissal"];
 }
 
 function buildNarrative({ status, sellerRelevant, isScheduleACase, isTroCase, defendantCount }) {
   if (!sellerRelevant) {
-    return "Continue monitoring based on the public docket.";
+    return "当前以公开 docket 为准继续观察。";
   }
 
   if (status.key === "tro_granted") {
-    return "This is a classic seller-freeze stage. TRO entry, platform restraints, and service are the main risk points right now.";
+    return "这是典型卖家冻结案阶段，法院已经出现 TRO 签发信号，平台冻结和送达通常是当前核心风险点。";
   }
 
   if (status.key === "pi") {
-    return "The case has moved into the PI stage, where restraints are usually more durable than the initial TRO.";
+    return "案件已经推进到 PI 阶段，约束通常比最初 TRO 更稳定，适合重点跟进是否持续冻结。";
   }
 
   if (status.key === "settlement") {
-    return "There are settlement signals on the docket. Watch for defendants exiting the case over time.";
+    return "案件已出现和解信号，可以继续观察是否有部分被告陆续退出案件。";
   }
 
   if (status.key === "closed") {
-    return "The case shows closure or dismissal signals. Focus next on whether platforms are releasing restraints.";
+    return "案件已出现结案或撤案信号，重点应转向平台端是否同步解冻。";
   }
 
   if (isScheduleACase) {
-    return `This looks like a classic Schedule A seller case with ${defendantCount} visible defendant leads. Keep tracking TRO / PI / settlement developments.`;
+    return `这是典型 Schedule A 卖家案件，当前可见被告线索 ${defendantCount} 个，重点继续盯 TRO / PI / settlement。`;
   }
 
   if (isTroCase) {
-    return "This appears to be a seller-related TRO case. Prioritize TRO entry, extensions, and whether the case moves into PI.";
+    return "这是卖家相关 TRO 案件，建议优先跟踪 TRO 是否签发、是否延长、以及是否进入 PI。";
   }
 
-  return "The case is still in a monitoring phase. Prioritize TRO, PI, service, settlement, and dismissal milestones.";
+  return "当前仍处于持续观察阶段，建议优先盯 TRO、PI、送达、和解和撤案。";
 }
 
 export function deriveCaseInsights(caseLike) {
@@ -416,8 +416,8 @@ export function deriveCaseInsights(caseLike) {
   const badges = [];
   if (isScheduleACase) badges.push("Schedule A");
   if (isTroCase) badges.push("TRO");
-  if (sellerRelevant) badges.push("Cross-Border Seller");
-  if (lawFirms[0]) badges.push(`Plaintiff Counsel ${lawFirms[0]}`);
+  if (sellerRelevant) badges.push("跨境卖家相关");
+  if (lawFirms[0]) badges.push(`原告律所 ${lawFirms[0]}`);
 
   return {
     plaintiff_name: plaintiffName || null,
