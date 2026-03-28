@@ -707,6 +707,7 @@ function sanitizeInsights(insights = {}) {
   return {
     plaintiff_name: insights.plaintiff_name || null,
     brand_name: insights.brand_name || null,
+    ip_case_type_label: insights.ip_case_type_label || null,
     lead_law_firm: insights.lead_law_firm || null,
     defendant_count: insights.defendant_count || 0,
     defendant_preview: Array.isArray(insights.defendant_preview) ? insights.defendant_preview : [],
@@ -959,6 +960,8 @@ function serializePublicEntry(entry = {}) {
 function serializePublicCaseSummary(item = {}) {
   return {
     id: item.id,
+    source_case_key: item.source_case_key || null,
+    primary_source: item.primary_source || null,
     case_name: item.case_name || null,
     case_name_zh: item.case_name_zh || null,
     court_id: item.court_id || null,
