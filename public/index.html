@@ -15,7 +15,7 @@
       href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@500;700;800&family=Noto+Sans+SC:wght@400;500;700;900&family=Noto+Serif+SC:wght@500;700&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="/styles.css?v=20260328j" />
+    <link rel="stylesheet" href="/styles.css?v=20260328k" />
   </head>
   <body>
     <div class="page-shell">
@@ -65,15 +65,17 @@
               </h1>
             </div>
             <form class="lookup-form is-frozen" id="lookup-form">
-              <input
-                id="lookup-input"
-                name="lookup"
-                type="search"
-                placeholder="例如 1:25-cv-10191 / 25-cv-10191 / Pandaloon / Sriplaw"
-                autocomplete="off"
-              />
+              <div class="lookup-input-shell">
+                <input
+                  id="lookup-input"
+                  name="lookup"
+                  type="search"
+                  placeholder="例如 1:25-cv-10191 / 25-cv-10191 / Pandaloon / Sriplaw"
+                  autocomplete="off"
+                />
+                <span class="lookup-thaw-water" aria-hidden="true"></span>
+              </div>
               <button class="action-button" type="submit">查 Docket</button>
-              <span class="lookup-thaw-water" aria-hidden="true"></span>
             </form>
             <div class="search-tools">
               <label class="tool-field">

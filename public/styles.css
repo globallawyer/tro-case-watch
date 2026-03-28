@@ -332,26 +332,49 @@ a {
 .lookup-form {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
+  align-items: stretch;
   gap: 12px;
   margin-top: 14px;
   position: relative;
 }
 
+.lookup-input-shell {
+  position: relative;
+  min-width: 0;
+}
+
 .lookup-form input {
   width: 100%;
   min-height: 56px;
-  padding: 0 18px;
+  padding: 0 18px 0 20px;
   border: 1px solid rgba(21, 32, 41, 0.12);
   border-radius: 18px;
-  background: rgba(255, 255, 255, 0.94);
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.74), rgba(238, 247, 255, 0.5)),
+    rgba(255, 255, 255, 0.68);
+  color: #24486a;
+  font-family: var(--font-display);
   font-size: 1rem;
+  letter-spacing: 0.01em;
+  text-shadow:
+    0 0 10px rgba(255, 255, 255, 0.66),
+    0 1px 0 rgba(255, 255, 255, 0.88);
   transition:
+    color 0.28s ease,
+    text-shadow 0.28s ease,
     filter 0.28s ease,
     box-shadow 0.28s ease,
     border-color 0.28s ease,
     transform 0.28s ease;
   position: relative;
   z-index: 2;
+}
+
+.lookup-form input::placeholder {
+  color: rgba(36, 72, 106, 0.72);
+  text-shadow:
+    0 0 8px rgba(255, 255, 255, 0.6),
+    0 1px 0 rgba(255, 255, 255, 0.82);
 }
 
 .lookup-form .action-button {
@@ -361,12 +384,12 @@ a {
 
 .lookup-thaw-water {
   position: absolute;
-  inset: -8px;
-  border-radius: 26px;
+  inset: 0;
+  border-radius: 18px;
   overflow: hidden;
   pointer-events: none;
   opacity: 0;
-  z-index: 3;
+  z-index: 1;
   transform: translateY(-4px) scale(0.96);
 }
 
@@ -401,20 +424,22 @@ a {
   opacity: 0.82;
 }
 
-.lookup-form::before,
-.lookup-form::after,
+.lookup-input-shell::before,
+.lookup-input-shell::after,
 .frost-card::before,
 .frost-card::after {
   pointer-events: none;
 }
 
-.lookup-form.is-frozen::before {
+.lookup-form.is-frozen .lookup-input-shell::before {
   content: "";
   position: absolute;
-  inset: -6px;
-  border-radius: 24px;
+  inset: 0;
+  border-radius: 18px;
   background:
-    linear-gradient(135deg, rgba(255, 255, 255, 0.42), rgba(198, 220, 255, 0.24), rgba(255, 255, 255, 0.16)),
+    radial-gradient(circle at 14% 20%, rgba(255, 255, 255, 0.44), transparent 18%),
+    radial-gradient(circle at 82% 26%, rgba(255, 255, 255, 0.34), transparent 16%),
+    linear-gradient(135deg, rgba(255, 255, 255, 0.42), rgba(198, 220, 255, 0.28), rgba(255, 255, 255, 0.18)),
     repeating-linear-gradient(
       135deg,
       rgba(255, 255, 255, 0.22) 0,
@@ -429,50 +454,56 @@ a {
   backdrop-filter: blur(8px);
   opacity: 1;
   transition: opacity 0.28s ease, transform 0.28s ease, filter 0.28s ease;
-  z-index: 4;
+  z-index: 1;
 }
 
-.lookup-form.is-frozen::after {
-  content: "点击查 Docket 解冻";
+.lookup-form.is-frozen .lookup-input-shell::after {
+  content: "Frosted";
   position: absolute;
-  right: 16px;
-  top: -10px;
+  right: 12px;
+  top: 50%;
   padding: 4px 10px;
   border-radius: 999px;
-  font-size: 0.72rem;
+  font-size: 0.68rem;
   font-weight: 700;
-  color: #2f5f8e;
-  background: rgba(255, 255, 255, 0.86);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #3b6692;
+  background: rgba(255, 255, 255, 0.82);
   border: 1px solid rgba(198, 220, 255, 0.5);
   box-shadow: 0 10px 20px rgba(125, 163, 214, 0.12);
   transition: opacity 0.28s ease, transform 0.28s ease;
-  z-index: 5;
+  transform: translateY(-50%);
+  z-index: 3;
 }
 
-.lookup-form.is-frozen input,
-.lookup-form.is-frozen .action-button {
+.lookup-form.is-frozen input {
   border-color: rgba(198, 220, 255, 0.56);
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.84),
     0 0 0 1px rgba(198, 220, 255, 0.18);
-  filter: saturate(0.82) brightness(1.04);
+  filter: saturate(0.9) brightness(1.04);
 }
 
 .lookup-form.is-frozen input {
   transform: translateY(-1px);
+  color: #2a567f;
+  text-shadow:
+    0 0 12px rgba(255, 255, 255, 0.74),
+    0 1px 0 rgba(255, 255, 255, 0.92);
 }
 
-.lookup-form:not(.is-frozen)::before,
-.lookup-form:not(.is-frozen)::after {
+.lookup-form:not(.is-frozen) .lookup-input-shell::before,
+.lookup-form:not(.is-frozen) .lookup-input-shell::after {
   opacity: 0;
   transform: translateY(-6px);
 }
 
-.lookup-form.is-thawing::before {
+.lookup-form.is-thawing .lookup-input-shell::before {
   animation: frost-melt-overlay 0.46s ease forwards;
 }
 
-.lookup-form.is-thawing::after {
+.lookup-form.is-thawing .lookup-input-shell::after {
   animation: frost-hint-fade 0.18s ease forwards;
 }
 
@@ -484,8 +515,7 @@ a {
   animation: thaw-water-flow 0.48s ease forwards;
 }
 
-.lookup-form.is-thawing input,
-.lookup-form.is-thawing .action-button {
+.lookup-form.is-thawing input {
   filter: saturate(0.9) brightness(1.03);
 }
 
