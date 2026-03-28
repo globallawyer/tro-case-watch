@@ -34,6 +34,29 @@ const copyWechatButton = document.querySelector("#copy-wechat-button");
 const statusPollMs = 5 * 60 * 1000;
 const apiBase = "";
 
+const VALUE_TERM_REPLACEMENTS = [
+  ["专利", "Patent"],
+  ["商标", "Trademark"],
+  ["版权", "Copyright"],
+  ["和解", "Settlement"],
+  ["撤案", "Dismissal"],
+  ["结案", "Closed"],
+  ["送达", "Service"],
+  ["持续观察", "Monitoring"],
+  ["原告", "Plaintiff"],
+  ["品牌", "Brand"],
+  ["被告", "Defendant"],
+  ["律所", "Counsel"]
+];
+
+function translateValue(value) {
+  let text = String(value ?? "").trim();
+  for (const [source, target] of VALUE_TERM_REPLACEMENTS) {
+    text = text.replaceAll(source, target);
+  }
+  return text;
+}
+
 function getRouteCaseId() {
   const match = window.location.pathname.match(caseRoutePattern);
   if (!match) {
@@ -58,10 +81,10 @@ function setCaseRoute(caseId, { replace = false } = {}) {
 
 function formatDate(value) {
   if (!value) {
-    return "未知";
+    return "Unknown";
   }
 
-  return new Date(value).toLocaleDateString("zh-CN", {
+  return new Date(value).toLocaleDateString("en-US", {
     year: "numeric",
     month: "2-digit",
     day: "2-digit"
@@ -95,16 +118,16 @@ function renderHero(status) {
   const totals = status.dashboard?.totals || {};
   const recentSync = status.dashboard?.recentSync;
   const cards = [
-    heroCard("站内总库/当前监控池", `${totals.total_cases || 0} / ${totals.watchlist_cases || 0}`),
-    heroCard("TRO诉讼/Schedule A案件数", `${totals.tro_cases || 0} / ${totals.schedule_a_cases || 0}`),
-    heroCard("今日新增收录", totals.today_added_watchlist || 0),
+    heroCard("Total Cases / Watchlist", `${totals.total_cases || 0} / ${totals.watchlist_cases || 0}`),
+    heroCard("TRO / Schedule A", `${totals.tro_cases || 0} / ${totals.schedule_a_cases || 0}`),
+    heroCard("Added Today", totals.today_added_watchlist || 0),
     heroCard(
-      "最近同步",
+      "Last Sync",
       recentSync?.finished_at
-        ? new Date(recentSync.finished_at).toLocaleTimeString("zh-CN")
+        ? new Date(recentSync.finished_at).toLocaleTimeString("en-US", { hour12: false })
         : recentSync?.status === "running"
-          ? "同步中"
-          : "未同步"
+          ? "Running"
+          : "Idle"
     )
   ];
 
@@ -151,7 +174,7 @@ function revealResultsIfNeeded() {
 
 function renderCourtOptions(courts) {
   const selected = state.court;
-  courtFilter.innerHTML = [`<option value="">全部法院</option>`]
+  courtFilter.innerHTML = [`<option value="">All Courts</option>`]
     .concat(
       courts.map(
         (court) =>
@@ -161,29 +184,29 @@ function renderCourtOptions(courts) {
     .join("");
 }
 
-function renderCasesLoading(message = "正在检索案件，请稍候。") {
+function renderCasesLoading(message = "Loading cases...") {
   casesSummary.textContent = message;
   caseList.innerHTML = `
     <article class="case-row">
-      <h3>正在载入案件列表</h3>
-      <p>已收到你的检索请求，正在同步站内结果。</p>
+      <h3>Loading case list</h3>
+      <p>Your request was received. Syncing on-site results now.</p>
     </article>
   `;
 }
 
 function caseStatusBadge(item) {
   const status = item.insights?.status || {};
-  return `<span class="status-pill ${toneClass(status)}">${status.label || "持续观察"}</span>`;
+  return `<span class="status-pill ${toneClass(status)}">${translateValue(status.label || "Monitoring")}</span>`;
 }
 
 function tagPills(item) {
   const values = [...new Set(item.insights?.badges || [])];
-  return values.map((value) => `<span class="tag-pill">${value}</span>`).join("");
+  return values.map((value) => `<span class="tag-pill">${translateValue(value)}</span>`).join("");
 }
 
 function highlightPills(item) {
   const values = item.insights?.highlights || [];
-  return values.map((value) => `<span class="highlight-pill">${value}</span>`).join("");
+  return values.map((value) => `<span class="highlight-pill">${translateValue(value)}</span>`).join("");
 }
 
 function displayEntryType(entry) {
@@ -201,10 +224,10 @@ function displayEntryType(entry) {
 
 function renderCaseRow(item) {
   const insights = item.insights || {};
-  const plaintiff = insights.brand_name || insights.plaintiff_name || item.case_name || "未命名案件";
-  const lawFirm = insights.lead_law_firm || "待识别";
+  const plaintiff = translateValue(insights.brand_name || insights.plaintiff_name || item.case_name || "Unnamed Case");
+  const lawFirm = translateValue(insights.lead_law_firm || "Unknown");
   const summary =
-    insights.narrative || item.recent_activity_summary || "当前没有抓到可展示的 docket 摘要。";
+    translateValue(insights.narrative || item.recent_activity_summary || "No docket summary is available yet.");
 
   return `
     <button class="case-row ${item.id === state.selectedCaseId ? "is-active" : ""}" type="button" data-case-id="${item.id}">
@@ -215,7 +238,7 @@ function renderCaseRow(item) {
           <div class="case-meta">
             <span>${item.court_name || "Unknown Court"}</span>
             <span>Filed ${formatDate(item.date_filed)}</span>
-            <span>原告律所 ${lawFirm}</span>
+            <span>Plaintiff Counsel ${lawFirm}</span>
           </div>
         </div>
         <div class="status-row">
@@ -226,9 +249,9 @@ function renderCaseRow(item) {
       <div class="tag-row highlights-row">${highlightPills(item)}</div>
       <p class="case-summary">${summary}</p>
       <div class="case-foot">
-        <span>原告/品牌 ${plaintiff}</span>
-        <span>被告数 ${insights.defendant_count || 0}</span>
-        <span>最近节点 ${formatDate(item.latest_docket_filed_at || item.date_filed)}</span>
+        <span>Plaintiff / Brand ${plaintiff}</span>
+        <span>Defendants ${insights.defendant_count || 0}</span>
+        <span>Latest Activity ${formatDate(item.latest_docket_filed_at || item.date_filed)}</span>
       </div>
     </button>
   `;
@@ -242,45 +265,45 @@ function renderCases(payload) {
   const messages = [];
   if (!state.search) {
     const totalCases = Number(latestStatusPayload?.dashboard?.totals?.total_cases || 0);
-    messages.push(`当前监控池共 ${payload.total} 个案件`);
+    messages.push(`${payload.total} cases in the active watchlist`);
     if (totalCases > 0) {
-      messages.push(`站内总库共 ${totalCases} 个案件`);
+      messages.push(`${totalCases} total cases in the database`);
     }
-    messages.push(`当前第 ${payload.page} / ${payload.pageCount} 页`);
+    messages.push(`Page ${payload.page} / ${payload.pageCount}`);
   } else {
-    messages.push(`命中 ${payload.total} 个案件，当前第 ${payload.page} / ${payload.pageCount} 页`);
+    messages.push(`${payload.total} matching cases, page ${payload.page} / ${payload.pageCount}`);
   }
   if (payload.categoryRelaxed) {
     const relaxedLabel = {
-      all: "全库",
-      watchlist: "监控池",
-      seller_watch: "卖家监控",
+      all: "All Cases",
+      watchlist: "Watchlist",
+      seller_watch: "Seller Watch",
       tro: "TRO",
       schedule_a: "Schedule A"
-    }[payload.relaxedCategory] || "更宽范围";
-    messages.push(`当前分类没有直接命中，已放宽到${relaxedLabel}结果`);
+    }[payload.relaxedCategory] || "broader scope";
+    messages.push(`No direct hit in the current category. Widened to ${relaxedLabel}.`);
   }
   if (payload.liveImported?.imported) {
-    messages.push(`已实时导入 ${payload.liveImported.imported} 个匹配案件`);
+    messages.push(`Live-imported ${payload.liveImported.imported} matching cases`);
   }
   if (payload.lookupError) {
-    messages.push(`实时导入失败：${payload.lookupError}`);
+    messages.push(`Live import failed: ${payload.lookupError}`);
   }
 
   casesSummary.textContent = messages.join(" · ");
-  pageIndicator.textContent = `第 ${payload.page} / ${payload.pageCount} 页`;
+  pageIndicator.textContent = `Page ${payload.page} / ${payload.pageCount}`;
 
   if (!payload.items.length) {
     caseList.innerHTML = `
       <article class="case-row">
-        <h3>没有命中案件</h3>
-        <p>你可以继续输完整案号，系统会尝试现场补抓公开案件。</p>
+        <h3>No matching cases</h3>
+        <p>Try a full docket number and the system will attempt a live public lookup.</p>
       </article>
     `;
     detailPanel.innerHTML = `
       <div class="panel-head">
-        <h2>Docket 展示页</h2>
-        <p>当前搜索没有命中。</p>
+        <h2>Docket View</h2>
+        <p>No matching result for the current search.</p>
       </div>
     `;
     return;
@@ -329,30 +352,30 @@ function updateActiveCaseRow() {
 
 function adviceByStatus(statusKey) {
   if (statusKey === "tro_granted") {
-    return "通常说明法院已经签 TRO，卖家更需要优先核对送达、平台冻结范围、以及 PI 听证时间。";
+    return "The TRO appears to have been entered. Focus on service, marketplace restraints, and the PI hearing schedule.";
   }
 
   if (statusKey === "pi") {
-    return "案件已经进入 Preliminary Injunction 阶段，冻结和约束通常比最初 TRO 更稳定。";
+    return "The case is already in the Preliminary Injunction stage, where restraints are usually more durable than the initial TRO.";
   }
 
   if (statusKey === "settlement") {
-    return "最近 docket 出现 settlement / dismissal 迹象，适合继续观察是否有被告陆续撤出。";
+    return "Recent docket activity suggests settlement or dismissal. Keep watching for defendants exiting the case.";
   }
 
   if (statusKey === "closed") {
-    return "案件已出现撤案、终结或大面积 voluntary dismissal 文书。";
+    return "The docket shows closure, dismissal, or large-scale voluntary dismissals.";
   }
 
   if (statusKey === "service") {
-    return "当前更像送达/应诉准备阶段，重点看被告名单、送达回证和后续 TRO / PI。";
+    return "This looks more like the service and response-prep stage. Watch defendant lists, proofs of service, and the next TRO / PI step.";
   }
 
-  return "当前仍处于持续观察阶段，建议重点盯 TRO、PI、Settlement、Dismissal 这几类节点。";
+  return "The case is still in a monitoring phase. Keep an eye on TRO, PI, settlement, and dismissal milestones.";
 }
 
 function timelineSourceLabel(entry) {
-  return entry.timeline_label || "Docket 时间线";
+  return translateValue(entry.timeline_label || "Docket Timeline");
 }
 
 function timelineSignals(entry) {
@@ -366,13 +389,13 @@ function timelineSignals(entry) {
     markers.push("PI");
   }
   if (/(settlement|stipulation)/i.test(text)) {
-    markers.push("和解");
+    markers.push("Settlement");
   }
   if (/(dismiss|terminated|closing)/i.test(text)) {
-    markers.push("结案");
+    markers.push("Closed");
   }
   if (/(service|serve|summons)/i.test(text)) {
-    markers.push("送达");
+    markers.push("Service");
   }
 
   return [...new Set(markers)];
@@ -387,7 +410,7 @@ function timelineSourceSummary(entries) {
   });
 
   return [...summary.entries()]
-    .map(([label, count]) => `${label} ${count} 条`)
+    .map(([label, count]) => `${translateValue(label)} ${count} entries`)
     .join(" · ");
 }
 
@@ -395,25 +418,25 @@ function renderDetail(item) {
   const insights = item.insights || {};
   const entries = item.entries || [];
   const hydrationPending = item.hydration_pending?.pending;
-  const timelineSummary = entries.length ? timelineSourceSummary(entries) : "当前只有案件级摘要";
+  const timelineSummary = entries.length ? timelineSourceSummary(entries) : "Case-level summary only";
   const summaryCards = [
-    { label: "原告/品牌", value: insights.brand_name || insights.plaintiff_name || "待识别" },
-    { label: "原告律所", value: insights.lead_law_firm || "待识别" },
-    { label: "程序阶段", value: insights.status?.label || "持续观察" },
-    { label: "被告数量", value: insights.defendant_count || 0 },
-    { label: "站内 docket", value: entries.length ? `${entries.length} 条` : "仅案件摘要" }
+    { label: "Plaintiff / Brand", value: translateValue(insights.brand_name || insights.plaintiff_name || "Unknown") },
+    { label: "Plaintiff Counsel", value: translateValue(insights.lead_law_firm || "Unknown") },
+    { label: "Case Stage", value: translateValue(insights.status?.label || "Monitoring") },
+    { label: "Defendants", value: insights.defendant_count || 0 },
+    { label: "On-site Docket", value: entries.length ? `${entries.length} entries` : "Case summary only" }
   ];
   const defendantPreview = insights.defendant_preview?.length
     ? insights.defendant_preview.join(" / ")
-    : "当前没有可展示的被告样本。";
+    : "No defendant preview is available yet.";
   const highlights = (insights.highlights || [])
-    .map((value) => `<span class="highlight-pill">${value}</span>`)
+    .map((value) => `<span class="highlight-pill">${translateValue(value)}</span>`)
     .join("");
 
   detailPanel.innerHTML = `
     <div class="panel-head detail-header">
       <span class="case-docket">${item.docket_number || "No docket number"}</span>
-      <h3>${item.case_name || insights.brand_name || "未命名案件"}</h3>
+      <h3>${translateValue(item.case_name || insights.brand_name || "Unnamed Case")}</h3>
       <div class="status-row">
         ${caseStatusBadge(item)}
         ${tagPills(item)}
@@ -421,7 +444,7 @@ function renderDetail(item) {
       <div class="detail-meta">
         <span>${item.court_name || "Unknown Court"}</span>
         <span>Filed ${formatDate(item.date_filed)}</span>
-        <span>最近节点 ${formatDate(item.latest_docket_filed_at || item.date_filed)}</span>
+        <span>Latest Activity ${formatDate(item.latest_docket_filed_at || item.date_filed)}</span>
       </div>
       <div class="summary-grid">
         ${summaryCards
@@ -437,12 +460,12 @@ function renderDetail(item) {
       </div>
       <div class="timeline-toolbar">
         <div class="timeline-toolbar-copy">
-          <strong>站内直接查看案件时间线</strong>
-          <p>以下 docket 已同步展示在本站，默认不要求跳转到外部来源才能看进展。</p>
-          ${hydrationPending ? '<p class="focus-text">当前条目还在后台继续补抓，页面会自动刷新补进来的 docket。</p>' : ""}
+          <strong>View the case timeline on-site</strong>
+          <p>The docket below is archived directly on this site, so you usually do not need to jump out to external sources.</p>
+          ${hydrationPending ? '<p class="focus-text">Background enrichment is still running. The page will refresh as new docket entries arrive.</p>' : ""}
         </div>
         <div class="timeline-toolbar-stats">
-          <span class="tag-pill">最近节点 ${formatDate(item.latest_docket_filed_at || item.date_filed)}</span>
+          <span class="tag-pill">Latest Activity ${formatDate(item.latest_docket_filed_at || item.date_filed)}</span>
           <span class="tag-pill">${timelineSummary}</span>
         </div>
       </div>
@@ -450,15 +473,15 @@ function renderDetail(item) {
 
     <section class="detail-note">
       <p>${adviceByStatus(insights.status?.key)}</p>
-      <p>${insights.narrative || "当前仍在持续观察。"} 被告样本：${defendantPreview}</p>
-      <div class="tag-row detail-highlight-row">${highlights || '<span class="tag-pill">暂未识别到明确程序节点</span>'}</div>
+      <p>${translateValue(insights.narrative || "Monitoring continues.")} Defendant preview: ${translateValue(defendantPreview)}</p>
+      <div class="tag-row detail-highlight-row">${highlights || '<span class="tag-pill">No clear procedural milestone detected yet</span>'}</div>
     </section>
 
     <section class="timeline">
       <div class="timeline-head">
         <div>
-          <h3>站内 Docket 时间线</h3>
-          <p>按时间倒序归档公开可见 docket 文本，适合卖家直接判断当前是否已签 TRO、是否进入 PI、是否有和解或结案信号。</p>
+          <h3>On-site Docket Timeline</h3>
+          <p>Docket text is archived here in reverse chronological order so you can quickly judge TRO, PI, settlement, or closure signals.</p>
         </div>
       </div>
       ${
@@ -478,9 +501,9 @@ function renderDetail(item) {
                     </div>
                     <h3>${entry.document_number || entry.entry_number || "No.?"} · ${displayEntryType(entry)}</h3>
                     ${signals ? `<div class="tag-row timeline-tags">${signals}</div>` : ""}
-                    <p>${entry.description || "无可显示文本"}</p>
+                    <p>${entry.description || "No displayable text"}</p>
                     ${entry.description_zh ? `<p class="timeline-zh">${entry.description_zh}</p>` : ""}
-                    <p class="timeline-source-note">来源已归档到本站，如需转换成中文，请在Chrome浏览器右键点击翻译</p>
+                    <p class="timeline-source-note">This source is archived on-site. Use your browser translator if you want an alternate language view.</p>
                   </article>
                 `;
                 }
@@ -489,10 +512,10 @@ function renderDetail(item) {
           : `
             <article class="timeline-item">
               <time>${formatDate(item.latest_docket_filed_at || item.date_filed)}</time>
-              <h3>最近进展</h3>
-              <p>${item.recent_activity_summary || "当前只有案件级元数据，没有补到逐条 docket。"}
+              <h3>Latest Activity</h3>
+              <p>${translateValue(item.recent_activity_summary || "Only case-level metadata is available right now; line-by-line docket entries have not been synced yet.")}
               </p>
-              <p class="focus-text">当前公开来源只补到了案件级摘要。等详细 docket 补进来后，这里会直接显示站内时间线。</p>
+              <p class="focus-text">Public sources currently provide only a case-level summary. Once full docket entries arrive, the on-site timeline will appear here.</p>
               ${item.recent_activity_summary_zh ? `<p class="timeline-zh">${item.recent_activity_summary_zh}</p>` : ""}
             </article>
           `
@@ -503,8 +526,8 @@ function renderDetail(item) {
 
 function renderDetailLoading(item = {}) {
   const docket = item.docket_number || "No docket number";
-  const title = item.case_name || item.insights?.brand_name || "正在载入案件详情";
-  const court = item.court_name || "正在读取法院信息";
+  const title = translateValue(item.case_name || item.insights?.brand_name || "Loading case details");
+  const court = item.court_name || "Loading court information";
   const filedAt = formatDate(item.date_filed);
 
   detailPanel.innerHTML = `
@@ -517,8 +540,8 @@ function renderDetailLoading(item = {}) {
       </div>
     </div>
     <div class="detail-empty is-loading">
-      <h3>正在打开 Docket 详细页</h3>
-      <p>已响应你的点击，正在加载该案件的站内时间线。</p>
+      <h3>Opening docket details</h3>
+      <p>Your selection was received. Loading the on-site timeline now.</p>
     </div>
   `;
 }
@@ -539,7 +562,7 @@ function getCachedDetail(caseId) {
 
 function shouldCacheDetail(item) {
   const entriesCount = item.entries?.length || 0;
-  return !(item.insights?.badges || []).includes("跨境卖家相关") || entriesCount >= 12;
+  return !(item.insights?.badges || []).includes("Cross-Border Seller") || entriesCount >= 12;
 }
 
 function shouldRefreshIncompleteDetail(item) {
@@ -637,7 +660,7 @@ async function loadStatus() {
 async function loadCases({ autoSelectFirst = false, preserveSelection = true } = {}) {
   const requestToken = ++casesRequestToken;
   lookupInput.value = state.search;
-  renderCasesLoading(state.search ? `正在检索 ${state.search} ...` : "正在刷新案件列表...");
+  renderCasesLoading(state.search ? `Searching ${state.search} ...` : "Refreshing case list...");
 
   const params = new URLSearchParams({
     category: state.category,
@@ -750,7 +773,7 @@ nextPageButton.addEventListener("click", () => {
 if (refreshButton) {
   refreshButton.addEventListener("click", async () => {
     refreshButton.disabled = true;
-    refreshButton.textContent = "同步中...";
+    refreshButton.textContent = "Syncing...";
     try {
       await request("/api/admin/sync", {
         method: "POST",
@@ -767,20 +790,20 @@ if (refreshButton) {
       ]);
     } finally {
       refreshButton.disabled = false;
-      refreshButton.textContent = "立即刷新";
+      refreshButton.textContent = "Refresh Now";
     }
   });
 }
 
 if (copyWechatButton) {
   copyWechatButton.addEventListener("click", async () => {
-    const defaultLabel = "加微信组团和解";
+    const defaultLabel = "Add WeChat for Group Settlement";
 
     try {
       await navigator.clipboard.writeText("mylearnedfriend");
-      copyWechatButton.textContent = "微信号已复制";
+      copyWechatButton.textContent = "WeChat ID Copied";
     } catch (error) {
-      copyWechatButton.textContent = "微信号：mylearnedfriend";
+      copyWechatButton.textContent = "WeChat: mylearnedfriend";
     }
 
     window.setTimeout(() => {
@@ -795,7 +818,7 @@ async function boot() {
     state.selectedCaseId = routeCaseId;
     renderDetailLoading({
       docket_number: `Case #${routeCaseId}`,
-      case_name: "正在载入案件详情"
+      case_name: "Loading case details"
     });
   }
 
@@ -843,5 +866,5 @@ window.addEventListener("popstate", () => {
 
 boot().catch((error) => {
   console.error(error);
-  caseList.innerHTML = `<article class="case-row"><h3>加载失败</h3><p>${error.message}</p></article>`;
+  caseList.innerHTML = `<article class="case-row"><h3>Load Failed</h3><p>${error.message}</p></article>`;
 });
