@@ -38,6 +38,7 @@ const qrCards = Array.from(document.querySelectorAll(".frost-card"));
 const statusPollMs = 5 * 60 * 1000;
 const troDailyUpdatesPollMs = 30 * 60 * 1000;
 const apiBase = "";
+let lookupThawTimer = null;
 
 function getRouteCaseId() {
   const match = window.location.pathname.match(caseRoutePattern);
@@ -264,6 +265,45 @@ function thawQrSurface({ persist = false } = {}) {
 function thawInteractiveSurfaces({ persistQr = false } = {}) {
   thawLookupSurface();
   thawQrSurface({ persist: persistQr });
+}
+
+function runLookupSearch() {
+  state.search = lookupInput.value.trim();
+  state.page = 1;
+  loadCases({
+    autoSelectFirst: true,
+    preserveSelection: false
+  })
+    .then((payload) => {
+      if (payload) {
+        revealResultsIfNeeded();
+      }
+    })
+    .catch(console.error);
+}
+
+function playLookupThawSequence(onComplete) {
+  if (!lookupForm) {
+    onComplete?.();
+    return;
+  }
+
+  const isFrozen = lookupForm.classList.contains("is-frozen");
+  thawQrSurface();
+
+  if (!isFrozen) {
+    onComplete?.();
+    return;
+  }
+
+  window.clearTimeout(lookupThawTimer);
+  lookupForm.classList.add("is-thawing");
+
+  lookupThawTimer = window.setTimeout(() => {
+    lookupForm.classList.remove("is-thawing");
+    thawLookupSurface();
+    onComplete?.();
+  }, 460);
 }
 
 function bindQrCardFrost() {
@@ -902,25 +942,14 @@ async function loadCaseDetail(caseId, { summaryItem = null, focus = false, updat
 
 lookupForm.addEventListener("submit", (event) => {
   event.preventDefault();
-  thawInteractiveSurfaces();
-  window.requestAnimationFrame(() => {
-    revealResultsIfNeeded();
-  });
-  state.search = lookupInput.value.trim();
-  state.page = 1;
-  loadCases({
-    autoSelectFirst: true,
-    preserveSelection: false
-  }).then((payload) => {
-    if (payload) {
-      revealResultsIfNeeded();
-    }
-  }).catch(console.error);
+  playLookupThawSequence(runLookupSearch);
 });
 
 if (lookupSubmitButton) {
   lookupSubmitButton.addEventListener("pointerdown", () => {
-    thawInteractiveSurfaces();
+    if (lookupForm?.classList.contains("is-frozen")) {
+      lookupForm.classList.add("is-thawing");
+    }
   });
 }
 
