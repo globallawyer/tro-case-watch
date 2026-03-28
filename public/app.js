@@ -303,7 +303,7 @@ function playLookupThawSequence(onComplete) {
     lookupForm.classList.remove("is-thawing");
     thawLookupSurface();
     onComplete?.();
-  }, 460);
+  }, 620);
 }
 
 function bindQrCardFrost() {
