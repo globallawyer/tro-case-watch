@@ -144,6 +144,26 @@ const INJURY_CASE_TERMS = [
   "auto accident"
 ];
 
+const IP_ENFORCEMENT_TERMS = [
+  "trademark",
+  "copyright",
+  "patent",
+  "lanham act",
+  "counterfeit",
+  "infringement",
+  "trade dress",
+  "temporary restraining order"
+];
+
+const IP_CAUSE_PATTERNS = [
+  /\b15:1114\b/i,
+  /\b15:1116\b/i,
+  /\b15:1117\b/i,
+  /\b15:1125\b/i,
+  /\b17:501\b/i,
+  /\b35:271\b/i
+];
+
 function includesOneOf(text, patterns = []) {
   return patterns.some((pattern) => text.includes(pattern));
 }
@@ -165,10 +185,46 @@ function normalizeRetentionText(caseLike = {}) {
 
 function hasAuthoritativeTargetSignal(caseLike = {}) {
   const caseName = normalizeText(caseLike.case_name || "");
+  const primarySource = normalizeText(caseLike.primary_source || "");
+  const sourceCaseKey = normalizeText(caseLike.source_case_key || "");
+  const sourceUrls = Array.isArray(caseLike.source_urls)
+    ? caseLike.source_urls
+    : parseJson(caseLike.source_urls_json, []);
   return Boolean(
+    primarySource === PRIORITY_FEED_PROVIDER_KEY ||
+    sourceCaseKey.startsWith(`${PRIORITY_FEED_PROVIDER_KEY}:`) ||
+    sourceUrls.some((value) => sourceUrlUsesPriorityFeed(normalizeText(value))) ||
     caseHasPriorityFeedUrl(caseLike) ||
     caseName.includes("schedule a") ||
     caseName.includes("unincorporated associations")
+  );
+}
+
+function hasIpEnforcementSignal(caseLike = {}, insights = null) {
+  const derived = insights || deriveCaseInsights(caseLike);
+  const text = normalizeRetentionText({
+    ...caseLike,
+    insights: derived
+  });
+  const cause = normalizeText(caseLike.cause || "");
+  const natureOfSuit = normalizeText(caseLike.nature_of_suit || "");
+  const tags = Array.isArray(caseLike.tags)
+    ? caseLike.tags
+    : String(caseLike.tags_marker || "")
+      .split("|")
+      .map((item) => item.trim())
+      .filter(Boolean);
+
+  return Boolean(
+    tags.includes("tro") ||
+    tags.includes("seller_tro") ||
+    tags.includes("schedule_a") ||
+    derived?.is_tro_case ||
+    derived?.is_schedule_a_case ||
+    derived?.is_seller_case ||
+    /\b(820|830|840)\b/.test(natureOfSuit) ||
+    IP_CAUSE_PATTERNS.some((pattern) => pattern.test(cause)) ||
+    includesOneOf(text, IP_ENFORCEMENT_TERMS)
   );
 }
 
@@ -183,6 +239,7 @@ function hasTargetWatchlistSignals(caseLike = {}, insights = null) {
 
   return Boolean(
     hasAuthoritativeTargetSignal(caseLike) ||
+    hasIpEnforcementSignal(caseLike, derived) ||
     tags.includes("seller_tro") ||
     tags.includes("schedule_a") ||
     derived?.is_schedule_a_case ||
@@ -3548,6 +3605,8 @@ export class Store {
           case_name: row.case_name,
           court_id: row.court_id,
           court_name: row.court_name,
+          date_filed: row.date_filed || null,
+          primary_source: row.primary_source || null,
           latest_docket_filed_at: row.latest_docket_filed_at || row.date_filed || null,
           lead_law_firm: row.insights?.lead_law_firm || null,
           defendant_count: Number(row.insights?.defendant_count || 0),
