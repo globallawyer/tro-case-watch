@@ -187,6 +187,10 @@ const selected = watchlistCandidates
       selectedProviders.push(PRIORITY_FEED_SOURCE);
     }
 
+    if (hasCivilDocketNumber && Number(item.gap || 0) > 0 && allowProviders.has(PRIORITY_FEED_SOURCE)) {
+      selectedProviders.push(PRIORITY_FEED_SOURCE);
+    }
+
     return {
       ...item,
       selected_providers: [...new Set(selectedProviders)]

@@ -38,6 +38,54 @@ function uniqueByNormalized(values) {
   return [...unique.values()];
 }
 
+function parseComparableDocketNumber(value) {
+  const normalized = String(value || "").trim().replace(/\.0$/, "");
+  const parsed = Number.parseInt(normalized, 10);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function hasCivilCaseDocket(caseRow = {}) {
+  return /\b\d{2}-cv-\d{3,6}\b/i.test(String(caseRow.docket_number || ""));
+}
+
+function shouldAttemptPriorityFeedForCase(caseRow = {}, { force = false } = {}) {
+  if (!caseRow || !hasCivilCaseDocket(caseRow)) {
+    return false;
+  }
+
+  if (force) {
+    return true;
+  }
+
+  const caseName = normalizeText(caseRow.case_name || "");
+  const cause = normalizeText(caseRow.cause || "");
+  const natureOfSuit = normalizeText(caseRow.nature_of_suit || "");
+  const latestGap = Math.max(
+    0,
+    parseComparableDocketNumber(caseRow.latest_docket_number) - Number(caseRow.docket_count || 0)
+  );
+
+  return Boolean(
+    caseRow.insights?.is_seller_case ||
+    caseRow.insights?.is_tro_case ||
+    caseRow.insights?.is_schedule_a_case ||
+    /\b(820|830|840)\b/.test(natureOfSuit) ||
+    /\b15:1114\b/.test(cause) ||
+    /\b15:1125\b/.test(cause) ||
+    /\b17:501\b/.test(cause) ||
+    /\b35:271\b/.test(cause) ||
+    caseName.includes("schedule a") ||
+    caseName.includes("unincorporated associations") ||
+    caseName.includes("trademark") ||
+    caseName.includes("copyright") ||
+    caseName.includes("patent") ||
+    caseName.includes("counterfeit") ||
+    caseName.includes("infringement") ||
+    latestGap >= 3 ||
+    Number(caseRow.docket_count || 0) <= 3
+  );
+}
+
 const DISTRICT_DIRECTION_MAP = {
   N: "Northern",
   S: "Southern",
@@ -1922,7 +1970,7 @@ export class CaseSyncService {
   async enrichCaseWithPriorityFeed(caseId, { force = false } = {}) {
     return this.store.batchMutations(async () => {
       const caseRow = this.store.getCase(caseId);
-      if (!caseRow || !this.priorityFeed.enabled || !caseRow.insights?.is_seller_case) {
+      if (!caseRow || !this.priorityFeed.enabled || !shouldAttemptPriorityFeedForCase(caseRow, { force })) {
         return { enriched: false, reason: "not-applicable" };
       }
 
@@ -2534,6 +2582,7 @@ export class CaseSyncService {
       return { enriched: false, reason: "not-found" };
     }
 
+    const timestamp = new Date().toISOString();
     this.store.deleteDocketEntriesNotFromSourceForRelatedCases(caseRow, PRIORITY_FEED_ENTRY_SOURCE);
     this.store.deleteDocketEntriesBySourceForRelatedCases(caseRow, PRIORITY_FEED_ENTRY_SOURCE);
 
@@ -2547,7 +2596,7 @@ export class CaseSyncService {
       year: payload.year,
       serial: payload.serial,
       matchQuality: payload.matchQuality || null,
-      syncedAt: payload.syncedAt
+      syncedAt: payload.syncedAt || timestamp
     });
 
     const savedCase = this.store.upsertCase({
@@ -2575,9 +2624,9 @@ export class CaseSyncService {
       latest_docket_number: payload.entries[0]?.row_number || caseRow.latest_docket_number,
       docket_count: payload.entries.length,
       docket_count_exact: true,
-      last_seen_at: new Date().toISOString(),
-      last_synced_at: new Date().toISOString(),
-      last_docket_sync_at: caseRow.last_docket_sync_at,
+      last_seen_at: timestamp,
+      last_synced_at: timestamp,
+      last_docket_sync_at: timestamp,
       raw: mergedRaw
     });
 
@@ -2607,7 +2656,7 @@ export class CaseSyncService {
         page_count: null,
         pacer_doc_id: null,
         raw: entry,
-        last_synced_at: new Date().toISOString()
+        last_synced_at: timestamp
       });
     }
 
@@ -2641,7 +2690,7 @@ export class CaseSyncService {
       docket_count: Math.max(payload.entries?.length || 0, coverage?.totalEntries || 0),
       last_seen_at: timestamp,
       last_synced_at: timestamp,
-      last_docket_sync_at: caseRow.last_docket_sync_at,
+      last_docket_sync_at: timestamp,
       raw: mergedRaw
     });
 

@@ -1791,12 +1791,12 @@ async function main() {
       }
     };
 
-    if (providers.includes("courtlistener")) {
-      await runProvider("courtlistener", () => syncService.enrichCaseWithCourtListener(caseId, { force: true }));
-    }
-
     if (providers.includes(PRIORITY_FEED_SOURCE)) {
       await runProvider(PRIORITY_FEED_SOURCE, () => syncService.enrichCaseWithPriorityFeed(caseId, { force: true }));
+    }
+
+    if (providers.includes("courtlistener")) {
+      await runProvider("courtlistener", () => syncService.enrichCaseWithCourtListener(caseId, { force: true }));
     }
 
     if (providers.includes("pacermonitor")) {
