@@ -2553,10 +2553,6 @@ export class CaseSyncService {
   }
 
   async syncSinglePacerMonitorCase(caseRow) {
-    if (this.store.caseGroupHasPriorityFeedAuthority(caseRow)) {
-      return { enriched: false, reason: "priority-authoritative" };
-    }
-
     const payload = await this.pacerMonitor.enrichCase(caseRow);
     const timestamp = new Date().toISOString();
     if (!payload) {
@@ -3152,11 +3148,6 @@ export class CaseSyncService {
   }
 
   async syncSingleCourtListenerDocket(caseRow) {
-    if (this.store.caseGroupHasPriorityFeedAuthority(caseRow)) {
-      this.store.touchCaseDocketSync(caseRow.id);
-      return { enriched: false, reason: "priority-authoritative" };
-    }
-
     const docketId = caseRow.courtlistener_docket_id;
     if (!docketId) {
       return { enriched: false, reason: "not-found" };

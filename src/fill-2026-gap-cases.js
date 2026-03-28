@@ -165,14 +165,26 @@ const selected = watchlistCandidates
   .map((item) => {
     const mappedProviders = normalizeProviders(item.providers_needed || []);
     const selectedProviders = mappedProviders.filter((provider) => allowProviders.has(provider));
+    const hasCivilDocketNumber = /\b\d{2}-cv-\d{3,6}\b/i.test(String(item.docket_number || ""));
 
-    if (!selectedProviders.length) {
-      if (Number(item.priority_row_count || 0) > 0 && allowProviders.has(PRIORITY_FEED_SOURCE)) {
-        selectedProviders.push(PRIORITY_FEED_SOURCE);
-      }
-      if (Number(item.courtlistener_gap || 0) > 0 && allowProviders.has("courtlistener")) {
-        selectedProviders.push("courtlistener");
-      }
+    if (Number(item.courtlistener_gap || 0) > 0 && allowProviders.has("courtlistener")) {
+      selectedProviders.push("courtlistener");
+    }
+
+    if (hasCivilDocketNumber && Number(item.gap || 0) > 0 && allowProviders.has("pacermonitor")) {
+      selectedProviders.push("pacermonitor");
+    }
+
+    if (Number(item.gap || 0) > 0 && allowProviders.has("docketalarm")) {
+      selectedProviders.push("docketalarm");
+    }
+
+    if (Number(item.gap || 0) > 0 && allowProviders.has("unicourt")) {
+      selectedProviders.push("unicourt");
+    }
+
+    if (Number(item.priority_row_count || 0) > 0 && allowProviders.has(PRIORITY_FEED_SOURCE)) {
+      selectedProviders.push(PRIORITY_FEED_SOURCE);
     }
 
     return {
