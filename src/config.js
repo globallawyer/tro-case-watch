@@ -113,6 +113,7 @@ export const config = {
     publicCasesMaxPageSize: envInt("PUBLIC_CASES_MAX_PAGE_SIZE", 15),
     publicHealthCacheTtlMs: envInt("PUBLIC_HEALTH_CACHE_TTL_MS", 5_000),
     publicStatusCacheTtlMs: envInt("PUBLIC_STATUS_CACHE_TTL_MS", 15_000),
+    publicTroDailyUpdatesCacheTtlMs: envInt("PUBLIC_TRO_DAILY_UPDATES_CACHE_TTL_MS", 60_000),
     publicCasesCacheTtlMs: envInt("PUBLIC_CASES_CACHE_TTL_MS", 8_000),
     publicCaseDetailCacheTtlMs: envInt("PUBLIC_CASE_DETAIL_CACHE_TTL_MS", 12_000),
     publicApiCacheMaxEntries: envInt("PUBLIC_API_CACHE_MAX_ENTRIES", 300),
@@ -166,6 +167,11 @@ export const config = {
       caseLimit: envInt("DAILY_EMAIL_REPORT_CASE_LIMIT", 12),
       checkIntervalMs: envInt("DAILY_EMAIL_REPORT_CHECK_INTERVAL_MS", 60 * 1000),
       startupDelayMs: envInt("DAILY_EMAIL_REPORT_STARTUP_DELAY_MS", 90 * 1000)
+    },
+    troDailyUpdates: {
+      path: env("TRO_DAILY_UPDATES_PATH", path.join(dataDir, "tro-daily-updates.json")),
+      maxItems: envInt("TRO_DAILY_UPDATES_MAX_ITEMS", 3),
+      timeZone: env("TRO_DAILY_UPDATES_TIME_ZONE", "Asia/Shanghai")
     }
   },
   sync: {
@@ -211,9 +217,7 @@ export const config = {
     ),
     discoveryPages: envAnyList(["PRIORITY_FEED_DISCOVERY_PAGES", buildLegacyPriorityFeedEnvKey("DISCOVERY_PAGES")], [
       "/2026/",
-      "/2025nianzuixintroanjian/",
-      "/2024niantroanjian/",
-      "/2023niantroanjian/"
+      "/2025nianzuixintroanjian/"
     ])
   },
   courtFeeds: {

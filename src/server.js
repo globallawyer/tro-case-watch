@@ -30,6 +30,7 @@ import { TranslationService } from "./translation.js";
 import { CaseSyncService } from "./sync.js";
 import { docketLooksLike } from "./insights.js";
 import { DailyEmailReportService } from "./daily-report.js";
+import { loadTroDailyUpdates } from "./tro-daily-updates.js";
 
 const mimeTypes = {
   ".css": "text/css; charset=utf-8",
@@ -537,6 +538,13 @@ function getPublicRateLimitPolicy(pathname) {
     };
   }
 
+  if (pathname === "/api/tro-daily-updates") {
+    return {
+      scope: "tro-daily-updates",
+      limit: config.server.publicRateLimitStatusPerWindow
+    };
+  }
+
   if (pathname === "/api/health") {
     return {
       scope: "health",
@@ -605,7 +613,12 @@ function enforcePublicReadRateLimit(request, response, pathname) {
 }
 
 function requiresBrowserGuard(pathname = "") {
-  return pathname === "/api/cases" || pathname.startsWith("/api/cases/") || pathname === "/api/sync/status";
+  return (
+    pathname === "/api/cases" ||
+    pathname.startsWith("/api/cases/") ||
+    pathname === "/api/sync/status" ||
+    pathname === "/api/tro-daily-updates"
+  );
 }
 
 function enforceBrowserGuard(request, response, pathname) {
@@ -639,6 +652,10 @@ function getPublicCacheTtlMs(pathname) {
 
   if (pathname === "/api/sync/status") {
     return config.server.publicStatusCacheTtlMs;
+  }
+
+  if (pathname === "/api/tro-daily-updates") {
+    return config.server.publicTroDailyUpdatesCacheTtlMs;
   }
 
   if (pathname === "/api/cases") {
@@ -746,6 +763,43 @@ function sanitizePublicText(value) {
     .replace(/pacermonitor/gi, "公开来源")
     .replace(/docketalarm/gi, "外部补充源")
     .replace(/unicourt/gi, "外部补充源");
+}
+
+function sanitizePublicUrl(value) {
+  const raw = String(value || "").trim();
+  if (!raw) {
+    return null;
+  }
+
+  try {
+    const url = new URL(raw);
+    if (!["http:", "https:"].includes(url.protocol)) {
+      return null;
+    }
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
+function serializeTroDailyUpdates(payload = {}) {
+  const items = Array.isArray(payload.items) ? payload.items : [];
+  return {
+    updatedAt: payload.updatedAt || null,
+    total: Number(payload.total || items.length || 0),
+    items: items
+      .slice(0, Number(config.reports.troDailyUpdates.maxItems || 3))
+      .map((item) => ({
+        id: String(item.id || ""),
+        title: sanitizePublicText(item.title) || "今日动态",
+        summary: sanitizePublicText(item.summary) || null,
+        url: sanitizePublicUrl(item.url),
+        sources: Array.isArray(item.sources) ? item.sources.map((value) => sanitizePublicText(value)).filter(Boolean) : [],
+        publishedAt: item.publishedAt || null,
+        heat: Number(item.heat || 0),
+        caseRefs: Array.isArray(item.caseRefs) ? item.caseRefs.map((value) => sanitizePublicText(value)).filter(Boolean) : []
+      }))
+  };
 }
 
 function sanitizeEntryDocumentType(value) {
@@ -1302,6 +1356,17 @@ async function handleApi(request, response, pathname, searchParams) {
     }
 
     const payload = serializePublicStatus(syncService.getPublicStatus());
+    setCachedPublicPayload(request, pathname, payload);
+    return sendJson(response, 200, payload);
+  }
+
+  if (request.method === "GET" && pathname === "/api/tro-daily-updates") {
+    const cached = getCachedPublicPayload(request, pathname);
+    if (cached) {
+      return sendJson(response, 200, cached);
+    }
+
+    const payload = serializeTroDailyUpdates(loadTroDailyUpdates(config.reports.troDailyUpdates));
     setCachedPublicPayload(request, pathname, payload);
     return sendJson(response, 200, payload);
   }

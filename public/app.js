@@ -26,12 +26,14 @@ const pageIndicator = document.querySelector("#page-indicator");
 const courtFilter = document.querySelector("#court-filter");
 const lookupForm = document.querySelector("#lookup-form");
 const lookupInput = document.querySelector("#lookup-input");
+const troDailyUpdates = document.querySelector("#tro-daily-updates");
 const prevPageButton = document.querySelector("#prev-page");
 const nextPageButton = document.querySelector("#next-page");
 const refreshButton = document.querySelector("#refresh-button");
 const contentGrid = document.querySelector(".content-grid");
 const copyWechatButton = document.querySelector("#copy-wechat-button");
 const statusPollMs = 5 * 60 * 1000;
+const troDailyUpdatesPollMs = 30 * 60 * 1000;
 const apiBase = "";
 
 function getRouteCaseId() {
@@ -87,6 +89,92 @@ function heroCard(label, value) {
       <span>${label}</span>
       <strong>${value}</strong>
     </article>
+  `;
+}
+
+function formatTroDailyUpdatesTime(value) {
+  if (!value) {
+    return "今日";
+  }
+
+  return new Date(value).toLocaleString("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit"
+  });
+}
+
+function troDailyUpdatesMeta(item = {}) {
+  const sources = Array.isArray(item.sources) ? item.sources.filter(Boolean) : [];
+  if (sources.length > 1) {
+    return `${sources.join(" / ")} · ${sources.length} 家同时提到`;
+  }
+  if (sources.length === 1) {
+    return sources[0];
+  }
+  return "公开来源";
+}
+
+function renderTroDailyUpdatesLoading() {
+  if (!troDailyUpdates) {
+    return;
+  }
+
+  troDailyUpdates.innerHTML = `
+    <div class="tro-briefing-card is-loading">
+      <div class="tro-briefing-head">
+        <strong>TRO 今日动态</strong>
+        <span>整理中</span>
+      </div>
+      <p class="tro-briefing-empty">正在载入今日重点动态。</p>
+    </div>
+  `;
+}
+
+function renderTroDailyUpdates(payload = {}) {
+  if (!troDailyUpdates) {
+    return;
+  }
+
+  const items = Array.isArray(payload.items) ? payload.items.slice(0, 3) : [];
+  if (!items.length) {
+    troDailyUpdates.innerHTML = `
+      <div class="tro-briefing-card">
+        <div class="tro-briefing-head">
+          <strong>TRO 今日动态</strong>
+          <span>${formatTroDailyUpdatesTime(payload.updatedAt)}</span>
+        </div>
+        <p class="tro-briefing-empty">今日还没有整理出可展示的重点动态。</p>
+      </div>
+    `;
+    return;
+  }
+
+  const loopItems = items.length > 1 ? items.concat(items) : items;
+  const durationSeconds = Math.max(12, items.length * 7);
+  troDailyUpdates.innerHTML = `
+    <div class="tro-briefing-card">
+      <div class="tro-briefing-head">
+        <strong>TRO 今日动态</strong>
+        <span>${formatTroDailyUpdatesTime(payload.updatedAt)}</span>
+      </div>
+      <div class="tro-briefing-marquee">
+        <div class="tro-briefing-track ${items.length > 1 ? "is-animated" : ""}" style="--tro-briefing-duration:${durationSeconds}s;">
+          ${loopItems
+            .map(
+              (item) => `
+                <a class="tro-briefing-item" href="${item.url || "#"}" ${item.url ? 'target="_blank" rel="noreferrer"' : ""}>
+                  <span class="tro-briefing-source">${troDailyUpdatesMeta(item)}</span>
+                  <strong>${item.title || "今日动态"}</strong>
+                  ${item.summary ? `<span class="tro-briefing-summary">${item.summary}</span>` : ""}
+                </a>
+              `
+            )
+            .join("")}
+        </div>
+      </div>
+    </div>
   `;
 }
 
@@ -683,6 +771,12 @@ async function loadStatus() {
   renderHero(status);
 }
 
+async function loadTroDailyUpdates() {
+  renderTroDailyUpdatesLoading();
+  const payload = await request("/api/tro-daily-updates");
+  renderTroDailyUpdates(payload);
+}
+
 async function loadCases({ autoSelectFirst = false, preserveSelection = true } = {}) {
   const requestToken = ++casesRequestToken;
   lookupInput.value = state.search;
@@ -853,6 +947,7 @@ async function boot() {
     preserveSelection: Boolean(routeCaseId)
   });
   loadStatus().catch(console.error);
+  loadTroDailyUpdates().catch(console.error);
 
   if (routeCaseId) {
     const summaryItem = currentCasesPayload?.items?.find((item) => item.id === routeCaseId) || null;
@@ -865,6 +960,10 @@ async function boot() {
   window.setInterval(() => {
     loadStatus().catch(() => {});
   }, statusPollMs);
+
+  window.setInterval(() => {
+    loadTroDailyUpdates().catch(() => {});
+  }, troDailyUpdatesPollMs);
 }
 
 window.addEventListener("popstate", () => {

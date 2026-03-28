@@ -91,9 +91,110 @@ a {
   gap: 14px;
 }
 
+.tro-briefing {
+  flex: 1 1 420px;
+  min-width: 0;
+}
+
 .topbar-actions {
   flex-wrap: wrap;
   justify-content: flex-end;
+}
+
+.tro-briefing-card {
+  display: grid;
+  gap: 8px;
+  min-height: 74px;
+  padding: 10px 14px;
+  border-radius: 22px;
+  border: 1px solid rgba(21, 32, 41, 0.08);
+  background:
+    linear-gradient(135deg, rgba(198, 220, 255, 0.18), rgba(239, 191, 118, 0.18)),
+    rgba(255, 255, 255, 0.84);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.72);
+}
+
+.tro-briefing-card.is-loading {
+  opacity: 0.82;
+}
+
+.tro-briefing-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.tro-briefing-head strong {
+  font-family: var(--font-display);
+  font-size: 0.88rem;
+}
+
+.tro-briefing-head span {
+  color: rgba(21, 32, 41, 0.54);
+  font-size: 0.75rem;
+}
+
+.tro-briefing-empty {
+  margin: 0;
+  color: rgba(21, 32, 41, 0.62);
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+
+.tro-briefing-marquee {
+  overflow: hidden;
+}
+
+.tro-briefing-track {
+  display: flex;
+  gap: 10px;
+  width: max-content;
+}
+
+.tro-briefing-track.is-animated {
+  animation: tro-briefing-marquee var(--tro-briefing-duration, 18s) linear infinite;
+}
+
+.tro-briefing-item {
+  display: grid;
+  gap: 4px;
+  min-width: min(34rem, 72vw);
+  max-width: min(34rem, 72vw);
+  padding: 8px 10px;
+  border-radius: 16px;
+  border: 1px solid rgba(21, 32, 41, 0.08);
+  background: rgba(255, 255, 255, 0.9);
+  text-decoration: none;
+  color: var(--ink-900);
+}
+
+.tro-briefing-item:hover {
+  border-color: rgba(39, 95, 165, 0.24);
+  box-shadow: 0 10px 20px rgba(39, 95, 165, 0.08);
+}
+
+.tro-briefing-source,
+.tro-briefing-summary {
+  color: rgba(21, 32, 41, 0.6);
+  font-size: 0.75rem;
+  line-height: 1.4;
+}
+
+.tro-briefing-item strong {
+  font-size: 0.83rem;
+  line-height: 1.45;
+  font-weight: 700;
+}
+
+@keyframes tro-briefing-marquee {
+  from {
+    transform: translateX(0);
+  }
+
+  to {
+    transform: translateX(-50%);
+  }
 }
 
 .brand-mark {
@@ -812,6 +913,15 @@ a {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 10px;
+  }
+
+  .tro-briefing {
+    width: 100%;
+  }
+
+  .tro-briefing-item {
+    min-width: min(78vw, 26rem);
+    max-width: min(78vw, 26rem);
   }
 
   .topbar-actions .action-button.secondary {
