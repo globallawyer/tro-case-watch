@@ -233,9 +233,24 @@ function formatPlaintiffBrandValue(item) {
   return `${baseValue} · ${caseTypeLabel}`;
 }
 
+function isWorldtroCase(item) {
+  const primarySource = String(item?.primary_source || "").trim().toLowerCase();
+  const sourceCaseKey = String(item?.source_case_key || "").trim().toLowerCase();
+  return primarySource === "worldtro" || sourceCaseKey.startsWith("worldtro:") || sourceCaseKey.startsWith("priority:");
+}
+
+function formatCaseListTitle(item) {
+  if (isWorldtroCase(item)) {
+    return formatPlaintiffBrandValue(item);
+  }
+
+  const insights = item.insights || {};
+  return insights.brand_name || insights.plaintiff_name || item.case_name || "未命名案件";
+}
+
 function renderCaseRow(item) {
   const insights = item.insights || {};
-  const plaintiff = insights.brand_name || insights.plaintiff_name || item.case_name || "未命名案件";
+  const plaintiff = formatCaseListTitle(item);
   const lawFirm = insights.lead_law_firm || "待识别";
   const summary =
     insights.narrative || item.recent_activity_summary || "当前没有抓到可展示的 docket 摘要。";
