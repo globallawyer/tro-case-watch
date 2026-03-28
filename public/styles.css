@@ -1022,8 +1022,8 @@ a {
 
   .hero-copy h1 {
     max-width: none;
-    font-size: clamp(1.74rem, 9vw, 2.5rem);
-    line-height: 1.04;
+    font-size: clamp(0.96rem, 4.8vw, 1.28rem);
+    line-height: 1.12;
   }
 
   .lookup-form {
