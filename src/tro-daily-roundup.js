@@ -572,6 +572,7 @@ const HEADLINE_ALIAS_RULES = [
   { pattern: /lionel messi|梅西/i, label: "足球巨星梅西" },
   { pattern: /casio|卡西欧/i, label: "卡西欧" },
   { pattern: /hatsune miku|初音未来/i, label: "初音未来" },
+  { pattern: /sega/i, label: "Sega游戏IP" },
   { pattern: /mattel|美泰/i, label: "美泰" },
   { pattern: /levi strauss|levi'?s|李维斯/i, label: "李维斯" },
   { pattern: /nike|耐克/i, label: "耐克" },
@@ -688,18 +689,24 @@ function pickHeadlineSubject(group) {
 }
 
 function inferFocus(group) {
-  const haystack = group.articles.map((item) => `${item.title} ${item.summary} ${item.bodyText}`).join(" ").toLowerCase();
-  if (/和解|settlement/i.test(haystack)) {
-    return "和解与应诉进展";
+  const haystack = group.articles.map((item) => `${item.title || ""} ${item.summary || ""}`).join(" ").toLowerCase();
+  if (/卖家|seller|排查|下架|高危链接|预警/i.test(haystack)) {
+    return "卖家排查与链接风险";
+  }
+  if (/(\d+)\s*个卖家|踩坑/i.test(haystack)) {
+    return "卖家踩坑风险";
   }
   if (/冻结|restraining|injunction|temporary restraining order|tro/i.test(haystack)) {
     return "冻结与 TRO 动态";
   }
-  if (/起诉|立案|complaint|filed/i.test(haystack)) {
-    return "立案与起诉动态";
-  }
   if (/撤诉|dismiss|解除冻结|解冻/i.test(haystack)) {
     return "撤诉与解冻动向";
+  }
+  if (/和解|settlement|stipulation/i.test(haystack)) {
+    return "和解与应诉进展";
+  }
+  if (/起诉|立案|complaint|filed|lawsuit|维权/i.test(haystack)) {
+    return "立案与起诉动态";
   }
   return "案件进展";
 }
