@@ -8,7 +8,7 @@ import { PRIORITY_FEED_PROVIDER_KEY, PRIORITY_FEED_SOURCE } from "./priority-fee
 
 function parseArgs(argv = []) {
   const result = {
-    years: [2026, 2025],
+    years: [2026],
     limitPerYear: 80,
     sampleSize: 4000,
     dryRun: false,
@@ -26,7 +26,7 @@ function parseArgs(argv = []) {
       result.years = String(next)
         .split(",")
         .map((value) => Number.parseInt(value.trim(), 10))
-        .filter((value) => Number.isFinite(value) && value >= 2025);
+        .filter((value) => Number.isFinite(value) && value >= 2026);
       index += 1;
       continue;
     }
@@ -75,7 +75,7 @@ function parseArgs(argv = []) {
   }
 
   if (!result.years.length) {
-    result.years = [2026, 2025];
+    result.years = [2026];
   }
 
   return result;
@@ -175,7 +175,8 @@ const args = parseArgs(process.argv.slice(2));
 const allowProviders = new Set(normalizeProviders(args.providers));
 const store = new Store(config.dbPath);
 const gapPayload = store.getCoverageGapCases(Math.max(args.sampleSize, args.limitPerYear * args.years.length * 8), {
-  recentWindowDays: args.recentWindowDays
+  recentWindowDays: args.recentWindowDays,
+  startDate: `${Math.min(...args.years)}-01-01`
 });
 const candidatePool = Array.isArray(gapPayload?.items) ? gapPayload.items : [];
 const candidateIds = candidatePool

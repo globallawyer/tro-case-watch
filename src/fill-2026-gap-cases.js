@@ -21,7 +21,7 @@ function parseArgs(argv = []) {
     const next = argv[index + 1];
 
     if (arg === "--year" && next) {
-      result.year = Math.max(Number.parseInt(next, 10) || 2026, 2025);
+      result.year = Math.max(Number.parseInt(next, 10) || 2026, 2026);
       index += 1;
       continue;
     }
@@ -98,7 +98,8 @@ const allowProviders = new Set(normalizeProviders(args.providers));
 const store = new Store(config.dbPath);
 
 const gapPayload = store.getCoverageGapCases(Math.max(args.sampleSize, args.limit * 6), {
-  recentWindowDays: 365
+  recentWindowDays: 365,
+  startDate: `${args.year}-01-01`
 });
 const candidatePool = Array.isArray(gapPayload?.items) ? gapPayload.items : [];
 const candidateIds = candidatePool

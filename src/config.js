@@ -195,6 +195,7 @@ export const config = {
     bootstrapSyncDelayMs: envInt("BOOTSTRAP_SYNC_DELAY_MS", 2 * 60 * 1000),
     bootstrapBackfillDelayMs: envInt("BOOTSTRAP_BACKFILL_DELAY_MS", 5 * 60 * 1000),
     startDate: env("START_DATE", "2025-01-01"),
+    discoveryStartDate: env("SYNC_DISCOVERY_START_DATE", "2026-01-01"),
     pollIntervalMs: envInt("POLL_INTERVAL_MS", 30 * 60 * 1000),
     backfillIntervalMs: envInt("BACKFILL_INTERVAL_MS", 60 * 60 * 1000),
     discoveryMaxPagesPerRun: envInt("DISCOVERY_MAX_PAGES_PER_RUN", 3),
@@ -230,8 +231,7 @@ export const config = {
       6
     ),
     discoveryPages: envAnyList(["PRIORITY_FEED_DISCOVERY_PAGES", buildLegacyPriorityFeedEnvKey("DISCOVERY_PAGES")], [
-      "/2026/",
-      "/2025nianzuixintroanjian/"
+      "/2026/"
     ])
   },
   courtFeeds: {

@@ -206,6 +206,10 @@ function formatBreakdown(items = []) {
   return items.map((item) => `${item.source}: ${item.count}`).join(" | ");
 }
 
+function formatSyncModeSummary(summary = {}) {
+  return `运行 ${Number(summary.runCount || 0)} 次 / 案件 ${Number(summary.casesWritten || 0)} / docket ${Number(summary.docketEntriesWritten || 0)}`;
+}
+
 function buildMessage(payload) {
   const subject = `TRO Tracker 3小时快报 - ${payload.startLabel} 至 ${payload.endLabel}`;
   const topLines = payload.topCases.length
@@ -219,6 +223,8 @@ function buildMessage(payload) {
     `窗口：${payload.startLabel} 至 ${payload.endLabel}`,
     `新增案件：${payload.newCasesCount}`,
     `新增 docket entries：${payload.newDocketEntriesCount}`,
+    `实时增量（recent任务）：${formatSyncModeSummary(payload.syncBreakdown?.recent)}`,
+    `历史补写（backfill任务）：${formatSyncModeSummary(payload.syncBreakdown?.backfill)}`,
     `案件新增来源：${formatBreakdown(payload.caseSources)}`,
     `docket 新增来源：${formatBreakdown(payload.docketSources)}`,
     "",
@@ -233,6 +239,8 @@ function buildMessage(payload) {
       <p>
         <strong>新增案件：</strong>${payload.newCasesCount}<br>
         <strong>新增 docket entries：</strong>${payload.newDocketEntriesCount}<br>
+        <strong>实时增量（recent任务）：</strong>${escapeHtml(formatSyncModeSummary(payload.syncBreakdown?.recent))}<br>
+        <strong>历史补写（backfill任务）：</strong>${escapeHtml(formatSyncModeSummary(payload.syncBreakdown?.backfill))}<br>
         <strong>案件新增来源：</strong>${escapeHtml(formatBreakdown(payload.caseSources))}<br>
         <strong>docket 新增来源：</strong>${escapeHtml(formatBreakdown(payload.docketSources))}
       </p>
@@ -302,6 +310,7 @@ async function main() {
       ...bounds,
       newCasesCount,
       newDocketEntriesCount,
+      syncBreakdown: store.getSyncIngestBreakdown({ startIso: bounds.startIso, endIso: bounds.endIso }),
       caseSources: getSourceBreakdown(store.db, "cases", bounds.startIso, bounds.endIso),
       docketSources: getSourceBreakdown(store.db, "docket_entries", bounds.startIso, bounds.endIso),
       topCases: getTopCases(store, bounds.startIso, bounds.endIso, args.caseLimit)

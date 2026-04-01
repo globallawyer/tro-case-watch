@@ -48,6 +48,10 @@ function hasCivilCaseDocket(caseRow = {}) {
   return /\b\d{2}-cv-\d{3,6}\b/i.test(String(caseRow.docket_number || ""));
 }
 
+function getDiscoveryStartDate(config = {}) {
+  return config?.sync?.discoveryStartDate || config?.sync?.startDate || "2026-01-01";
+}
+
 function shouldAttemptPriorityFeedForCase(caseRow = {}, { force = false } = {}) {
   if (!caseRow || !hasCivilCaseDocket(caseRow)) {
     return false;
@@ -905,7 +909,7 @@ export class CaseSyncService {
     for (const query of queries) {
       const payload = await this.courtListener.search({
         query,
-        startDate: this.config.sync.startDate,
+        startDate: getDiscoveryStartDate(this.config),
         pageSize: 20
       });
 
@@ -1031,7 +1035,7 @@ export class CaseSyncService {
         courtId: valueOf(item.courtId),
         courtName: valueOf(item.courtName),
         docketNumber: valueOf(item.caseNumberFull),
-        startDate: this.config.sync.startDate
+        startDate: getDiscoveryStartDate(this.config)
       });
       const tags = this.classifyPacerDiscoveryCase(item);
       if (!this.shouldTrackPacerDiscoveryCase(item, existingCase, tags)) {
@@ -1093,7 +1097,7 @@ export class CaseSyncService {
   }
 
   buildCourtFeedCaseIndex() {
-    const rows = this.store.getHydratedCases(this.config.sync.startDate);
+    const rows = this.store.getHydratedCases(getDiscoveryStartDate(this.config));
     const index = new Map();
 
     for (const row of rows) {
@@ -1604,7 +1608,7 @@ export class CaseSyncService {
       const existingCase =
         caseIndex.get(primaryKey) ||
         caseIndex.get(fallbackKey) ||
-        ((!item.courtId && !item.courtName) ? this.store.findCaseByDocketNumber(item.docketNumber, this.config.sync.startDate) : null) ||
+        ((!item.courtId && !item.courtName) ? this.store.findCaseByDocketNumber(item.docketNumber, getDiscoveryStartDate(this.config)) : null) ||
         null;
       const tags = this.augmentLawFirmTags(item, this.classifyLawFirmItem(item));
 
@@ -2048,7 +2052,7 @@ export class CaseSyncService {
           courtId: caseRow.court_id,
           courtName: caseRow.court_name,
           docketNumber: caseRow.docket_number,
-          startDate: this.config.sync.startDate
+          startDate: getDiscoveryStartDate(this.config)
         });
 
       if (!refreshedCase?.courtlistener_docket_id) {
@@ -2356,7 +2360,8 @@ export class CaseSyncService {
         staleAfterHours: this.config.pacerMonitor.staleAfterHours,
         blockedRetryAfterHours: this.config.pacerMonitor.blockedRetryAfterHours,
         notFoundRetryAfterHours: this.config.pacerMonitor.notFoundRetryAfterHours,
-        recentWindowDays: this.config.pacerMonitor.recentWindowDays
+        recentWindowDays: this.config.pacerMonitor.recentWindowDays,
+        startDate: getDiscoveryStartDate(this.config)
       });
 
       let syncedCases = 0;
@@ -2429,7 +2434,8 @@ export class CaseSyncService {
       const candidatePool = this.store.getCasesNeedingSupplementalDocketSync(
         Math.max(maxCases * 8, maxCases),
         {
-          recentWindowDays: Math.max(this.config.pacerMonitor.recentWindowDays || 0, 120)
+          recentWindowDays: Math.max(this.config.pacerMonitor.recentWindowDays || 0, 120),
+          startDate: getDiscoveryStartDate(this.config)
         }
       );
 
@@ -2517,7 +2523,8 @@ export class CaseSyncService {
       const candidatePool = this.store.getCasesNeedingSupplementalDocketSync(
         Math.max(maxCases * 8, maxCases),
         {
-          recentWindowDays: Math.max(this.config.pacerMonitor.recentWindowDays || 0, 120)
+          recentWindowDays: Math.max(this.config.pacerMonitor.recentWindowDays || 0, 120),
+          startDate: getDiscoveryStartDate(this.config)
         }
       );
 
@@ -3186,7 +3193,7 @@ export class CaseSyncService {
       const payload = await this.courtListener.search({
         query: preset.query,
         cursorUrl,
-        startDate: this.config.sync.startDate
+        startDate: getDiscoveryStartDate(this.config)
       });
 
       pagesFetched += 1;
@@ -3229,7 +3236,7 @@ export class CaseSyncService {
         courtId: valueOf(result.court_id),
         courtName: valueOf(result.court),
         docketNumber: valueOf(result.docketNumber),
-        startDate: this.config.sync.startDate
+        startDate: getDiscoveryStartDate(this.config)
       });
 
       if (!shouldTrackCourtListenerResult(result, existingCase, tags)) {

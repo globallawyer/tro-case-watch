@@ -42,6 +42,50 @@ function toJson(value, fallback = null) {
   return JSON.stringify(value ?? null);
 }
 
+function toCount(value) {
+  const parsed = Number(value || 0);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function summarizeSyncRunStats(stats = {}) {
+  return {
+    casesWritten:
+      toCount(stats.casesUpserted) +
+      toCount(stats.courtFeedCasesUpserted) +
+      toCount(stats.recentFilingsCasesUpserted) +
+      toCount(stats.pacerCasesUpserted) +
+      toCount(stats.lawFirmCasesUpserted),
+    docketEntriesWritten:
+      toCount(stats.docketEntriesUpserted) +
+      toCount(stats.courtFeedEntriesUpserted) +
+      toCount(stats.lawFirmEntriesUpserted),
+    lookupsTriggered:
+      toCount(stats.courtFeedLookups) +
+      toCount(stats.recentFilingsLookups) +
+      toCount(stats.lawFirmLookups),
+    priorityFeedCasesSynced: toCount(stats.priorityFeedCasesSynced),
+    docketCasesSynced: toCount(stats.docketCasesSynced),
+    docketAlarmCasesSynced: toCount(stats.docketAlarmCasesSynced),
+    uniCourtCasesSynced: toCount(stats.uniCourtCasesSynced),
+    translationsApplied: toCount(stats.translationsApplied)
+  };
+}
+
+function emptySyncRunBreakdown(label) {
+  return {
+    label,
+    runCount: 0,
+    casesWritten: 0,
+    docketEntriesWritten: 0,
+    lookupsTriggered: 0,
+    priorityFeedCasesSynced: 0,
+    docketCasesSynced: 0,
+    docketAlarmCasesSynced: 0,
+    uniCourtCasesSynced: 0,
+    translationsApplied: 0
+  };
+}
+
 function normalizeSourceUrl(value) {
   const raw = String(value || "").trim();
   if (!raw) {
@@ -3237,7 +3281,7 @@ export class Store {
     return selected.slice(0, limit);
   }
 
-  getCasesNeedingSupplementalDocketSync(limit, { recentWindowDays = 120 } = {}) {
+  getCasesNeedingSupplementalDocketSync(limit, { recentWindowDays = 120, startDate = "2025-01-01" } = {}) {
     const recentCutoff = Date.now() - recentWindowDays * 24 * 60 * 60 * 1000;
     const recentCutoffIso = new Date(recentCutoff).toISOString();
     const candidatePoolSize = Math.max(limit * 120, 360);
@@ -3246,7 +3290,7 @@ export class Store {
       .prepare(`
         SELECT *
         FROM cases
-        WHERE date(date_filed) >= date('2025-01-01')
+        WHERE date(date_filed) >= date(?)
           AND docket_number IS NOT NULL
           AND TRIM(docket_number) <> ''
           AND (
@@ -3258,7 +3302,7 @@ export class Store {
         ORDER BY COALESCE(latest_docket_filed_at, date_filed, updated_at) DESC
         LIMIT ?
       `)
-      .all(recentCutoffIso, candidatePoolSize)
+      .all(String(startDate || "2025-01-01"), recentCutoffIso, candidatePoolSize)
       .map(buildCaseView);
     const entryCounts = this.getEntryCoverageForCaseIds(candidateRows.map((row) => row.id));
 
@@ -3372,7 +3416,8 @@ export class Store {
       staleAfterHours = 24,
       blockedRetryAfterHours = 12,
       notFoundRetryAfterHours = 6,
-      recentWindowDays = 45
+      recentWindowDays = 45,
+      startDate = "2025-01-01"
     } = {}
   ) {
     const staleBefore = Date.now() - staleAfterHours * 60 * 60 * 1000;
@@ -3386,7 +3431,7 @@ export class Store {
       .prepare(`
         SELECT *
         FROM cases
-        WHERE date(date_filed) >= date('2025-01-01')
+        WHERE date(date_filed) >= date(?)
           AND docket_number IS NOT NULL
           AND TRIM(docket_number) <> ''
           AND (
@@ -3396,7 +3441,7 @@ export class Store {
         ORDER BY COALESCE(latest_docket_filed_at, date_filed, updated_at) DESC
         LIMIT ?
       `)
-      .all(recentCutoffIso, candidatePoolSize)
+      .all(String(startDate || "2025-01-01"), recentCutoffIso, candidatePoolSize)
       .map(buildCaseView);
     const entryCounts = this.getEntryCoverageForCaseIds(candidateRows.map((row) => row.id));
 
@@ -3517,7 +3562,7 @@ export class Store {
       .map((item) => item.row);
   }
 
-  getCoverageGapCases(limit = 25, { recentWindowDays = 90 } = {}) {
+  getCoverageGapCases(limit = 25, { recentWindowDays = 90, startDate = "2025-01-01" } = {}) {
     const recentCutoff = Date.now() - recentWindowDays * 24 * 60 * 60 * 1000;
     const recentCutoffIso = new Date(recentCutoff).toISOString();
     const candidatePoolSize = Math.max(limit * 80, 300);
@@ -3526,7 +3571,7 @@ export class Store {
       .prepare(`
         SELECT *
         FROM cases
-        WHERE date(date_filed) >= date('2025-01-01')
+        WHERE date(date_filed) >= date(?)
           AND (
             tags_marker LIKE '%|tro|%'
             OR tags_marker LIKE '%|schedule_a|%'
@@ -3536,7 +3581,7 @@ export class Store {
         ORDER BY COALESCE(latest_docket_filed_at, date_filed, updated_at) DESC
         LIMIT ?
       `)
-      .all(recentCutoffIso, candidatePoolSize)
+      .all(String(startDate || "2025-01-01"), recentCutoffIso, candidatePoolSize)
       .map(buildCaseView);
 
     const entryCounts = this.getEntryCoverageForCaseIds(candidateRows.map((row) => row.id));
@@ -3925,6 +3970,43 @@ export class Store {
     return value;
   }
 
+  getSyncIngestBreakdown({ startIso, endIso, provider = "system" } = {}) {
+    const recent = emptySyncRunBreakdown("recent");
+    const backfill = emptySyncRunBreakdown("backfill");
+    const total = emptySyncRunBreakdown("total");
+    const rows = this.db
+      .prepare(`
+        SELECT mode, started_at, finished_at, stats_json
+        FROM sync_runs
+        WHERE provider = ?
+          AND status = 'succeeded'
+          AND started_at < ?
+          AND COALESCE(finished_at, started_at) >= ?
+          AND mode IN ('recent', 'backfill')
+        ORDER BY started_at ASC
+      `)
+      .all(provider, endIso, startIso);
+
+    for (const row of rows) {
+      const target = row.mode === "backfill" ? backfill : recent;
+      const summary = summarizeSyncRunStats(parseJson(row.stats_json, {}));
+
+      for (const bucket of [target, total]) {
+        bucket.runCount += 1;
+        bucket.casesWritten += summary.casesWritten;
+        bucket.docketEntriesWritten += summary.docketEntriesWritten;
+        bucket.lookupsTriggered += summary.lookupsTriggered;
+        bucket.priorityFeedCasesSynced += summary.priorityFeedCasesSynced;
+        bucket.docketCasesSynced += summary.docketCasesSynced;
+        bucket.docketAlarmCasesSynced += summary.docketAlarmCasesSynced;
+        bucket.uniCourtCasesSynced += summary.uniCourtCasesSynced;
+        bucket.translationsApplied += summary.translationsApplied;
+      }
+    }
+
+    return { recent, backfill, total };
+  }
+
   getDailyEmailReport({ startIso, endIso, caseLimit = 12 } = {}) {
     const newCasesCount = Number(
       this.db
@@ -4081,6 +4163,7 @@ export class Store {
     return {
       newCasesCount,
       newDocketEntriesCount,
+      syncBreakdown: this.getSyncIngestBreakdown({ startIso, endIso }),
       docketSources,
       rssDocketEntriesCount,
       rssItems,

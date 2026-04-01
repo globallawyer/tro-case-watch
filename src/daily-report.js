@@ -101,6 +101,10 @@ function summarizeRssItem(item, index) {
   };
 }
 
+function formatSyncModeSummary(summary = {}) {
+  return `运行 ${Number(summary.runCount || 0)} 次 / 案件 ${Number(summary.casesWritten || 0)} / docket ${Number(summary.docketEntriesWritten || 0)}`;
+}
+
 export class DailyEmailReportService {
   constructor({ config, store }) {
     this.config = config;
@@ -230,12 +234,16 @@ export class DailyEmailReportService {
     const itemBlocks = items.map(summarizeItem);
     const rssItems = Array.isArray(report.rssItems) ? report.rssItems : [];
     const rssBlocks = rssItems.map(summarizeRssItem);
+    const recentBreakdown = report.syncBreakdown?.recent || {};
+    const backfillBreakdown = report.syncBreakdown?.backfill || {};
     const textLines = [
       `TRO Tracker 日报`,
       `日期：${localDate}`,
       ``,
       `当日新增案件：${report.newCasesCount}`,
       `当日新增 docket entries：${report.newDocketEntriesCount}`,
+      `实时增量（recent任务）：${formatSyncModeSummary(recentBreakdown)}`,
+      `历史补写（backfill任务）：${formatSyncModeSummary(backfillBreakdown)}`,
       `docket 新增来源：${formatBreakdown(report.docketSources)}`,
       `其中官方法院 RSS 补入：${Number(report.rssDocketEntriesCount || 0)}`,
       ``,
@@ -252,6 +260,8 @@ export class DailyEmailReportService {
         <p><strong>日期：</strong>${escapeHtml(localDate)}</p>
         <p><strong>当日新增案件：</strong>${report.newCasesCount}<br>
         <strong>当日新增 docket entries：</strong>${report.newDocketEntriesCount}<br>
+        <strong>实时增量（recent任务）：</strong>${escapeHtml(formatSyncModeSummary(recentBreakdown))}<br>
+        <strong>历史补写（backfill任务）：</strong>${escapeHtml(formatSyncModeSummary(backfillBreakdown))}<br>
         <strong>docket 新增来源：</strong>${escapeHtml(formatBreakdown(report.docketSources))}<br>
         <strong>其中官方法院 RSS 补入：</strong>${Number(report.rssDocketEntriesCount || 0)}</p>
         <h3>官方法院 RSS 补入明细</h3>

@@ -24,7 +24,7 @@ function parseArgs(argv = []) {
     const next = argv[index + 1];
 
     if (arg === "--year" && next) {
-      result.year = Math.max(Number.parseInt(next, 10) || 2026, 2025);
+      result.year = Math.max(Number.parseInt(next, 10) || 2026, 2026);
       index += 1;
       continue;
     }
@@ -235,11 +235,11 @@ const worldtroRows = store.db
     SELECT id, court_id, docket_number, case_name, date_filed, docket_count, latest_docket_number, latest_docket_filed_at
     FROM cases
     WHERE lower(primary_source) = lower(?)
-      AND date(date_filed) >= date('2025-01-01')
+      AND date(date_filed) >= date(?)
       AND docket_number IS NOT NULL
       AND trim(docket_number) <> ''
   `)
-  .all(PRIORITY_FEED_SOURCE);
+  .all(PRIORITY_FEED_SOURCE, `${args.year}-01-01`);
 
 const worldtroByDocket = new Map();
 for (const row of worldtroRows) {
