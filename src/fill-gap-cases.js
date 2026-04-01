@@ -8,7 +8,7 @@ import { PRIORITY_FEED_PROVIDER_KEY, PRIORITY_FEED_SOURCE } from "./priority-fee
 
 function parseArgs(argv = []) {
   const result = {
-    years: [2026],
+    years: [2026, 2025],
     limitPerYear: 80,
     sampleSize: 4000,
     dryRun: false,
@@ -26,7 +26,7 @@ function parseArgs(argv = []) {
       result.years = String(next)
         .split(",")
         .map((value) => Number.parseInt(value.trim(), 10))
-        .filter((value) => Number.isFinite(value) && value >= 2026);
+        .filter((value) => Number.isFinite(value) && value >= 2025);
       index += 1;
       continue;
     }
@@ -75,7 +75,7 @@ function parseArgs(argv = []) {
   }
 
   if (!result.years.length) {
-    result.years = [2026];
+    result.years = [2026, 2025];
   }
 
   return result;

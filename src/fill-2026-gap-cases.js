@@ -21,7 +21,7 @@ function parseArgs(argv = []) {
     const next = argv[index + 1];
 
     if (arg === "--year" && next) {
-      result.year = Math.max(Number.parseInt(next, 10) || 2026, 2026);
+      result.year = Math.max(Number.parseInt(next, 10) || 2026, 2025);
       index += 1;
       continue;
     }
