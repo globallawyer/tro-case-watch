@@ -236,6 +236,46 @@ const COURTLISTENER_NEGATIVE_TERMS = {
     "tort"
   ]
 };
+const COURTFEED_NEGATIVE_TERMS = {
+  bankruptcy: COURTLISTENER_NEGATIVE_TERMS.bankruptcy,
+  habeas: COURTLISTENER_NEGATIVE_TERMS.habeas,
+  immigration: COURTLISTENER_NEGATIVE_TERMS.immigration,
+  injury: COURTLISTENER_NEGATIVE_TERMS.injury,
+  criminal: [
+    "united states of america v",
+    "usa v",
+    "indictment",
+    "criminal complaint",
+    "arraignment",
+    "sentencing",
+    "supervised release",
+    "probation violation",
+    "search warrant",
+    "forfeiture"
+  ],
+  socialSecurity: [
+    "social security",
+    "supplemental security income",
+    "disability insurance benefits",
+    "commissioner of social security",
+    "ssi"
+  ],
+  labor: [
+    "fair labor standards act",
+    "flsa",
+    "employment discrimination",
+    "wrongful termination",
+    "overtime wages",
+    "wage and hour"
+  ],
+  prisoner: [
+    "civil rights complaint",
+    "prison conditions",
+    "detention center",
+    "correctional officer",
+    "jail"
+  ]
+};
 const COURTLISTENER_IP_CAUSE_PATTERNS = [/\b15:1114\b/i, /\b15:1125\b/i, /\b17:501\b/i, /\b35:271\b/i];
 
 function normalizeLookupText(value) {
@@ -614,6 +654,43 @@ function shouldTrackCourtListenerResult(result, existingCase, tags) {
   }
 
   return hasTargetSignals({ text, tags, cause, natureOfSuit });
+}
+
+function buildCourtFeedTrackingContext(item = {}, existingCase = null) {
+  return {
+    docketNumber: String(valueOf(item.docketNumber, existingCase?.docket_number) || ""),
+    cause: normalizeText(existingCase?.cause || ""),
+    natureOfSuit: normalizeText(existingCase?.nature_of_suit || ""),
+    court: normalizeText(valueOf(item.courtName, existingCase?.court_name) || ""),
+    text: normalizeText([
+      item.title,
+      item.caseName,
+      item.documentType,
+      item.description,
+      item.rawDescription,
+      item.courtName,
+      item.docketNumber,
+      existingCase?.case_name,
+      existingCase?.cause,
+      existingCase?.nature_of_suit
+    ].filter(Boolean).join(" | "))
+  };
+}
+
+function hasCourtFeedNegativeSignals(item, existingCase = null) {
+  const { docketNumber, court, text } = buildCourtFeedTrackingContext(item, existingCase);
+  return (
+    docketNumber.toLowerCase().includes("-bk-") ||
+    court.includes("bankruptcy") ||
+    includesAny(text, COURTFEED_NEGATIVE_TERMS.bankruptcy) ||
+    includesAny(text, COURTFEED_NEGATIVE_TERMS.habeas) ||
+    includesAny(text, COURTFEED_NEGATIVE_TERMS.immigration) ||
+    includesAny(text, COURTFEED_NEGATIVE_TERMS.injury) ||
+    includesAny(text, COURTFEED_NEGATIVE_TERMS.criminal) ||
+    includesAny(text, COURTFEED_NEGATIVE_TERMS.socialSecurity) ||
+    includesAny(text, COURTFEED_NEGATIVE_TERMS.labor) ||
+    includesAny(text, COURTFEED_NEGATIVE_TERMS.prisoner)
+  );
 }
 
 export class CaseSyncService {
@@ -1314,15 +1391,21 @@ export class CaseSyncService {
       return false;
     }
 
+    if (hasCourtFeedNegativeSignals(item, existingCase)) {
+      return false;
+    }
+
+    const { text, cause, natureOfSuit } = buildCourtFeedTrackingContext(item, existingCase);
+
     if (existingCase) {
-      return true;
+      return hasTargetSignals({ text, tags, cause, natureOfSuit, existingCase }) || this.matchesCourtFeedWatchKeywords(item);
     }
 
     if (this.config.courtFeeds.requireKeywordHit && this.matchesCourtFeedWatchKeywords(item)) {
       return true;
     }
 
-    return tags.length > 0;
+    return hasTargetSignals({ text, tags, cause, natureOfSuit });
   }
 
   ingestCourtFeedItems(feedResult, caseIndex) {

@@ -268,3 +268,4 @@ const payload = {
 };
 
 console.log(JSON.stringify(payload, null, 2));
+db.close();
