@@ -1241,15 +1241,17 @@ export class CaseSyncService {
     );
   }
 
-  ingestRecentFilingsItems(sourceResult, caseIndex) {
+  ingestRecentFilingsItems(sourceResult, caseIndex, { preexistingCaseIds = new Set() } = {}) {
     let casesUpserted = 0;
     const lookupCandidates = new Map();
+    const followUpCandidates = new Map();
     const timestamp = new Date().toISOString();
 
     for (const item of sourceResult.items || []) {
       const primaryKey = buildCourtDocketKey(item.courtId, item.docketNumber);
       const fallbackKey = buildCourtDocketKey(item.courtName, item.docketNumber);
       const existingCase = caseIndex.get(primaryKey) || caseIndex.get(fallbackKey) || null;
+      const existedBeforeRun = Boolean(existingCase?.id) && preexistingCaseIds.has(Number(existingCase.id));
       const tags = this.classifyRecentFilingsItem(item);
 
       if (!this.shouldTrackRecentFilingsItem(item, existingCase, tags)) {
@@ -1328,6 +1330,11 @@ export class CaseSyncService {
 
       casesUpserted += 1;
 
+      if (existedBeforeRun) {
+        const followUpCandidate = this.buildRecentFilingsCrossSourceFollowUpCandidate(item, existingCase, savedCase, tags);
+        this.mergeCrossSourceFollowUpCandidate(followUpCandidates, followUpCandidate);
+      }
+
       for (const key of [primaryKey, fallbackKey].filter(Boolean)) {
         caseIndex.set(key, savedCase);
       }
@@ -1348,7 +1355,8 @@ export class CaseSyncService {
 
     return {
       casesUpserted,
-      lookupCandidates
+      lookupCandidates,
+      followUpCandidates
     };
   }
 
@@ -1408,16 +1416,19 @@ export class CaseSyncService {
     return hasTargetSignals({ text, tags, cause, natureOfSuit });
   }
 
-  buildCourtFeedCrossSourceFollowUpCandidate(item, existingCase, savedCase, tags, savedEntry) {
-    if (!existingCase?.id || !savedCase?.id || !savedEntry || !hasCivilCaseDocket(savedCase)) {
+  buildCrossSourceFollowUpCandidate({
+    existingCase,
+    savedCase,
+    tags = [],
+    filedAt = null,
+    text = "",
+    cause = "",
+    natureOfSuit = "",
+    hasSignal = false
+  } = {}) {
+    if (!existingCase?.id || !savedCase?.id || !hasCivilCaseDocket(savedCase) || !hasSignal) {
       return null;
     }
-
-    if (hasCourtFeedNegativeSignals(item, savedCase)) {
-      return null;
-    }
-
-    const { text, cause, natureOfSuit } = buildCourtFeedTrackingContext(item, savedCase);
     const hasStrongTargetSignals = hasTargetSignals({
       text,
       tags,
@@ -1446,15 +1457,77 @@ export class CaseSyncService {
 
     return {
       caseId: Number(savedCase.id),
-      docketNumber: savedCase.docket_number || existingCase.docket_number || item.docketNumber || null,
-      filedAt: item.filedAt || savedCase.latest_docket_filed_at || new Date().toISOString(),
+      docketNumber: savedCase.docket_number || existingCase.docket_number || null,
+      filedAt: filedAt || savedCase.latest_docket_filed_at || new Date().toISOString(),
       priority,
       priorityFeed: hasPriorityFeedPath,
       courtListener: hasCourtListenerPath
     };
   }
 
-  mergeCourtFeedFollowUpCandidate(targetMap, candidate) {
+  buildCourtFeedCrossSourceFollowUpCandidate(item, existingCase, savedCase, tags, savedEntry) {
+    if (hasCourtFeedNegativeSignals(item, savedCase)) {
+      return null;
+    }
+
+    const { text, cause, natureOfSuit } = buildCourtFeedTrackingContext(item, savedCase);
+    return this.buildCrossSourceFollowUpCandidate({
+      existingCase,
+      savedCase,
+      tags,
+      filedAt: item.filedAt,
+      text,
+      cause,
+      natureOfSuit,
+      hasSignal: Boolean(savedEntry)
+    });
+  }
+
+  buildRecentFilingsCrossSourceFollowUpCandidate(item, existingCase, savedCase, tags) {
+    const text = normalizeText([
+      item.caseName,
+      item.courtName,
+      item.category,
+      item.natureOfSuit,
+      item.cause,
+      item.docketNumber
+    ].filter(Boolean).join(" | "));
+
+    return this.buildCrossSourceFollowUpCandidate({
+      existingCase,
+      savedCase,
+      tags,
+      filedAt: item.dateFiled,
+      text,
+      cause: normalizeText(item.cause || savedCase?.cause || ""),
+      natureOfSuit: normalizeText(item.natureOfSuit || savedCase?.nature_of_suit || ""),
+      hasSignal: Boolean(item.dateFiled)
+    });
+  }
+
+  buildLawFirmCrossSourceFollowUpCandidate(item, existingCase, savedCase, tags, latestEntry, itemDocketEntriesUpserted) {
+    const text = normalizeText([
+      item.title,
+      item.caseName,
+      item.summary,
+      item.lawFirm,
+      latestEntry?.description,
+      item.docketNumber
+    ].filter(Boolean).join(" | "));
+
+    return this.buildCrossSourceFollowUpCandidate({
+      existingCase,
+      savedCase,
+      tags,
+      filedAt: latestEntry?.filedAt || item.dateFiled,
+      text,
+      cause: normalizeText(savedCase?.cause || ""),
+      natureOfSuit: normalizeText(savedCase?.nature_of_suit || ""),
+      hasSignal: Number(itemDocketEntriesUpserted || 0) > 0 || Boolean(latestEntry?.filedAt || item.dateFiled)
+    });
+  }
+
+  mergeCrossSourceFollowUpCandidate(targetMap, candidate) {
     if (!candidate?.caseId) {
       return;
     }
@@ -1594,7 +1667,7 @@ export class CaseSyncService {
             tags,
             savedEntry
           );
-          this.mergeCourtFeedFollowUpCandidate(followUpCandidates, followUpCandidate);
+          this.mergeCrossSourceFollowUpCandidate(followUpCandidates, followUpCandidate);
         }
       }
 
@@ -1758,10 +1831,11 @@ export class CaseSyncService {
     return tags.length > 0;
   }
 
-  ingestLawFirmItems(sourceResult, caseIndex) {
+  ingestLawFirmItems(sourceResult, caseIndex, { preexistingCaseIds = new Set() } = {}) {
     let casesUpserted = 0;
     let docketEntriesUpserted = 0;
     const lookupCandidates = new Map();
+    const followUpCandidates = new Map();
     const timestamp = new Date().toISOString();
 
     for (const item of sourceResult.items || []) {
@@ -1772,6 +1846,7 @@ export class CaseSyncService {
         caseIndex.get(fallbackKey) ||
         ((!item.courtId && !item.courtName) ? this.store.findCaseByDocketNumber(item.docketNumber, getDiscoveryStartDate(this.config)) : null) ||
         null;
+      const existedBeforeRun = Boolean(existingCase?.id) && preexistingCaseIds.has(Number(existingCase.id));
       const tags = this.augmentLawFirmTags(item, this.classifyLawFirmItem(item));
 
       if (!this.shouldTrackLawFirmItem(item, existingCase, tags)) {
@@ -1870,6 +1945,7 @@ export class CaseSyncService {
       }
 
       casesUpserted += 1;
+      let itemDocketEntriesUpserted = 0;
 
       for (const entry of asArray(item.entries)) {
         const entryDigest = crypto
@@ -1912,7 +1988,20 @@ export class CaseSyncService {
 
         if (savedEntry) {
           docketEntriesUpserted += 1;
+          itemDocketEntriesUpserted += 1;
         }
+      }
+
+      if (existedBeforeRun) {
+        const followUpCandidate = this.buildLawFirmCrossSourceFollowUpCandidate(
+          item,
+          existingCase,
+          savedCase,
+          tags,
+          latestEntry,
+          itemDocketEntriesUpserted
+        );
+        this.mergeCrossSourceFollowUpCandidate(followUpCandidates, followUpCandidate);
       }
 
       for (const key of [primaryKey, fallbackKey].filter(Boolean)) {
@@ -1941,7 +2030,7 @@ export class CaseSyncService {
     };
   }
 
-  async followUpCourtFeedCases(followUpCandidates = new Map()) {
+  async followUpCrossSourceCases(followUpCandidates = new Map()) {
     const maxCasesPerRun = Math.max(0, Number(this.config.courtFeeds.crossSourceFollowUpMaxCasesPerRun || 0));
     if (!maxCasesPerRun || !followUpCandidates.size) {
       return {
@@ -2074,7 +2163,7 @@ export class CaseSyncService {
           }
 
           for (const [key, value] of ingest.followUpCandidates.entries()) {
-            this.mergeCourtFeedFollowUpCandidate(followUpCandidates, {
+            this.mergeCrossSourceFollowUpCandidate(followUpCandidates, {
               ...value,
               caseId: Number(key || value.caseId)
             });
@@ -2104,7 +2193,7 @@ export class CaseSyncService {
           : { lookupsTriggered: 0, imported: 0, matched: 0 };
       const followUpResult =
         mode === "recent" && followUpCandidates.size
-          ? await this.followUpCourtFeedCases(followUpCandidates)
+          ? await this.followUpCrossSourceCases(followUpCandidates)
           : {
               candidateCount: 0,
               triggeredCases: 0,
@@ -2149,7 +2238,11 @@ export class CaseSyncService {
       }
 
       const caseIndex = this.buildCourtFeedCaseIndex();
+      const preexistingCaseIds = new Set(
+        [...new Set([...caseIndex.values()].map((row) => Number(row.id)).filter((value) => Number.isFinite(value) && value > 0))]
+      );
       const lookupCandidates = new Map();
+      const followUpCandidates = new Map();
       let successfulSources = 0;
       let failedSources = 0;
       let casesUpserted = 0;
@@ -2157,13 +2250,20 @@ export class CaseSyncService {
       for (const source of this.recentFilings.listSources()) {
         try {
           const sourceResult = await this.recentFilings.fetchRecentForCourt(source);
-          const ingest = this.ingestRecentFilingsItems(sourceResult, caseIndex);
+          const ingest = this.ingestRecentFilingsItems(sourceResult, caseIndex, { preexistingCaseIds });
           casesUpserted += ingest.casesUpserted;
 
           for (const [key, value] of ingest.lookupCandidates.entries()) {
             if (!lookupCandidates.has(key)) {
               lookupCandidates.set(key, value);
             }
+          }
+
+          for (const [key, value] of ingest.followUpCandidates.entries()) {
+            this.mergeCrossSourceFollowUpCandidate(followUpCandidates, {
+              ...value,
+              caseId: Number(key || value.caseId)
+            });
           }
 
           successfulSources += 1;
@@ -2176,10 +2276,22 @@ export class CaseSyncService {
         mode === "recent" && lookupCandidates.size
           ? await this.lookupRecentFilingsCandidates(lookupCandidates)
           : { lookupsTriggered: 0, imported: 0, matched: 0 };
+      const followUpResult =
+        mode === "recent" && followUpCandidates.size
+          ? await this.followUpCrossSourceCases(followUpCandidates)
+          : {
+              candidateCount: 0,
+              triggeredCases: 0,
+              priorityFeedTriggered: 0,
+              priorityFeedSynced: 0,
+              courtListenerTriggered: 0,
+              courtListenerSynced: 0,
+              failedCases: 0
+            };
 
       const note =
         successfulSources || failedSources
-          ? `官方近期立案页本轮巡检 ${successfulSources} 个法院${failedSources ? `，${failedSources} 个法院页暂时失败` : ""}；补进 ${casesUpserted} 条案件线索${lookupResult.lookupsTriggered ? `，并触发 ${lookupResult.lookupsTriggered} 次 CourtListener 精确补抓` : ""}。`
+          ? `官方近期立案页本轮巡检 ${successfulSources} 个法院${failedSources ? `，${failedSources} 个法院页暂时失败` : ""}；补进 ${casesUpserted} 条案件线索${lookupResult.lookupsTriggered ? `，并触发 ${lookupResult.lookupsTriggered} 次 CourtListener 精确补抓` : ""}${followUpResult.triggeredCases ? `；另对 ${followUpResult.triggeredCases} 个旧目标案触发跨源跟进（worldtro ${followUpResult.priorityFeedTriggered}/${followUpResult.priorityFeedSynced}，CourtListener ${followUpResult.courtListenerTriggered}/${followUpResult.courtListenerSynced}${followUpResult.failedCases ? `，失败 ${followUpResult.failedCases}` : ""}）` : ""}。`
           : "官方近期立案页当前没有已配置法院。";
 
       return {
@@ -2187,6 +2299,7 @@ export class CaseSyncService {
         failedSources,
         casesUpserted,
         lookupsTriggered: lookupResult.lookupsTriggered,
+        crossSourceFollowUpCases: followUpResult.triggeredCases,
         note
       };
     });
@@ -2206,7 +2319,11 @@ export class CaseSyncService {
       }
 
       const caseIndex = this.buildCourtFeedCaseIndex();
+      const preexistingCaseIds = new Set(
+        [...new Set([...caseIndex.values()].map((row) => Number(row.id)).filter((value) => Number.isFinite(value) && value > 0))]
+      );
       const lookupCandidates = new Map();
+      const followUpCandidates = new Map();
       let successfulSources = 0;
       let failedSources = 0;
       let casesUpserted = 0;
@@ -2215,7 +2332,7 @@ export class CaseSyncService {
       for (const source of this.lawFirms.listSources()) {
         try {
           const sourceResult = await this.lawFirms.fetchRecentForSource(source);
-          const ingest = this.ingestLawFirmItems(sourceResult, caseIndex);
+          const ingest = this.ingestLawFirmItems(sourceResult, caseIndex, { preexistingCaseIds });
           casesUpserted += ingest.casesUpserted;
           docketEntriesUpserted += ingest.docketEntriesUpserted;
 
@@ -2223,6 +2340,13 @@ export class CaseSyncService {
             if (!lookupCandidates.has(key)) {
               lookupCandidates.set(key, value);
             }
+          }
+
+          for (const [key, value] of ingest.followUpCandidates.entries()) {
+            this.mergeCrossSourceFollowUpCandidate(followUpCandidates, {
+              ...value,
+              caseId: Number(key || value.caseId)
+            });
           }
 
           successfulSources += 1;
@@ -2235,10 +2359,22 @@ export class CaseSyncService {
         mode === "recent" && lookupCandidates.size
           ? await this.lookupLawFirmCandidates(lookupCandidates)
           : { lookupsTriggered: 0, imported: 0, matched: 0 };
+      const followUpResult =
+        mode === "recent" && followUpCandidates.size
+          ? await this.followUpCrossSourceCases(followUpCandidates)
+          : {
+              candidateCount: 0,
+              triggeredCases: 0,
+              priorityFeedTriggered: 0,
+              priorityFeedSynced: 0,
+              courtListenerTriggered: 0,
+              courtListenerSynced: 0,
+              failedCases: 0
+            };
 
       const note =
         successfulSources || failedSources
-          ? `律所官网本轮巡检 ${successfulSources} 个来源${failedSources ? `，${failedSources} 个来源暂时失败` : ""}；补进 ${casesUpserted} 条案件更新、${docketEntriesUpserted} 条律所公开文书${lookupResult.lookupsTriggered ? `，并触发 ${lookupResult.lookupsTriggered} 次 CourtListener 精确补抓` : ""}。`
+          ? `律所官网本轮巡检 ${successfulSources} 个来源${failedSources ? `，${failedSources} 个来源暂时失败` : ""}；补进 ${casesUpserted} 条案件更新、${docketEntriesUpserted} 条律所公开文书${lookupResult.lookupsTriggered ? `，并触发 ${lookupResult.lookupsTriggered} 次 CourtListener 精确补抓` : ""}${followUpResult.triggeredCases ? `；另对 ${followUpResult.triggeredCases} 个旧目标案触发跨源跟进（worldtro ${followUpResult.priorityFeedTriggered}/${followUpResult.priorityFeedSynced}，CourtListener ${followUpResult.courtListenerTriggered}/${followUpResult.courtListenerSynced}${followUpResult.failedCases ? `，失败 ${followUpResult.failedCases}` : ""}）` : ""}。`
           : "律所官网当前没有已配置来源。";
 
       return {
@@ -2247,6 +2383,7 @@ export class CaseSyncService {
         casesUpserted,
         docketEntriesUpserted,
         lookupsTriggered: lookupResult.lookupsTriggered,
+        crossSourceFollowUpCases: followUpResult.triggeredCases,
         note
       };
     });
