@@ -75,6 +75,26 @@ function formatDate(value) {
   });
 }
 
+function toDateMs(value) {
+  const parsed = Date.parse(String(value || ""));
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function latestTimelineFiledAt(entries = []) {
+  return entries.reduce((latest, entry) => {
+    const entryFiledAt = entry?.filed_at || null;
+    if (!entryFiledAt) {
+      return latest;
+    }
+
+    if (!latest || toDateMs(entryFiledAt) > toDateMs(latest)) {
+      return entryFiledAt;
+    }
+
+    return latest;
+  }, null);
+}
+
 function request(path, options) {
   return fetch(`${apiBase}${path}`, options).then(async (response) => {
     if (!response.ok) {
@@ -467,7 +487,7 @@ function renderCaseRow(item) {
       <div class="case-foot">
         <span>原告/品牌 ${plaintiff}</span>
         <span>被告数 ${insights.defendant_count || 0}</span>
-        <span>最近节点 ${formatDate(item.latest_docket_filed_at || item.date_filed)}</span>
+        <span>最近案级节点 ${formatDate(item.latest_docket_filed_at || item.date_filed)}</span>
       </div>
     </button>
   `;
@@ -633,6 +653,11 @@ function timelineSourceSummary(entries) {
 function renderDetail(item) {
   const insights = item.insights || {};
   const entries = item.entries || [];
+  const newestTimelineFiledAt = latestTimelineFiledAt(entries);
+  const hasCaseLevelUpdateGap =
+    Boolean(item.latest_docket_filed_at) &&
+    Boolean(newestTimelineFiledAt) &&
+    toDateMs(item.latest_docket_filed_at) > toDateMs(newestTimelineFiledAt);
   const hydrationPending = item.hydration_pending?.pending;
   const timelineSummary = entries.length ? timelineSourceSummary(entries) : "当前只有案件级摘要";
   const summaryCards = [
@@ -660,7 +685,7 @@ function renderDetail(item) {
       <div class="detail-meta">
         <span>${item.court_name || "Unknown Court"}</span>
         <span>Filed ${formatDate(item.date_filed)}</span>
-        <span>最近节点 ${formatDate(item.latest_docket_filed_at || item.date_filed)}</span>
+        <span>最近案级节点 ${formatDate(item.latest_docket_filed_at || item.date_filed)}</span>
       </div>
       <div class="summary-grid">
         ${summaryCards
@@ -681,7 +706,8 @@ function renderDetail(item) {
           ${hydrationPending ? '<p class="focus-text">当前条目还在后台继续补抓，页面会自动刷新补进来的 docket。</p>' : ""}
         </div>
         <div class="timeline-toolbar-stats">
-          <span class="tag-pill">最近节点 ${formatDate(item.latest_docket_filed_at || item.date_filed)}</span>
+          <span class="tag-pill">最近案级节点 ${formatDate(item.latest_docket_filed_at || item.date_filed)}</span>
+          ${entries.length ? `<span class="tag-pill">最新站内 docket ${formatDate(newestTimelineFiledAt)}</span>` : ""}
           <span class="tag-pill">${timelineSummary}</span>
         </div>
       </div>
@@ -700,6 +726,22 @@ function renderDetail(item) {
           <p>按时间倒序归档公开可见 docket 文本，适合卖家直接判断当前是否已签 TRO、是否进入 PI、是否有和解或结案信号。</p>
         </div>
       </div>
+      ${
+        hasCaseLevelUpdateGap
+          ? `
+            <article class="timeline-item">
+              <div class="timeline-item-head">
+                <time>${formatDate(item.latest_docket_filed_at)}</time>
+                <span class="status-pill neutral">案件级更新</span>
+              </div>
+              <h3>发现源已抓到更晚的案级更新，逐条 docket 仍在补抓</h3>
+              <p>${item.recent_activity_summary || "当前已经记录到案件级更新信号，但详细 docket 条目还没完全同步进站内时间线。"}</p>
+              <p class="focus-text">所以列表里会显示更晚的日期，但下方逐条 docket 可能暂时还停在更早日期。</p>
+              ${item.recent_activity_summary_zh ? `<p class="timeline-zh">${item.recent_activity_summary_zh}</p>` : ""}
+            </article>
+          `
+          : ""
+      }
       ${
         entries.length
           ? entries
