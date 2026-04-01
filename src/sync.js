@@ -2240,7 +2240,10 @@ export class CaseSyncService {
       const candidates = this.store.getCasesNeedingPriorityFeedSync(
         maxCases,
         this.config.priorityFeed.staleAfterHours,
-        { preferKnownPriorityFeed: mode === "backfill" }
+        {
+          preferKnownPriorityFeed: mode === "backfill",
+          recentFiledWindowDays: this.config.sync.recentDocketFollowUpDays
+        }
       );
 
       if (progressEnabled) {
@@ -3408,13 +3411,36 @@ export class CaseSyncService {
       const limit = mode === "backfill"
         ? this.config.courtListener.docketBackfillMaxCasesPerRun
         : this.config.courtListener.docketMaxCasesPerRun;
-      const candidates = this.store.getCasesNeedingDocketSync(limit);
+      const followUpCandidates = mode === "recent"
+        ? this.store.getCasesNeedingCourtListenerFollowUp(Math.max(limit * 2, limit), {
+            recentFiledWindowDays: this.config.sync.recentDocketFollowUpDays,
+            startDate: getDiscoveryStartDate(this.config)
+          })
+        : [];
+      const baseCandidates = this.store.getCasesNeedingDocketSync(Math.max(limit * 3, limit));
+      const followUpIds = new Set(followUpCandidates.map((row) => Number(row.id)));
+      const candidates = [];
+      const seen = new Set();
+
+      for (const row of [...followUpCandidates, ...baseCandidates]) {
+        const id = Number(row.id || 0);
+        if (!id || seen.has(id)) {
+          continue;
+        }
+        seen.add(id);
+        candidates.push(row);
+        if (candidates.length >= limit) {
+          break;
+        }
+      }
       let syncedCases = 0;
       let metadataOnlyMode = false;
 
       for (const caseRow of candidates) {
         try {
-          const result = await this.syncSingleCourtListenerDocket(caseRow);
+          const result = caseRow.courtlistener_docket_id
+            ? await this.syncSingleCourtListenerDocket(caseRow)
+            : await this.enrichCaseWithCourtListener(caseRow.id, { force: followUpIds.has(Number(caseRow.id)) });
           if (result.enriched) {
             syncedCases += 1;
           }

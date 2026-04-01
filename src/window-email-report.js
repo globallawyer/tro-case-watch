@@ -210,8 +210,20 @@ function formatSyncModeSummary(summary = {}) {
   return `运行 ${Number(summary.runCount || 0)} 次 / 案件 ${Number(summary.casesWritten || 0)} / docket ${Number(summary.docketEntriesWritten || 0)}`;
 }
 
+function buildIngestMetricSummary(payload = {}) {
+  const syncBreakdown = payload.syncBreakdown || {};
+  const totalVolume = Number(syncBreakdown.total?.docketEntriesWritten || 0);
+  const netNew = Number(payload.newDocketEntriesCount || 0);
+  return {
+    netNew,
+    totalVolume,
+    replayWrites: Math.max(0, totalVolume - netNew)
+  };
+}
+
 function buildMessage(payload) {
   const subject = `TRO Tracker 3小时快报 - ${payload.startLabel} 至 ${payload.endLabel}`;
+  const ingestMetrics = buildIngestMetricSummary(payload);
   const topLines = payload.topCases.length
     ? payload.topCases.map((item, index) =>
         `${index + 1}. ${item.docket_number || "无案号"} | ${item.case_name || "未命名案件"} | ${item.court_id || "unknown"} | +${item.new_entry_count} | ${item.primary_source || "unknown"}`
@@ -223,6 +235,7 @@ function buildMessage(payload) {
     `窗口：${payload.startLabel} 至 ${payload.endLabel}`,
     `新增案件：${payload.newCasesCount}`,
     `新增 docket entries：${payload.newDocketEntriesCount}`,
+    `净新增 vs 任务写入：净新增 ${ingestMetrics.netNew} / 任务写入 ${ingestMetrics.totalVolume} / 估算重复补写 ${ingestMetrics.replayWrites}`,
     `实时增量（recent任务）：${formatSyncModeSummary(payload.syncBreakdown?.recent)}`,
     `历史补写（backfill任务）：${formatSyncModeSummary(payload.syncBreakdown?.backfill)}`,
     `案件新增来源：${formatBreakdown(payload.caseSources)}`,
@@ -239,6 +252,7 @@ function buildMessage(payload) {
       <p>
         <strong>新增案件：</strong>${payload.newCasesCount}<br>
         <strong>新增 docket entries：</strong>${payload.newDocketEntriesCount}<br>
+        <strong>净新增 vs 任务写入：</strong>${ingestMetrics.netNew} / ${ingestMetrics.totalVolume} / 估算重复补写 ${ingestMetrics.replayWrites}<br>
         <strong>实时增量（recent任务）：</strong>${escapeHtml(formatSyncModeSummary(payload.syncBreakdown?.recent))}<br>
         <strong>历史补写（backfill任务）：</strong>${escapeHtml(formatSyncModeSummary(payload.syncBreakdown?.backfill))}<br>
         <strong>案件新增来源：</strong>${escapeHtml(formatBreakdown(payload.caseSources))}<br>

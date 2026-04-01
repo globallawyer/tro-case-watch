@@ -2704,6 +2704,100 @@ export class Store {
     return selected;
   }
 
+  getCasesNeedingCourtListenerFollowUp(limit, { recentFiledWindowDays = 2, startDate = "2025-01-01" } = {}) {
+    const recentFiledCutoff = Date.now() - recentFiledWindowDays * 24 * 60 * 60 * 1000;
+    const recentFiledCutoffIso = new Date(recentFiledCutoff).toISOString();
+    const candidatePoolSize = Math.max(limit * 40, 240);
+
+    const candidateRows = this.db
+      .prepare(`
+        SELECT *
+        FROM cases
+        WHERE date(date_filed) >= date(?)
+          AND docket_number IS NOT NULL
+          AND TRIM(docket_number) <> ''
+          AND COALESCE(latest_docket_filed_at, updated_at, date_filed) >= ?
+        ORDER BY COALESCE(latest_docket_filed_at, updated_at, date_filed) DESC
+        LIMIT ?
+      `)
+      .all(String(startDate || "2025-01-01"), recentFiledCutoffIso, candidatePoolSize)
+      .map(hydrateCase);
+
+    const entryCounts = this.getEntryCoverageForCaseIds(candidateRows.map((row) => row.id));
+
+    return candidateRows
+      .map((row) => {
+        const coverage = entryCounts.get(Number(row.id)) || {
+          totalEntries: 0,
+          courtlistenerEntries: 0
+        };
+        const activityAtRaw = row.latest_docket_filed_at || row.updated_at || row.date_filed;
+        const activityAtMs = Number.isFinite(Date.parse(activityAtRaw || "")) ? Date.parse(activityAtRaw || "") : 0;
+        const createdAtMs = Number.isFinite(Date.parse(row.created_at || "")) ? Date.parse(row.created_at || "") : 0;
+        const isRecentFiledFollowUp = createdAtMs > 0 && createdAtMs < recentFiledCutoff && activityAtMs >= recentFiledCutoff;
+        const hasCivilDocketNumber = /\b(?:\d+:)?\d{2}-cv-\d{3,6}\b/i.test(String(row.docket_number || ""));
+        const hasTargetTags =
+          row.tags_marker?.includes("|seller_tro|") ||
+          row.tags_marker?.includes("|tro|") ||
+          row.tags_marker?.includes("|schedule_a|") ||
+          row.insights?.is_seller_case ||
+          row.insights?.is_tro_case ||
+          row.insights?.is_schedule_a_case;
+        const latestNumber = parseDocketNumber(row.latest_docket_number);
+        const expectedEntries = Math.max(
+          Number(row.docket_count || 0),
+          latestNumber,
+          row.insights?.is_seller_case ? 12 : 6
+        );
+        const totalEntries = Number(coverage.totalEntries || 0);
+        const gap = Math.max(0, expectedEntries - totalEntries);
+        const hasCourtListenerDocket = Number(row.courtlistener_docket_id || 0) > 0;
+        const shouldSync = hasCivilDocketNumber && isRecentFiledFollowUp && (hasTargetTags || hasCourtListenerDocket || gap > 0);
+
+        return {
+          row,
+          shouldSync,
+          hasTargetTags: Boolean(hasTargetTags),
+          hasCourtListenerDocket,
+          isCurrentYearCase: isCurrentPriorityYearCase(row),
+          gap,
+          totalEntries,
+          activityAtRaw
+        };
+      })
+      .filter((item) => item.shouldSync)
+      .sort((left, right) => {
+        if (left.isCurrentYearCase !== right.isCurrentYearCase) {
+          return left.isCurrentYearCase ? -1 : 1;
+        }
+
+        if (left.hasTargetTags !== right.hasTargetTags) {
+          return left.hasTargetTags ? -1 : 1;
+        }
+
+        if (left.hasCourtListenerDocket !== right.hasCourtListenerDocket) {
+          return left.hasCourtListenerDocket ? -1 : 1;
+        }
+
+        if (left.gap !== right.gap) {
+          return right.gap - left.gap;
+        }
+
+        const activityCompare = compareCaseActivityDesc(left.activityAtRaw, right.activityAtRaw);
+        if (activityCompare !== 0) {
+          return activityCompare;
+        }
+
+        if (left.totalEntries !== right.totalEntries) {
+          return left.totalEntries - right.totalEntries;
+        }
+
+        return Number(right.row.id || 0) - Number(left.row.id || 0);
+      })
+      .slice(0, limit)
+      .map((item) => item.row);
+  }
+
   getEntryCoverageForCaseIds(caseIds = []) {
     const ids = [...new Set(caseIds.map((value) => Number(value)).filter((value) => Number.isFinite(value) && value > 0))];
     if (!ids.length) {
@@ -2760,8 +2854,9 @@ export class Store {
     return coverage;
   }
 
-  getCasesNeedingPriorityFeedSync(limit, staleAfterHours = 12, { preferKnownPriorityFeed = false } = {}) {
+  getCasesNeedingPriorityFeedSync(limit, staleAfterHours = 12, { preferKnownPriorityFeed = false, recentFiledWindowDays = 2 } = {}) {
     const staleBefore = Date.now() - staleAfterHours * 60 * 60 * 1000;
+    const recentFiledFollowUpBefore = Date.now() - recentFiledWindowDays * 24 * 60 * 60 * 1000;
     const poolSize = Math.max(limit * 40, 400);
     const knownPriorityFeedPoolSize = preferKnownPriorityFeed
       ? Math.max(limit * 500, 8000)
@@ -2830,7 +2925,11 @@ export class Store {
           const isCurrentYearCase = isCurrentPriorityYearCase(row);
           const hasRecentGapIssue = isGapPriorityCase(row) && Number(coverage.gapPriorityScore || 0) > 0;
           const currentYearGapWeight = getCurrentYearGapPriorityWeight(row, coverage, minimumExpectedEntries);
-          const freshnessCutoff = hasRecentGapIssue ? gapRetryBefore : staleBefore;
+          const activityAtRaw = row.latest_docket_filed_at || row.date_filed || row.updated_at;
+          const activityAtMs = Number.isFinite(Date.parse(activityAtRaw || "")) ? Date.parse(activityAtRaw || "") : 0;
+          const createdAtMs = Number.isFinite(Date.parse(row.created_at || "")) ? Date.parse(row.created_at || "") : 0;
+          const isRecentFiledFollowUp = createdAtMs > 0 && createdAtMs < recentFiledFollowUpBefore && activityAtMs >= recentFiledFollowUpBefore;
+          const freshnessCutoff = hasRecentGapIssue || isRecentFiledFollowUp ? gapRetryBefore : staleBefore;
           const isFreshlyMissing = missingMarked && syncedAt && syncedAt >= freshnessCutoff;
           const needsCompletion = priorityFeedRowCount > 0
             ? coverage.totalEntries < priorityFeedRowCount
@@ -2843,6 +2942,7 @@ export class Store {
             row,
             needsCompletion,
             isCurrentYearCase,
+            isRecentFiledFollowUp,
             hasRecentGapIssue,
             currentYearGapWeight,
             gapPriorityScore: Number(coverage.gapPriorityScore || 0),
@@ -2850,7 +2950,7 @@ export class Store {
             isStale,
             isFreshlyMissing,
             shouldSync,
-            activityAtRaw: row.latest_docket_filed_at || row.date_filed || row.updated_at,
+            activityAtRaw,
             priorityFeedRowCount,
             totalEntries: coverage.totalEntries
           };
@@ -2870,6 +2970,10 @@ export class Store {
             if (currentYearActivityCompare !== 0) {
               return currentYearActivityCompare;
             }
+          }
+
+          if (left.isRecentFiledFollowUp !== right.isRecentFiledFollowUp) {
+            return left.isRecentFiledFollowUp ? -1 : 1;
           }
 
           if (left.currentYearGapWeight !== right.currentYearGapWeight) {
@@ -2968,8 +3072,14 @@ export class Store {
         const isCurrentYearCase = isCurrentPriorityYearCase(row);
         const hasRecentGapIssue = isGapPriorityCase(row) && Number(coverage.gapPriorityScore || 0) > 0;
         const currentYearGapWeight = getCurrentYearGapPriorityWeight(row, coverage, minimumExpectedEntries);
+        const activityAtRaw = row.latest_docket_filed_at || row.date_filed || row.updated_at;
+        const activityAtMs = Number.isFinite(Date.parse(activityAtRaw || "")) ? Date.parse(activityAtRaw || "") : 0;
+        const createdAtMs = Number.isFinite(Date.parse(row.created_at || "")) ? Date.parse(row.created_at || "") : 0;
+        const isRecentFiledFollowUp = createdAtMs > 0 && createdAtMs < recentFiledFollowUpBefore && activityAtMs >= recentFiledFollowUpBefore;
         const freshnessCutoff = hasRecentGapIssue
           ? Date.now() - Math.min(staleAfterHours, 4) * 60 * 60 * 1000
+          : isRecentFiledFollowUp
+            ? Date.now() - Math.min(staleAfterHours, 2) * 60 * 60 * 1000
           : staleBefore;
         const isFreshlyMissing = missingMarked && syncedAt && syncedAt >= freshnessCutoff;
         const isPriorityFeedBacklog = !hasKnownPriorityFeedSource && Number(row.docket_count || 0) >= 8;
@@ -2986,8 +3096,6 @@ export class Store {
           (hasKnownPriorityFeedSource && isStale) ||
           isPriorityFeedBacklog
         );
-        const activityAtRaw = row.latest_docket_filed_at || row.date_filed || row.updated_at;
-
         let priority = needsCompletion
           ? hasPriorityFeedUrl
             ? 0
@@ -3009,12 +3117,16 @@ export class Store {
         if (hasRecentGapIssue) {
           priority -= 2;
         }
+        if (isRecentFiledFollowUp) {
+          priority -= 2;
+        }
 
         return {
           row,
           priority,
           shouldSync,
           isCurrentYearCase,
+          isRecentFiledFollowUp,
           hasRecentGapIssue,
           currentYearGapWeight,
           gapPriorityScore: Number(coverage.gapPriorityScore || 0),
@@ -3043,6 +3155,10 @@ export class Store {
         if (currentYearActivityCompare !== 0) {
           return currentYearActivityCompare;
         }
+      }
+
+      if (left.isRecentFiledFollowUp !== right.isRecentFiledFollowUp) {
+        return left.isRecentFiledFollowUp ? -1 : 1;
       }
 
       if (left.currentYearGapWeight !== right.currentYearGapWeight) {
@@ -3075,6 +3191,10 @@ export class Store {
         if (currentYearActivityCompare !== 0) {
           return currentYearActivityCompare;
         }
+      }
+
+      if (left.isRecentFiledFollowUp !== right.isRecentFiledFollowUp) {
+        return left.isRecentFiledFollowUp ? -1 : 1;
       }
 
       if (left.currentYearGapWeight !== right.currentYearGapWeight) {
@@ -3131,6 +3251,10 @@ export class Store {
           }
         }
 
+        if (left.isRecentFiledFollowUp !== right.isRecentFiledFollowUp) {
+          return left.isRecentFiledFollowUp ? -1 : 1;
+        }
+
         if (left.currentYearGapWeight !== right.currentYearGapWeight) {
           return right.currentYearGapWeight - left.currentYearGapWeight;
         }
@@ -3156,6 +3280,10 @@ export class Store {
         const currentYearActivityCompare = compareCaseActivityDesc(left.activityAtRaw, right.activityAtRaw);
         if (currentYearActivityCompare !== 0) {
           return currentYearActivityCompare;
+        }
+
+        if (left.isRecentFiledFollowUp !== right.isRecentFiledFollowUp) {
+          return left.isRecentFiledFollowUp ? -1 : 1;
         }
 
         if (left.currentYearGapWeight !== right.currentYearGapWeight) {
@@ -3189,6 +3317,10 @@ export class Store {
           if (currentYearActivityCompare !== 0) {
             return currentYearActivityCompare;
           }
+        }
+
+        if (left.isRecentFiledFollowUp !== right.isRecentFiledFollowUp) {
+          return left.isRecentFiledFollowUp ? -1 : 1;
         }
 
         if (left.currentYearGapWeight !== right.currentYearGapWeight) {

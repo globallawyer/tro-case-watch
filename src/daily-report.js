@@ -105,6 +105,17 @@ function formatSyncModeSummary(summary = {}) {
   return `运行 ${Number(summary.runCount || 0)} 次 / 案件 ${Number(summary.casesWritten || 0)} / docket ${Number(summary.docketEntriesWritten || 0)}`;
 }
 
+function buildIngestMetricSummary(report = {}) {
+  const syncBreakdown = report.syncBreakdown || {};
+  const totalVolume = Number(syncBreakdown.total?.docketEntriesWritten || 0);
+  const netNew = Number(report.newDocketEntriesCount || 0);
+  return {
+    netNew,
+    totalVolume,
+    replayWrites: Math.max(0, totalVolume - netNew)
+  };
+}
+
 export class DailyEmailReportService {
   constructor({ config, store }) {
     this.config = config;
@@ -236,12 +247,14 @@ export class DailyEmailReportService {
     const rssBlocks = rssItems.map(summarizeRssItem);
     const recentBreakdown = report.syncBreakdown?.recent || {};
     const backfillBreakdown = report.syncBreakdown?.backfill || {};
+    const ingestMetrics = buildIngestMetricSummary(report);
     const textLines = [
       `TRO Tracker 日报`,
       `日期：${localDate}`,
       ``,
       `当日新增案件：${report.newCasesCount}`,
       `当日新增 docket entries：${report.newDocketEntriesCount}`,
+      `净新增 vs 任务写入：净新增 ${ingestMetrics.netNew} / 任务写入 ${ingestMetrics.totalVolume} / 估算重复补写 ${ingestMetrics.replayWrites}`,
       `实时增量（recent任务）：${formatSyncModeSummary(recentBreakdown)}`,
       `历史补写（backfill任务）：${formatSyncModeSummary(backfillBreakdown)}`,
       `docket 新增来源：${formatBreakdown(report.docketSources)}`,
@@ -260,6 +273,7 @@ export class DailyEmailReportService {
         <p><strong>日期：</strong>${escapeHtml(localDate)}</p>
         <p><strong>当日新增案件：</strong>${report.newCasesCount}<br>
         <strong>当日新增 docket entries：</strong>${report.newDocketEntriesCount}<br>
+        <strong>净新增 vs 任务写入：</strong>${ingestMetrics.netNew} / ${ingestMetrics.totalVolume} / 估算重复补写 ${ingestMetrics.replayWrites}<br>
         <strong>实时增量（recent任务）：</strong>${escapeHtml(formatSyncModeSummary(recentBreakdown))}<br>
         <strong>历史补写（backfill任务）：</strong>${escapeHtml(formatSyncModeSummary(backfillBreakdown))}<br>
         <strong>docket 新增来源：</strong>${escapeHtml(formatBreakdown(report.docketSources))}<br>

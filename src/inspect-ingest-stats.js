@@ -183,7 +183,7 @@ const recentDocketWritesByDayAndSource = db
 const recentDocketWritesBy3h = db
   .prepare(`
     SELECT
-      datetime((CAST(strftime('%s', created_at) AS INTEGER) / (? * 3600)) * (? * 3600), 'unixepoch') AS bucket,
+      datetime(CAST(CAST(strftime('%s', created_at) AS INTEGER) / (? * 3600) AS INTEGER) * (? * 3600), 'unixepoch') AS bucket,
       COUNT(*) AS count
     FROM docket_entries
     WHERE created_at >= ?
@@ -200,7 +200,7 @@ const recentDocketWritesBy3h = db
 const recentCourtListenerWritesBy3h = db
   .prepare(`
     SELECT
-      datetime((CAST(strftime('%s', created_at) AS INTEGER) / (? * 3600)) * (? * 3600), 'unixepoch') AS bucket,
+      datetime(CAST(CAST(strftime('%s', created_at) AS INTEGER) / (? * 3600) AS INTEGER) * (? * 3600), 'unixepoch') AS bucket,
       COUNT(*) AS count
     FROM docket_entries
     WHERE created_at >= ?
