@@ -1625,9 +1625,12 @@ a {
     max-width: none;
   }
 
-  .contact-methods,
-  .hero-copy .hero-stats {
+  .contact-methods {
     grid-template-columns: 1fr;
+  }
+
+  .hero-copy .hero-stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .hero-copy .hero-stats {
