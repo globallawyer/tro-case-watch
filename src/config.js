@@ -243,6 +243,7 @@ export const config = {
     minIntervalMs: envInt("COURT_FEEDS_MIN_INTERVAL_MS", 1000),
     maxItemsPerFeed: envInt("COURT_FEEDS_MAX_ITEMS_PER_FEED", 80),
     maxLookupsPerRun: envInt("COURT_FEEDS_MAX_LOOKUPS_PER_RUN", 12),
+    crossSourceFollowUpMaxCasesPerRun: envInt("COURT_FEEDS_CROSS_SOURCE_FOLLOW_UP_MAX_CASES_PER_RUN", 4),
     requireKeywordHit: envBool("COURT_FEEDS_REQUIRE_KEYWORD_HIT", true),
     watchKeywords: envList("COURT_FEEDS_WATCH_KEYWORDS", [
       "temporary restraining order",
