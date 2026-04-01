@@ -2039,9 +2039,16 @@ export class CaseSyncService {
     };
   }
 
-  async followUpCrossSourceCases(followUpCandidates = new Map()) {
-    const maxCasesPerRun = Math.max(0, Number(this.config.courtFeeds.crossSourceFollowUpMaxCasesPerRun || 0));
-    if (!maxCasesPerRun || !followUpCandidates.size) {
+  async followUpCrossSourceCases(followUpCandidates = new Map(), { maxCasesPerRun = null } = {}) {
+    const selectedLimit = Math.max(
+      0,
+      Number(
+        maxCasesPerRun === null
+          ? this.config.courtFeeds.crossSourceFollowUpMaxCasesPerRun
+          : maxCasesPerRun
+      ) || 0
+    );
+    if (!selectedLimit || !followUpCandidates.size) {
       return {
         candidateCount: followUpCandidates.size,
         triggeredCases: 0,
@@ -2066,7 +2073,7 @@ export class CaseSyncService {
 
         return Number(right.caseId || 0) - Number(left.caseId || 0);
       })
-      .slice(0, maxCasesPerRun);
+      .slice(0, selectedLimit);
 
     let triggeredCases = 0;
     let priorityFeedTriggered = 0;
@@ -2130,12 +2137,44 @@ export class CaseSyncService {
   buildRecentExistingCaseFollowUpCandidates() {
     const maxCases = Math.max(0, Number(this.config.sync.recentExistingCaseFollowUpMaxCasesPerRun || 0));
     if (!maxCases) {
-      return new Map();
+      return {
+        candidates: new Map(),
+        activityAheadCaseIds: new Set()
+      };
     }
 
     const recentFiledWindowDays = this.config.sync.recentDocketFollowUpDays;
     const followUpPoolSize = Math.max(maxCases * 3, 18);
     const candidates = new Map();
+    const activityAheadCaseIds = new Set();
+
+    const activityAheadRows = this.store.getCasesWithActivityAheadOfTimeline(
+      Math.max(followUpPoolSize, maxCases * 6),
+      {
+        recentFiledWindowDays,
+        startDate: getDiscoveryStartDate(this.config)
+      }
+    );
+    for (const row of activityAheadRows) {
+      const caseId = Number(row.id);
+      if (!caseId) {
+        continue;
+      }
+      activityAheadCaseIds.add(caseId);
+      this.mergeCrossSourceFollowUpCandidate(candidates, {
+        caseId,
+        docketNumber: row.docket_number || null,
+        filedAt: row.latest_docket_filed_at || row.updated_at || row.date_filed || null,
+        priority:
+          row.tags_marker?.includes("|seller_tro|")
+            ? -3
+            : row.tags_marker?.includes("|tro|") || row.tags_marker?.includes("|schedule_a|")
+              ? -2
+              : -1,
+        priorityFeed: shouldAttemptPriorityFeedForCase(row, { force: false }),
+        courtListener: Boolean(row.courtlistener_docket_id || row.docket_number || row.case_name)
+      });
+    }
 
     const priorityRows = this.store.getCasesNeedingPriorityFeedSync(
       Math.max(followUpPoolSize, maxCases * 4),
@@ -2202,7 +2241,10 @@ export class CaseSyncService {
       })
       .slice(0, maxCases);
 
-    return new Map(selected.map((item) => [Number(item.caseId), item]));
+    return {
+      candidates: new Map(selected.map((item) => [Number(item.caseId), item])),
+      activityAheadCaseIds
+    };
   }
 
   async syncRecentExistingCaseFollowUps(mode = "recent") {
@@ -2220,16 +2262,24 @@ export class CaseSyncService {
     }
 
     return this.store.batchMutations(async () => {
-      const followUpCandidates = this.buildRecentExistingCaseFollowUpCandidates();
-      const followUpResult = await this.followUpCrossSourceCases(followUpCandidates);
+      const {
+        candidates: followUpCandidates,
+        activityAheadCaseIds
+      } = this.buildRecentExistingCaseFollowUpCandidates();
+      const followUpResult = await this.followUpCrossSourceCases(followUpCandidates, {
+        maxCasesPerRun: Math.max(0, Number(this.config.sync.recentExistingCaseFollowUpMaxCasesPerRun || 0))
+      });
+      const selectedActivityAheadCount = [...followUpCandidates.keys()].filter((caseId) => activityAheadCaseIds.has(caseId)).length;
       const note = followUpResult.triggeredCases
-        ? `旧案 recent-filed 跟进队列本轮命中 ${followUpResult.triggeredCases} 个案件（worldtro ${followUpResult.priorityFeedTriggered}/${followUpResult.priorityFeedSynced}，CourtListener ${followUpResult.courtListenerTriggered}/${followUpResult.courtListenerSynced}${followUpResult.failedCases ? `，失败 ${followUpResult.failedCases}` : ""}）。`
+        ? `旧案 recent-filed 跟进队列本轮命中 ${followUpResult.triggeredCases} 个案件，其中案级节点领先时间线 ${selectedActivityAheadCount} 个（worldtro ${followUpResult.priorityFeedTriggered}/${followUpResult.priorityFeedSynced}，CourtListener ${followUpResult.courtListenerTriggered}/${followUpResult.courtListenerSynced}${followUpResult.failedCases ? `，失败 ${followUpResult.failedCases}` : ""}）。`
         : followUpCandidates.size
-          ? `旧案 recent-filed 跟进队列本轮候选 ${followUpCandidates.size} 个，但未形成新的跨源补抓。`
+          ? `旧案 recent-filed 跟进队列本轮候选 ${followUpCandidates.size} 个，其中案级节点领先时间线 ${selectedActivityAheadCount} 个，但未形成新的跨源补抓。`
           : "旧案 recent-filed 跟进队列当前没有候选案件。";
 
       return {
         ...followUpResult,
+        activityAheadCandidateCount: activityAheadCaseIds.size,
+        selectedActivityAheadCount,
         note
       };
     });

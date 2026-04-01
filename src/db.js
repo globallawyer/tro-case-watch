@@ -1399,6 +1399,18 @@ function compareCaseActivityDesc(left, right) {
   return String(right || "").localeCompare(String(left || ""));
 }
 
+function isActivityAheadOfTimeline(activityAt, latestEntryFiledAt) {
+  if (!activityAt) {
+    return false;
+  }
+
+  if (!latestEntryFiledAt) {
+    return true;
+  }
+
+  return String(activityAt).localeCompare(String(latestEntryFiledAt)) > 0;
+}
+
 function shanghaiDayBounds(date = new Date()) {
   const key = formatShanghaiDateKey(date);
   if (!key) {
@@ -2729,7 +2741,8 @@ export class Store {
       .map((row) => {
         const coverage = entryCounts.get(Number(row.id)) || {
           totalEntries: 0,
-          courtlistenerEntries: 0
+          courtlistenerEntries: 0,
+          latestEntryFiledAt: null
         };
         const activityAtRaw = row.latest_docket_filed_at || row.updated_at || row.date_filed;
         const activityAtMs = Number.isFinite(Date.parse(activityAtRaw || "")) ? Date.parse(activityAtRaw || "") : 0;
@@ -2751,6 +2764,7 @@ export class Store {
         );
         const totalEntries = Number(coverage.totalEntries || 0);
         const gap = Math.max(0, expectedEntries - totalEntries);
+        const hasActivityAheadOfTimeline = isActivityAheadOfTimeline(activityAtRaw, coverage.latestEntryFiledAt);
         const hasCourtListenerDocket = Number(row.courtlistener_docket_id || 0) > 0;
         const shouldSync = hasCivilDocketNumber && isRecentFiledFollowUp && (hasTargetTags || hasCourtListenerDocket || gap > 0);
 
@@ -2758,6 +2772,7 @@ export class Store {
           row,
           shouldSync,
           hasTargetTags: Boolean(hasTargetTags),
+          hasActivityAheadOfTimeline,
           hasCourtListenerDocket,
           isCurrentYearCase: isCurrentPriorityYearCase(row),
           gap,
@@ -2779,8 +2794,113 @@ export class Store {
           return left.hasCourtListenerDocket ? -1 : 1;
         }
 
+        if (left.hasActivityAheadOfTimeline !== right.hasActivityAheadOfTimeline) {
+          return left.hasActivityAheadOfTimeline ? -1 : 1;
+        }
+
         if (left.gap !== right.gap) {
           return right.gap - left.gap;
+        }
+
+        const activityCompare = compareCaseActivityDesc(left.activityAtRaw, right.activityAtRaw);
+        if (activityCompare !== 0) {
+          return activityCompare;
+        }
+
+        if (left.totalEntries !== right.totalEntries) {
+          return left.totalEntries - right.totalEntries;
+        }
+
+        return Number(right.row.id || 0) - Number(left.row.id || 0);
+      })
+      .slice(0, limit)
+      .map((item) => item.row);
+  }
+
+  getCasesWithActivityAheadOfTimeline(limit, { recentFiledWindowDays = 2, startDate = "2025-01-01" } = {}) {
+    const recentFiledCutoff = Date.now() - recentFiledWindowDays * 24 * 60 * 60 * 1000;
+    const recentFiledCutoffIso = new Date(recentFiledCutoff).toISOString();
+    const candidatePoolSize = Math.max(limit * 80, 360);
+
+    const candidateRows = this.db
+      .prepare(`
+        SELECT *
+        FROM cases
+        WHERE date(date_filed) >= date(?)
+          AND docket_number IS NOT NULL
+          AND TRIM(docket_number) <> ''
+          AND COALESCE(latest_docket_filed_at, updated_at, date_filed) >= ?
+        ORDER BY COALESCE(latest_docket_filed_at, updated_at, date_filed) DESC
+        LIMIT ?
+      `)
+      .all(String(startDate || "2025-01-01"), recentFiledCutoffIso, candidatePoolSize)
+      .map(hydrateCase);
+
+    const entryCounts = this.getEntryCoverageForCaseIds(candidateRows.map((row) => row.id));
+
+    return candidateRows
+      .map((row) => {
+        const coverage = entryCounts.get(Number(row.id)) || {
+          totalEntries: 0,
+          latestEntryFiledAt: null
+        };
+        const activityAtRaw = row.latest_docket_filed_at || row.updated_at || row.date_filed;
+        const activityAtMs = Number.isFinite(Date.parse(activityAtRaw || "")) ? Date.parse(activityAtRaw || "") : 0;
+        const createdAtMs = Number.isFinite(Date.parse(row.created_at || "")) ? Date.parse(row.created_at || "") : 0;
+        const isRecentFiledFollowUp = createdAtMs > 0 && createdAtMs < recentFiledCutoff && activityAtMs >= recentFiledCutoff;
+        const hasCivilDocketNumber = isCivilLike(row);
+        const hasTargetSignals = hasTargetWatchlistSignals(row, row.insights);
+        const hasActivityAheadOfTimeline = isActivityAheadOfTimeline(activityAtRaw, coverage.latestEntryFiledAt);
+        const hasPriorityFeedSignals =
+          hasConcretePriorityFeedLink(row) ||
+          getPriorityFeedRowCount(row) > 0 ||
+          hasTrackedLawFirmSource(row) ||
+          hasTargetSignals;
+        const hasCourtListenerPath = Boolean(row.courtlistener_docket_id || row.docket_number || row.case_name);
+        const activityLeadMs =
+          Number.isFinite(activityAtMs) && coverage.latestEntryFiledAt
+            ? Math.max(0, activityAtMs - Date.parse(String(coverage.latestEntryFiledAt)))
+            : hasActivityAheadOfTimeline
+              ? recentFiledWindowDays * 24 * 60 * 60 * 1000
+              : 0;
+
+        return {
+          row,
+          shouldSync:
+            hasCivilDocketNumber &&
+            isRecentFiledFollowUp &&
+            hasTargetSignals &&
+            hasActivityAheadOfTimeline &&
+            (hasPriorityFeedSignals || hasCourtListenerPath),
+          hasPriorityFeedSignals,
+          hasCourtListenerPath,
+          isCurrentYearCase: isCurrentPriorityYearCase(row),
+          hasAuthoritativeSignal: hasAuthoritativeTargetSignal(row),
+          activityLeadMs,
+          totalEntries: Number(coverage.totalEntries || 0),
+          activityAtRaw
+        };
+      })
+      .filter((item) => item.shouldSync)
+      .sort((left, right) => {
+        if (left.isCurrentYearCase !== right.isCurrentYearCase) {
+          return left.isCurrentYearCase ? -1 : 1;
+        }
+
+        if (left.hasAuthoritativeSignal !== right.hasAuthoritativeSignal) {
+          return left.hasAuthoritativeSignal ? -1 : 1;
+        }
+
+        if (left.hasPriorityFeedSignals !== right.hasPriorityFeedSignals) {
+          return left.hasPriorityFeedSignals ? -1 : 1;
+        }
+
+        if (left.hasCourtListenerPath !== right.hasCourtListenerPath) {
+          return left.hasCourtListenerPath ? -1 : 1;
+        }
+
+        if (left.activityLeadMs !== right.activityLeadMs) {
+          return right.activityLeadMs - left.activityLeadMs;
         }
 
         const activityCompare = compareCaseActivityDesc(left.activityAtRaw, right.activityAtRaw);
@@ -2825,6 +2945,7 @@ export class Store {
             SUM(CASE WHEN primary_source = 'courtlistener' THEN 1 ELSE 0 END) AS courtlistener_entries,
             SUM(CASE WHEN primary_source = '${PRIORITY_FEED_ENTRY_SOURCE}' THEN 1 ELSE 0 END) AS priority_entries,
             SUM(CASE WHEN primary_source = 'pacermonitor' THEN 1 ELSE 0 END) AS pacermonitor_entries,
+            MAX(filed_at) AS latest_entry_filed_at,
             COUNT(DISTINCT ${numericOrderSql}) AS numbered_entries,
             MIN(${numericOrderSql}) AS first_number,
             MAX(${numericOrderSql}) AS last_number
@@ -2840,6 +2961,7 @@ export class Store {
           courtlistenerEntries: Number(row.courtlistener_entries || 0),
           priorityFeedEntries: Number(row.priority_entries || 0),
           pacermonitorEntries: Number(row.pacermonitor_entries || 0),
+          latestEntryFiledAt: row.latest_entry_filed_at || null,
           numberedEntries: Number(row.numbered_entries || 0),
           firstNumber: Number(row.first_number || 0),
           lastNumber: Number(row.last_number || 0)
