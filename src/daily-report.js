@@ -80,6 +80,27 @@ function summarizeItem(item, index) {
   };
 }
 
+function formatBreakdown(items = []) {
+  if (!Array.isArray(items) || !items.length) {
+    return "无";
+  }
+
+  return items
+    .map((item) => `${item.source || "unknown"} ${Number(item.count || 0)}`)
+    .join(" / ");
+}
+
+function summarizeRssItem(item, index) {
+  const court = item.court_id || item.court_name || "unknown";
+  const docket = item.docket_number || "无案号";
+  const title = item.case_name || "未命名案件";
+  const count = Number(item.new_entry_count || 0);
+  return {
+    text: `${index + 1}. ${docket} | ${title} | ${court} | RSS +${count}`,
+    html: `<li>${escapeHtml(docket)} | ${escapeHtml(title)} | ${escapeHtml(court)} | <strong>RSS +${count}</strong></li>`
+  };
+}
+
 export class DailyEmailReportService {
   constructor({ config, store }) {
     this.config = config;
@@ -207,12 +228,19 @@ export class DailyEmailReportService {
     const subject = `TRO Tracker 日报 - ${localDate}`;
     const items = Array.isArray(report.items) ? report.items : [];
     const itemBlocks = items.map(summarizeItem);
+    const rssItems = Array.isArray(report.rssItems) ? report.rssItems : [];
+    const rssBlocks = rssItems.map(summarizeRssItem);
     const textLines = [
       `TRO Tracker 日报`,
       `日期：${localDate}`,
       ``,
       `当日新增案件：${report.newCasesCount}`,
       `当日新增 docket entries：${report.newDocketEntriesCount}`,
+      `docket 新增来源：${formatBreakdown(report.docketSources)}`,
+      `其中官方法院 RSS 补入：${Number(report.rssDocketEntriesCount || 0)}`,
+      ``,
+      `官方法院 RSS 补入明细：`,
+      ...(rssBlocks.length ? rssBlocks.map((item) => item.text) : ["今天没有通过官方法院 RSS 补进新的 docket。"]),
       ``,
       `重点案件摘要：`,
       ...(itemBlocks.length ? itemBlocks.map((item) => item.text) : ["今天没有新增案件或新增 docket entry。"])
@@ -223,7 +251,11 @@ export class DailyEmailReportService {
         <h2>TRO Tracker 日报</h2>
         <p><strong>日期：</strong>${escapeHtml(localDate)}</p>
         <p><strong>当日新增案件：</strong>${report.newCasesCount}<br>
-        <strong>当日新增 docket entries：</strong>${report.newDocketEntriesCount}</p>
+        <strong>当日新增 docket entries：</strong>${report.newDocketEntriesCount}<br>
+        <strong>docket 新增来源：</strong>${escapeHtml(formatBreakdown(report.docketSources))}<br>
+        <strong>其中官方法院 RSS 补入：</strong>${Number(report.rssDocketEntriesCount || 0)}</p>
+        <h3>官方法院 RSS 补入明细</h3>
+        ${rssBlocks.length ? `<ol>${rssBlocks.map((item) => item.html).join("")}</ol>` : "<p>今天没有通过官方法院 RSS 补进新的 docket。</p>"}
         <h3>重点案件摘要</h3>
         ${itemBlocks.length ? `<ol>${itemBlocks.map((item) => item.html).join("")}</ol>` : "<p>今天没有新增案件或新增 docket entry。</p>"}
       </div>

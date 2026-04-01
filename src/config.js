@@ -111,11 +111,11 @@ export const config = {
     port: envInt("PORT", 4127),
     adminToken: env("ADMIN_TOKEN", ""),
     publicCasesMaxPageSize: envInt("PUBLIC_CASES_MAX_PAGE_SIZE", 15),
-    publicHealthCacheTtlMs: envInt("PUBLIC_HEALTH_CACHE_TTL_MS", 5_000),
-    publicStatusCacheTtlMs: envInt("PUBLIC_STATUS_CACHE_TTL_MS", 15_000),
-    publicTroDailyUpdatesCacheTtlMs: envInt("PUBLIC_TRO_DAILY_UPDATES_CACHE_TTL_MS", 60_000),
-    publicCasesCacheTtlMs: envInt("PUBLIC_CASES_CACHE_TTL_MS", 8_000),
-    publicCaseDetailCacheTtlMs: envInt("PUBLIC_CASE_DETAIL_CACHE_TTL_MS", 12_000),
+    publicHealthCacheTtlMs: envInt("PUBLIC_HEALTH_CACHE_TTL_MS", 10_000),
+    publicStatusCacheTtlMs: envInt("PUBLIC_STATUS_CACHE_TTL_MS", 45_000),
+    publicTroDailyUpdatesCacheTtlMs: envInt("PUBLIC_TRO_DAILY_UPDATES_CACHE_TTL_MS", 5 * 60_000),
+    publicCasesCacheTtlMs: envInt("PUBLIC_CASES_CACHE_TTL_MS", 30_000),
+    publicCaseDetailCacheTtlMs: envInt("PUBLIC_CASE_DETAIL_CACHE_TTL_MS", 45_000),
     publicApiCacheMaxEntries: envInt("PUBLIC_API_CACHE_MAX_ENTRIES", 300),
     publicRateLimitWindowMs: envInt("PUBLIC_RATE_LIMIT_WINDOW_MS", 60_000),
     publicRateLimitCasesPerWindow: envInt("PUBLIC_RATE_LIMIT_CASES_PER_WINDOW", 36),
@@ -169,7 +169,7 @@ export const config = {
       startupDelayMs: envInt("DAILY_EMAIL_REPORT_STARTUP_DELAY_MS", 90 * 1000)
     },
     troDailyRoundup: {
-      enabled: envBool("TRO_DAILY_ROUNDUP_ENABLED", false),
+      enabled: envBool("TRO_DAILY_ROUNDUP_ENABLED", true),
       to: env("TRO_DAILY_ROUNDUP_TO", env("DAILY_EMAIL_REPORT_TO", "599214243@qq.com")),
       timeZone: env("TRO_DAILY_ROUNDUP_TIME_ZONE", "Asia/Shanghai"),
       hour: envInt("TRO_DAILY_ROUNDUP_HOUR", 20),
@@ -180,7 +180,7 @@ export const config = {
       perSourceFetchLimit: envInt("TRO_DAILY_ROUNDUP_PER_SOURCE_FETCH_LIMIT", 8),
       checkIntervalMs: envInt("TRO_DAILY_ROUNDUP_CHECK_INTERVAL_MS", 60 * 1000),
       startupDelayMs: envInt("TRO_DAILY_ROUNDUP_STARTUP_DELAY_MS", 120 * 1000),
-      sourcesPath: env("TRO_DAILY_ROUNDUP_SOURCES_PATH", path.join(dataDir, "tro-daily-sources.json"))
+      sourcesPath: env("TRO_DAILY_ROUNDUP_SOURCES_PATH", path.join(dataDir, "tro-daily-roundup-sources.json"))
     },
     troDailyUpdates: {
       path: env("TRO_DAILY_UPDATES_PATH", path.join(dataDir, "tro-daily-updates.json")),
@@ -241,22 +241,29 @@ export const config = {
     minIntervalMs: envInt("COURT_FEEDS_MIN_INTERVAL_MS", 1000),
     maxItemsPerFeed: envInt("COURT_FEEDS_MAX_ITEMS_PER_FEED", 80),
     maxLookupsPerRun: envInt("COURT_FEEDS_MAX_LOOKUPS_PER_RUN", 12),
+    requireKeywordHit: envBool("COURT_FEEDS_REQUIRE_KEYWORD_HIT", true),
+    watchKeywords: envList("COURT_FEEDS_WATCH_KEYWORDS", [
+      "temporary restraining order",
+      "tro",
+      "schedule a",
+      "identified on schedule a",
+      "unincorporated associations",
+      "lanham act",
+      "counterfeit",
+      "seller"
+    ]),
+    watchLawFirms: envList("COURT_FEEDS_WATCH_LAW_FIRMS", [
+      "gbc",
+      "greer burns",
+      "ams",
+      "eps",
+      "keith",
+      "jiang"
+    ]),
     courts: envList("COURT_FEEDS_TARGETS", [
       "ilnd",
       "flsd",
-      "cacd",
-      "cand",
-      "casd",
-      "gand",
-      "gasd",
-      "paed",
-      "mdpa",
-      "pawd",
-      "tned",
-      "tnmd",
-      "tnwd",
-      "waed",
-      "wawd"
+      "nysd"
     ])
   },
   recentFilings: {

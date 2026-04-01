@@ -568,6 +568,125 @@ function simplifyTitle(value) {
   );
 }
 
+const HEADLINE_ALIAS_RULES = [
+  { pattern: /lionel messi|梅西/i, label: "足球巨星梅西" },
+  { pattern: /casio|卡西欧/i, label: "卡西欧" },
+  { pattern: /hatsune miku|初音未来/i, label: "初音未来" },
+  { pattern: /mattel|美泰/i, label: "美泰" },
+  { pattern: /levi strauss|levi'?s|李维斯/i, label: "李维斯" },
+  { pattern: /nike|耐克/i, label: "耐克" },
+  { pattern: /disney|迪士尼/i, label: "迪士尼" }
+];
+
+function stripCompanySuffix(value = "") {
+  return normalizeText(
+    String(value || "")
+      .replace(/\b(?:llc|incorporated|inc|corp|corporation|company|co|ltd|limited|gmbh|pllc|llp|lp|s\.a\.|sarl|b\.v\.)\b\.?,?/gi, " ")
+      .replace(/\s+/g, " ")
+  );
+}
+
+function docketDisplayNumber(value = "") {
+  const raw = normalizeText(value);
+  if (!raw) {
+    return "";
+  }
+
+  const withCourtMatch = raw.match(/\b\d+:(\d{2}-cv-\d{3,6})\b/i);
+  if (withCourtMatch?.[1]) {
+    return withCourtMatch[1];
+  }
+
+  const plainMatch = raw.match(/\b(\d{2}-cv-\d{3,6})\b/i);
+  return plainMatch?.[1] || raw;
+}
+
+function extractPlaintiffLabel(caseName = "") {
+  const title = normalizeText(caseName);
+  const plaintiff = title.split(/\s(?:v\.|vs\.)\s/i)[0] || title;
+  return summarizeText(stripCompanySuffix(plaintiff), 18);
+}
+
+function resolveHeadlineAlias(value = "") {
+  const text = normalizeText(value);
+  const matched = HEADLINE_ALIAS_RULES.find((rule) => rule.pattern.test(text));
+  return matched?.label || "";
+}
+
+function headlineHasAction(value = "") {
+  return /(发起TRO|重磅维权|卖家踩坑|卖家预警|和解进展|撤诉解冻|案件动态)$/i.test(normalizeText(value));
+}
+
+function buildActionLabel(group) {
+  const haystack = group.articles.map((item) => `${item.title || ""} ${item.summary || ""}`).join(" ").toLowerCase();
+  if (/(\d+)\s*个卖家/.test(haystack) || /踩坑/i.test(haystack)) {
+    return "卖家踩坑";
+  }
+  if (/卖家|seller|排查|下架|高危链接|预警/i.test(haystack)) {
+    return "卖家预警";
+  }
+  if (/撤诉|dismiss|解冻|解除冻结/i.test(haystack)) {
+    return "撤诉解冻";
+  }
+  if (/和解|settlement|stipulation/i.test(haystack)) {
+    return "和解进展";
+  }
+  if (/temporary restraining order|\btro\b|冻结|restraining|injunction/i.test(haystack)) {
+    return "发起TRO";
+  }
+  if (/起诉|立案|complaint|filed|lawsuit|维权/i.test(haystack)) {
+    return "重磅维权";
+  }
+  return "案件动态";
+}
+
+function normalizeHeadlineCandidate(value = "") {
+  return normalizeText(
+    String(value || "")
+      .replace(/\b(?:卖家支持|麦家支持|墨婷跨境|青枫TRO|SELLERAEGIS|SellerAegis|赛贝维权申诉|赛贝维权|赛贝)\b/gi, " ")
+      .replace(/\b(?:今日动态|最新|速看|快看|重磅|独家|突发|关注)\b/gi, " ")
+      .replace(/\b\d{4}[\/\-年.]\d{1,2}[\/\-月.]\d{1,2}日?\b/gi, " ")
+      .replace(/\b(?:\d+:)?\d{2}-cv-\d{3,6}\b/gi, " ")
+      .replace(/[【】\[\]()（）|｜丨]+/g, " ")
+      .replace(/[,:：;；]/g, " ")
+      .replace(/(?:[A-Za-z]+|[\u4e00-\u9fff]{1,12})律所代理/gi, " ")
+      .replace(/跨境卖家[^。！？!?,，]{0,30}/gi, " ")
+      .replace(/(?:速排查|下架高危链接|高危链接|卖家速看|速看详情)/gi, " ")
+      .replace(/\b(?:schedule a|tro|temporary restraining order)\b/gi, " ")
+      .replace(/\s+/g, " ")
+      .replace(/^[，,、.。:：\-—–\s]+/, "")
+      .trim()
+  );
+}
+
+function pickHeadlineSubject(group) {
+  const aliasCandidate = resolveHeadlineAlias(
+    group.articles.map((article) => `${article.title} ${article.summary}`).join(" ") || group.caseName || ""
+  );
+  if (aliasCandidate) {
+    return aliasCandidate;
+  }
+
+  const candidates = sortArticlesByTime(group.articles)
+    .map((article) => normalizeHeadlineCandidate(article.title))
+    .filter(Boolean)
+    .map((value) => value.replace(/(?:隐匿维权|重磅维权|发起TRO|卖家踩坑|卖家预警|和解进展|撤诉解冻)$/g, "").trim())
+    .filter(Boolean);
+
+  const chineseCandidate = candidates.find((value) => /[\u4e00-\u9fff]/.test(value) && value.length >= 3);
+  if (chineseCandidate) {
+    return summarizeText(chineseCandidate, 22);
+  }
+
+  const plaintiffLabel = extractPlaintiffLabel(group.caseName || "");
+  if (plaintiffLabel) {
+    return plaintiffLabel;
+  }
+
+  const fallback = candidates[0] || summarizeText(group.caseName || group.docketNumber || "TRO案件", 20);
+  return summarizeText(fallback, 20);
+}
+
 function inferFocus(group) {
   const haystack = group.articles.map((item) => `${item.title} ${item.summary} ${item.bodyText}`).join(" ").toLowerCase();
   if (/和解|settlement/i.test(haystack)) {
@@ -596,18 +715,21 @@ function buildGroupKey(article, reference) {
 }
 
 function buildRoundupTitle(group) {
-  const label = group.caseName || group.docketNumber || summarizeText(group.articles[0]?.title || "TRO 案件", 42);
-  if (group.sources.length > 1) {
-    return `${group.sources.join("、")} 同步跟进 ${label}`;
+  const docketLabel = docketDisplayNumber(group.docketNumber || "");
+  const subjectLabel = pickHeadlineSubject(group);
+  const actionLabel = headlineHasAction(subjectLabel) ? "" : buildActionLabel(group);
+  const titleBody = `${subjectLabel}${actionLabel}`.trim();
+  if (docketLabel) {
+    return `${docketLabel} ${titleBody}`.trim();
   }
-  return `${group.sources[0] || "TRO 来源"} 跟进 ${label}`;
+  return titleBody || summarizeText(group.caseName || "TRO案件动态", 28);
 }
 
 function buildRoundupSummary(group) {
   const focus = inferFocus(group);
   const prefix = group.docketNumber ? `案号 ${group.docketNumber}` : group.caseName ? group.caseName : "这起案件";
   if (group.sources.length > 1) {
-    return `${prefix} 今天被 ${group.sources.length} 家来源同时提到，重点围绕${focus}。`;
+    return `${prefix} 今天有多条公开更新，重点围绕${focus}。`;
   }
   return `${prefix} 今天出现新的公开动态，重点围绕${focus}。`;
 }
@@ -893,6 +1015,47 @@ function writeTroDailyUpdatesFile(filePath, payload) {
   fs.writeFileSync(filePath, `${JSON.stringify(payload, null, 2)}\n`, "utf-8");
 }
 
+function readTroDailyUpdatesFile(filePath) {
+  const target = String(filePath || "").trim();
+  if (!target || !fs.existsSync(target)) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(fs.readFileSync(target, "utf-8"));
+  } catch {
+    return null;
+  }
+}
+
+function shouldRefreshTroDailyUpdatesFile(filePath, localDate, timeZone = "Asia/Shanghai", maxAgeMs = 2 * 60 * 60 * 1000) {
+  const existing = readTroDailyUpdatesFile(filePath);
+  if (!existing) {
+    return true;
+  }
+
+  const itemCount = Array.isArray(existing.items) ? existing.items.length : 0;
+  if (itemCount === 0) {
+    return true;
+  }
+
+  const updatedAtMs = Date.parse(String(existing.updatedAt || existing.updated_at || ""));
+  const updatedLocalDate =
+    normalizeText(existing.localDate || existing.local_date || "") ||
+    toDateKey(existing.updatedAt || existing.updated_at || "", timeZone) ||
+    null;
+
+  if (!updatedLocalDate || updatedLocalDate !== localDate) {
+    return true;
+  }
+
+  if (!Number.isFinite(updatedAtMs)) {
+    return true;
+  }
+
+  return Date.now() - updatedAtMs >= maxAgeMs;
+}
+
 export class TroDailyRoundupService {
   constructor({ config, store }) {
     this.config = config;
@@ -919,26 +1082,59 @@ export class TroDailyRoundupService {
     );
   }
 
+  async refreshUpdates({ localDate = formatDateKey(new Date(), this.reportConfig.timeZone || "Asia/Shanghai"), force = false } = {}) {
+    const timeZone = this.reportConfig.timeZone || this.outputConfig.timeZone || "Asia/Shanghai";
+    const shouldRefresh = force || shouldRefreshTroDailyUpdatesFile(this.outputConfig.path, localDate, timeZone);
+    if (!shouldRefresh) {
+      const existing = readTroDailyUpdatesFile(this.outputConfig.path) || {};
+      return {
+        refreshed: false,
+        reason: "fresh",
+        localDate,
+        updatedAt: existing.updatedAt || existing.updated_at || null,
+        itemCount: Array.isArray(existing.items) ? existing.items.length : 0
+      };
+    }
+
+    const payload = await collectTroDailyRoundup({
+      config: this.config,
+      store: this.store,
+      localDate,
+      timeZone
+    });
+
+    writeTroDailyUpdatesFile(this.outputConfig.path, payload);
+    return {
+      refreshed: true,
+      localDate,
+      updatedAt: payload.updatedAt,
+      itemCount: payload.items.length,
+      totalGroups: payload.total
+    };
+  }
+
   async maybeSendScheduledRoundup() {
     if (!this.isEnabled()) {
       return { sent: false, reason: "disabled" };
     }
 
-    if (!this.hasTransportConfig()) {
-      return { sent: false, reason: "missing-config" };
-    }
-
     const now = new Date();
     const timeZone = this.reportConfig.timeZone || "Asia/Shanghai";
-    const { hour, minute } = getClockParts(now, timeZone);
-    if (hour !== Number(this.reportConfig.hour || 20) || minute !== Number(this.reportConfig.minute || 0)) {
-      return { sent: false, reason: "not-time" };
+    const localDate = formatDateKey(now, timeZone);
+    const refresh = await this.refreshUpdates({ localDate });
+
+    if (!this.hasTransportConfig()) {
+      return { sent: false, reason: "missing-config", refresh };
     }
 
-    const localDate = formatDateKey(now, timeZone);
+    const { hour, minute } = getClockParts(now, timeZone);
+    if (hour !== Number(this.reportConfig.hour || 20) || minute !== Number(this.reportConfig.minute || 0)) {
+      return { sent: false, reason: "not-time", localDate, refresh };
+    }
+
     const checkpoint = this.store.getCheckpoint(this.checkpointKey) || {};
     if (checkpoint.localDate === localDate) {
-      return { sent: false, reason: "already-sent", localDate };
+      return { sent: false, reason: "already-sent", localDate, refresh };
     }
 
     return this.sendRoundup({ localDate });
@@ -961,14 +1157,16 @@ export class TroDailyRoundupService {
 
     try {
       const timeZone = this.reportConfig.timeZone || "Asia/Shanghai";
-      const payload = await collectTroDailyRoundup({
-        config: this.config,
-        store: this.store,
+      await this.refreshUpdates({ localDate, force: true });
+      const payload = readTroDailyUpdatesFile(this.outputConfig.path) || {
+        updatedAt: new Date().toISOString(),
         localDate,
-        timeZone
-      });
-
-      writeTroDailyUpdatesFile(this.outputConfig.path, payload);
+        items: [],
+        total: 0,
+        sourceUpdates: [],
+        overlaps: [],
+        errors: []
+      };
 
       const mail = buildEmailMessage(payload);
       const transport = nodemailer.createTransport({

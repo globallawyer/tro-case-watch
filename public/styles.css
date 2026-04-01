@@ -158,10 +158,10 @@ a {
 
 .tro-briefing-item {
   display: grid;
-  gap: 4px;
+  gap: 2px;
   min-width: min(34rem, 72vw);
   max-width: min(34rem, 72vw);
-  padding: 8px 10px;
+  padding: 7px 10px;
   border-radius: 16px;
   border: 1px solid rgba(21, 32, 41, 0.08);
   background: rgba(255, 255, 255, 0.9);
@@ -174,8 +174,7 @@ a {
   box-shadow: 0 10px 20px rgba(39, 95, 165, 0.08);
 }
 
-.tro-briefing-source,
-.tro-briefing-summary {
+.tro-briefing-source {
   color: rgba(21, 32, 41, 0.6);
   font-size: 0.75rem;
   line-height: 1.4;
@@ -306,6 +305,13 @@ a {
   font-size: clamp(2rem, 3.35vw, 3.6rem);
   line-height: 1.03;
   letter-spacing: -0.02em;
+}
+
+.lookup-hint {
+  margin: 10px 0 0;
+  color: rgba(21, 32, 41, 0.58);
+  font-size: 0.82rem;
+  line-height: 1.5;
 }
 
 .hero-text {
@@ -1280,7 +1286,7 @@ a {
   height: min(72vh, 820px);
   min-height: 0;
   overflow-y: auto;
-  overscroll-behavior: contain;
+  overscroll-behavior: auto;
   scrollbar-gutter: stable;
 }
 
@@ -1592,6 +1598,12 @@ a {
     max-width: none;
     font-size: clamp(0.96rem, 4.8vw, 1.28rem);
     line-height: 1.12;
+  }
+
+  .lookup-hint {
+    margin-top: 8px;
+    font-size: 0.7rem;
+    line-height: 1.45;
   }
 
   .lookup-form {

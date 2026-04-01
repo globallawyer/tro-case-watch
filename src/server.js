@@ -80,6 +80,7 @@ const syncService = new CaseSyncService({
 const backgroundCaseHydrations = new Map();
 const publicResponseCache = new Map();
 const publicRateLimitBuckets = new Map();
+let lastTroDailyUpdatesRefreshQueuedAt = 0;
 const browserGuardCookieName = "__tt_guard";
 const publicSiteOrigins = new Set([
   "https://trotracker.com",
@@ -857,6 +858,33 @@ function serializeTroDailyUpdates(payload = {}) {
   };
 }
 
+function troDailyUpdatesRefreshIsStale(payload = {}) {
+  const updatedAtMs = Date.parse(String(payload.updatedAt || ""));
+  if (!Number.isFinite(updatedAtMs)) {
+    return true;
+  }
+  return Date.now() - updatedAtMs >= 2 * 60 * 60 * 1000;
+}
+
+function queueTroDailyUpdatesRefreshIfNeeded(payload = {}) {
+  if (!config.reports?.troDailyRoundup?.enabled) {
+    return;
+  }
+
+  const isStale = troDailyUpdatesRefreshIsStale(payload);
+  const isEmpty = Number(payload.total || 0) === 0;
+  if (!isStale && !isEmpty) {
+    return;
+  }
+
+  if (Date.now() - lastTroDailyUpdatesRefreshQueuedAt < 10 * 60 * 1000) {
+    return;
+  }
+
+  lastTroDailyUpdatesRefreshQueuedAt = Date.now();
+  spawnDetachedTask(["--sync-only", "tro-daily-updates"]);
+}
+
 function sanitizeEntryDocumentType(value) {
   const type = String(value || "").trim();
   if (!type) {
@@ -1003,6 +1031,20 @@ function buildCaseHydrationPlan(item = {}) {
     priority: priorityFeed,
     pacermonitor
   };
+}
+
+function shouldHydratePublicCaseDetailOnDemand(item = {}) {
+  const entryCount = Number(item.entries?.length || 0);
+  if (entryCount >= 4) {
+    return false;
+  }
+
+  const syncedAt = item.last_docket_sync_at ? Date.parse(item.last_docket_sync_at) : 0;
+  if (syncedAt && Date.now() - syncedAt < 4 * 60 * 60 * 1000) {
+    return false;
+  }
+
+  return buildCaseHydrationPlan(item).pending;
 }
 
 function queueCaseHydration(caseId, initialItem) {
@@ -1249,6 +1291,20 @@ function serializeGapPayload(payload = {}) {
   };
 }
 
+function looksLikeBareDocketSequence(value = "") {
+  return /^\d{5,6}$/.test(String(value || "").trim());
+}
+
+function isStrictCivilDocketLookup(value = "") {
+  const search = String(value || "").trim();
+  return /^(?:\d+:)?\d{2}-cv-\d{5,6}$/i.test(search);
+}
+
+function isMalformedCivilDocketLookup(value = "") {
+  const search = String(value || "").trim();
+  return /(?:\d+:)?\d{2}-cv-/i.test(search) && !isStrictCivilDocketLookup(search);
+}
+
 function normalizeCategory(value = "") {
   const normalized = String(value || "").trim().toLowerCase();
   return ["watchlist", "seller_watch", "tro", "schedule_a", "all"].includes(normalized) ? normalized : "";
@@ -1260,7 +1316,7 @@ function resolveSearchCategory(search = "", requestedCategory = "") {
     return explicitCategory;
   }
 
-  if (docketLooksLike(search)) {
+  if (docketLooksLike(search) || looksLikeBareDocketSequence(search)) {
     return "all";
   }
 
@@ -1341,6 +1397,9 @@ async function handleApi(request, response, pathname, searchParams) {
 
     let payload = store.listCases(filters);
     const isDirectDocketLookup = docketLooksLike(filters.search);
+    const isBareDocketSequence = looksLikeBareDocketSequence(filters.search);
+    const isStrictDirectDocketLookup = isStrictCivilDocketLookup(filters.search);
+    const isMalformedDirectDocketLookup = isMalformedCivilDocketLookup(filters.search);
 
     if (filters.search && payload.total === 0 && isDirectDocketLookup) {
       const relaxedPayload = findRelaxedPayload(store, filters);
@@ -1349,7 +1408,11 @@ async function handleApi(request, response, pathname, searchParams) {
       }
     }
 
-    if (filters.search && payload.total === 0 && isDirectDocketLookup) {
+    if (filters.search && payload.total === 0 && isMalformedDirectDocketLookup) {
+      payload.lookupError = "案号格式建议输入 00123 或 26-cv-00123，避免输入 26-cv-123。";
+    }
+
+    if (filters.search && payload.total === 0 && isStrictDirectDocketLookup) {
       try {
         const imported = await syncService.importLookup(filters.search);
         payload = store.listCases(filters);
@@ -1362,18 +1425,6 @@ async function handleApi(request, response, pathname, searchParams) {
         payload.liveImported = imported;
       } catch (error) {
         payload.lookupError = error.message;
-      }
-    }
-
-    if (filters.search && payload.items?.length) {
-      const exactDocketLookup = docketLooksLike(filters.search);
-      if (exactDocketLookup) {
-        payload.items.slice(0, 3).forEach((item) => {
-          const detail = store.getCase(item.id);
-          if (detail) {
-            queueCaseHydration(item.id, detail);
-          }
-        });
       }
     }
 
@@ -1395,7 +1446,9 @@ async function handleApi(request, response, pathname, searchParams) {
       return sendJson(response, 404, { error: "Case not found" });
     }
 
-    const hydrationPlan = queueCaseHydration(caseId, item);
+    const hydrationPlan = shouldHydratePublicCaseDetailOnDemand(item)
+      ? queueCaseHydration(caseId, item)
+      : buildCaseHydrationPlan(item);
     const payload = serializePublicCaseDetail({
       ...item,
       hydration_pending: hydrationPlan
@@ -1418,10 +1471,12 @@ async function handleApi(request, response, pathname, searchParams) {
   if (request.method === "GET" && pathname === "/api/tro-daily-updates") {
     const cached = getCachedPublicPayload(request, pathname);
     if (cached) {
+      queueTroDailyUpdatesRefreshIfNeeded(cached);
       return sendJson(response, 200, cached);
     }
 
     const payload = serializeTroDailyUpdates(loadTroDailyUpdates(config.reports.troDailyUpdates));
+    queueTroDailyUpdatesRefreshIfNeeded(payload);
     setCachedPublicPayload(request, pathname, payload);
     return sendJson(response, 200, payload);
   }
@@ -2008,6 +2063,12 @@ async function main() {
       process.exit(0);
     }
 
+    if (rawMode === "tro-daily-updates") {
+      const result = await troDailyRoundup.refreshUpdates({});
+      console.log(`[sync] completed tro-daily-updates ${JSON.stringify(result)}`);
+      process.exit(0);
+    }
+
     const mode = rawMode === "backfill" ? "backfill" : "recent";
     await syncService.run(mode);
     console.log(`[sync] completed ${mode}`);
@@ -2073,6 +2134,10 @@ async function main() {
   }
 
   if (config.reports?.troDailyRoundup?.enabled) {
+    setTimeout(() => {
+      spawnDetachedTask(["--sync-only", "tro-daily-updates"]);
+    }, Math.min(config.reports.troDailyRoundup.startupDelayMs, 60 * 1000));
+
     setTimeout(() => {
       spawnDetachedTask(["--sync-only", "tro-daily-roundup"]);
     }, config.reports.troDailyRoundup.startupDelayMs);

@@ -14,6 +14,12 @@ const DEFAULT_COURT_FEEDS = [
     feedUrl: "https://ecf.flsd.uscourts.gov/cgi-bin/rss_outside.pl"
   },
   {
+    id: "nysd",
+    courtId: "nysd",
+    courtName: "Southern District of New York",
+    feedUrl: "https://ecf.nysd.uscourts.gov/cgi-bin/rss_outside.pl"
+  },
+  {
     id: "cacd",
     courtId: "cacd",
     courtName: "Central District of California",

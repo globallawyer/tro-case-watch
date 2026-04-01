@@ -3948,6 +3948,69 @@ export class Store {
         .get(startIso, endIso)?.n || 0
     );
 
+    const docketSources = this.db
+      .prepare(`
+        SELECT
+          COALESCE(primary_source, 'unknown') AS source,
+          COUNT(*) AS count
+        FROM docket_entries
+        WHERE created_at >= ?
+          AND created_at < ?
+        GROUP BY COALESCE(primary_source, 'unknown')
+        ORDER BY count DESC, source ASC
+      `)
+      .all(startIso, endIso)
+      .map((row) => ({
+        source: row.source || "unknown",
+        count: Number(row.count || 0)
+      }));
+
+    const rssDocketEntriesCount = Number(
+      this.db
+        .prepare(`
+          SELECT COUNT(*) AS n
+          FROM docket_entries
+          WHERE created_at >= ?
+            AND created_at < ?
+            AND primary_source = 'courtfeed'
+        `)
+        .get(startIso, endIso)?.n || 0
+    );
+
+    const rssItems = this.db
+      .prepare(`
+        SELECT
+          c.id,
+          c.docket_number,
+          c.case_name,
+          c.court_id,
+          c.court_name,
+          COUNT(de.id) AS new_entry_count,
+          MAX(de.created_at) AS last_entry_created_at
+        FROM docket_entries de
+        JOIN cases c
+          ON c.id = de.case_id
+        WHERE de.created_at >= ?
+          AND de.created_at < ?
+          AND de.primary_source = 'courtfeed'
+        GROUP BY c.id
+        ORDER BY
+          new_entry_count DESC,
+          MAX(de.created_at) DESC,
+          c.id DESC
+        LIMIT ?
+      `)
+      .all(startIso, endIso, Math.max(1, Math.min(Number(caseLimit || 12), 20)))
+      .map((row) => ({
+        id: Number(row.id),
+        docket_number: row.docket_number || null,
+        case_name: row.case_name || null,
+        court_id: row.court_id || null,
+        court_name: row.court_name || null,
+        new_entry_count: Number(row.new_entry_count || 0),
+        last_entry_created_at: row.last_entry_created_at || null
+      }));
+
     const items = this.db
       .prepare(`
         SELECT
@@ -4018,6 +4081,9 @@ export class Store {
     return {
       newCasesCount,
       newDocketEntriesCount,
+      docketSources,
+      rssDocketEntriesCount,
+      rssItems,
       items
     };
   }

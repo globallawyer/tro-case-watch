@@ -14,6 +14,7 @@ let currentCasesPayload = null;
 let detailRequestToken = 0;
 let casesRequestToken = 0;
 let detailRefreshTimer = null;
+let prefetchDetailsTimer = null;
 const inflightDetailRequests = new Map();
 const caseRoutePattern = /^\/case\/(\d+)\/?$/;
 let latestStatusPayload = null;
@@ -112,12 +113,12 @@ function formatTroDailyUpdatesTime(value) {
 function troDailyUpdatesMeta(item = {}) {
   const sources = Array.isArray(item.sources) ? item.sources.filter(Boolean) : [];
   if (sources.length > 1) {
-    return `${sources.join(" / ")} · ${sources.length} 家同时提到`;
+    return `站内整理 · 多方公开动态`;
   }
   if (sources.length === 1) {
-    return sources[0];
+    return "站内整理";
   }
-  return "公开来源";
+  return "站内整理";
 }
 
 function renderTroDailyUpdatesLoading() {
@@ -171,7 +172,6 @@ function renderTroDailyUpdates(payload = {}) {
                 <a class="tro-briefing-item" href="${item.href || "/#wechat-contact"}">
                   <span class="tro-briefing-source">${troDailyUpdatesMeta(item)}</span>
                   <strong>${item.title || "今日动态"}</strong>
-                  ${item.summary ? `<span class="tro-briefing-summary">${item.summary}</span>` : ""}
                 </a>
               `
             )
@@ -864,8 +864,37 @@ function scheduleIncompleteDetailRefresh(caseId, requestToken, attempt = 0) {
   }, delays[attempt]);
 }
 
+function queueIdle(callback) {
+  if (typeof window.requestIdleCallback === "function") {
+    return window.requestIdleCallback(callback, { timeout: 900 });
+  }
+  return window.setTimeout(callback, 260);
+}
+
+function cancelIdle(taskId) {
+  if (!taskId) {
+    return;
+  }
+
+  if (typeof window.cancelIdleCallback === "function") {
+    window.cancelIdleCallback(taskId);
+    return;
+  }
+
+  window.clearTimeout(taskId);
+}
+
 function prefetchVisibleCaseDetails(items = []) {
-  items.slice(0, 3).forEach((item) => prefetchCaseDetail(item.id));
+  cancelIdle(prefetchDetailsTimer);
+  const targets = items.slice(0, 3).map((item) => item.id).filter(Boolean);
+  if (!targets.length) {
+    return;
+  }
+
+  prefetchDetailsTimer = queueIdle(() => {
+    prefetchDetailsTimer = null;
+    targets.forEach((caseId) => prefetchCaseDetail(caseId));
+  });
 }
 
 async function loadStatus() {
@@ -902,7 +931,6 @@ async function loadCases({ autoSelectFirst = false, preserveSelection = true } =
   }
 
   renderCases(payload);
-  prefetchVisibleCaseDetails(payload.items || []);
   return payload;
 }
 
@@ -910,10 +938,6 @@ async function loadCaseDetail(caseId, { summaryItem = null, focus = false, updat
   const requestToken = ++detailRequestToken;
   clearDetailRefreshTimer();
   const cached = getCachedDetail(caseId);
-
-  if (summaryItem) {
-    renderDetailLoading(summaryItem);
-  }
 
   if (focus) {
     jumpToDetailPanel();
@@ -926,8 +950,15 @@ async function loadCaseDetail(caseId, { summaryItem = null, focus = false, updat
   if (cached) {
     if (requestToken === detailRequestToken) {
       renderDetail(cached);
+      if (shouldRefreshIncompleteDetail(cached)) {
+        scheduleIncompleteDetailRefresh(caseId, requestToken);
+      }
     }
     return;
+  }
+
+  if (summaryItem) {
+    renderDetailLoading(summaryItem);
   }
 
   const item = await fetchCaseDetail(caseId);
@@ -1045,6 +1076,9 @@ if (copyWechatButton) {
 
 async function boot() {
   bindQrCardFrost();
+  if ("scrollRestoration" in window.history) {
+    window.history.scrollRestoration = "manual";
+  }
   const routeCaseId = getRouteCaseId();
   if (routeCaseId) {
     state.selectedCaseId = routeCaseId;
@@ -1052,14 +1086,23 @@ async function boot() {
       docket_number: `Case #${routeCaseId}`,
       case_name: "正在载入案件详情"
     });
+  } else {
+    window.scrollTo({
+      top: 0,
+      left: 0,
+      behavior: "auto"
+    });
   }
 
+  const statusPromise = loadStatus().catch(console.error);
   await loadCases({
     autoSelectFirst: !routeCaseId,
     preserveSelection: Boolean(routeCaseId)
   });
-  loadStatus().catch(console.error);
-  loadTroDailyUpdates().catch(console.error);
+  window.setTimeout(() => {
+    loadTroDailyUpdates().catch(() => {});
+  }, 900);
+  await Promise.allSettled([statusPromise]);
 
   if (routeCaseId) {
     const summaryItem = currentCasesPayload?.items?.find((item) => item.id === routeCaseId) || null;
@@ -1070,10 +1113,16 @@ async function boot() {
   }
 
   window.setInterval(() => {
+    if (document.visibilityState !== "visible") {
+      return;
+    }
     loadStatus().catch(() => {});
   }, statusPollMs);
 
   window.setInterval(() => {
+    if (document.visibilityState !== "visible") {
+      return;
+    }
     loadTroDailyUpdates().catch(() => {});
   }, troDailyUpdatesPollMs);
 }

@@ -86,6 +86,18 @@ function shouldAttemptPriorityFeedForCase(caseRow = {}, { force = false } = {}) 
   );
 }
 
+function buildCourtFeedWatchText(item = {}) {
+  return normalizeText([
+    item.title,
+    item.caseName,
+    item.documentType,
+    item.description,
+    item.rawDescription,
+    item.courtName,
+    item.docketNumber
+  ].filter(Boolean).join(" | "));
+}
+
 const DISTRICT_DIRECTION_MAP = {
   N: "Northern",
   S: "Southern",
@@ -180,6 +192,7 @@ const COURTLISTENER_NEGATIVE_TERMS = {
     "bankruptcy",
     "debtor",
     "chapter 7",
+    "chapter 12",
     "chapter 11",
     "chapter 13",
     "trustee",
@@ -199,6 +212,8 @@ const COURTLISTENER_NEGATIVE_TERMS = {
     "removal proceeding",
     "deport",
     "deportation",
+    "naturalization",
+    "citizenship",
     "uscis",
     "ice detention",
     "alien detainee"
@@ -212,7 +227,9 @@ const COURTLISTENER_NEGATIVE_TERMS = {
     "premises liability",
     "slip and fall",
     "motor vehicle",
-    "auto accident"
+    "auto accident",
+    "negligence",
+    "tort"
   ]
 };
 const COURTLISTENER_IP_CAUSE_PATTERNS = [/\b15:1114\b/i, /\b15:1125\b/i, /\b17:501\b/i, /\b35:271\b/i];
@@ -1272,12 +1289,32 @@ export class CaseSyncService {
     );
   }
 
+  matchesCourtFeedWatchKeywords(item) {
+    const text = buildCourtFeedWatchText(item);
+    if (!text) {
+      return false;
+    }
+
+    const keywords = asArray(this.config.courtFeeds.watchKeywords)
+      .map((value) => normalizeText(value))
+      .filter(Boolean);
+    const lawFirms = asArray(this.config.courtFeeds.watchLawFirms)
+      .map((value) => normalizeText(value))
+      .filter(Boolean);
+
+    return keywords.some((value) => text.includes(value)) || lawFirms.some((value) => text.includes(value));
+  }
+
   shouldTrackCourtFeedItem(item, existingCase, tags) {
     if (!/\b\d{2}-cv-\d{3,6}\b/i.test(String(item.docketNumber || ""))) {
       return false;
     }
 
     if (existingCase) {
+      return true;
+    }
+
+    if (this.config.courtFeeds.requireKeywordHit && this.matchesCourtFeedWatchKeywords(item)) {
       return true;
     }
 
