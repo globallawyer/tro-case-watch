@@ -32,7 +32,7 @@ export const DEFAULT_TRO_DAILY_ROUNDUP_SOURCES = [
     id: "maijiazhichi",
     label: "卖家支持",
     aliases: ["麦家支持"],
-    discoveryUrls: ["https://maijiazhichi.com/", "https://worldtro.com/tro/"],
+    discoveryUrls: ["https://maijiazhichi.com/news", "https://worldtro.com/tro/"],
     allowedHosts: ["maijiazhichi.com", "www.maijiazhichi.com", "worldtro.com", "www.worldtro.com"],
     articleUrlPatterns: ["/tro/", "/article/", "/news/", "/case/", "/detail/"],
     note: "优先抓官网与 worldtro 的公开动态页"
