@@ -899,6 +899,15 @@ export class CaseSyncService {
       }
 
       try {
+        const recentFollowUpResult = await this.syncRecentExistingCaseFollowUps(mode);
+        if (recentFollowUpResult.note) {
+          stats.notes.push(recentFollowUpResult.note);
+        }
+      } catch (error) {
+        stats.notes.push(`旧案 recent-filed 跟进跳过：${error.message}`);
+      }
+
+      try {
         const priorityFeedResult = await this.syncPriorityFeedRecent(mode);
         stats.priorityFeedCasesSynced += priorityFeedResult.syncedCases;
         if (priorityFeedResult.note) {
@@ -2109,6 +2118,121 @@ export class CaseSyncService {
       courtListenerSynced,
       failedCases
     };
+  }
+
+  isRecentFiledExistingCase(caseRow, recentFiledWindowDays = 2) {
+    const recentFiledCutoff = Date.now() - Math.max(1, Number(recentFiledWindowDays || 2)) * 24 * 60 * 60 * 1000;
+    const createdAtMs = Date.parse(String(caseRow?.created_at || ""));
+    const activityAtMs = Date.parse(String(caseRow?.latest_docket_filed_at || caseRow?.updated_at || caseRow?.date_filed || ""));
+    return Number.isFinite(createdAtMs) && Number.isFinite(activityAtMs) && createdAtMs < recentFiledCutoff && activityAtMs >= recentFiledCutoff;
+  }
+
+  buildRecentExistingCaseFollowUpCandidates() {
+    const maxCases = Math.max(0, Number(this.config.sync.recentExistingCaseFollowUpMaxCasesPerRun || 0));
+    if (!maxCases) {
+      return new Map();
+    }
+
+    const recentFiledWindowDays = this.config.sync.recentDocketFollowUpDays;
+    const followUpPoolSize = Math.max(maxCases * 3, 18);
+    const candidates = new Map();
+
+    const priorityRows = this.store.getCasesNeedingPriorityFeedSync(
+      Math.max(followUpPoolSize, maxCases * 4),
+      this.config.priorityFeed.staleAfterHours,
+      {
+        recentFiledWindowDays,
+        preferKnownPriorityFeed: false
+      }
+    );
+    for (const row of priorityRows) {
+      if (!this.isRecentFiledExistingCase(row, recentFiledWindowDays)) {
+        continue;
+      }
+      this.mergeCrossSourceFollowUpCandidate(candidates, {
+        caseId: Number(row.id),
+        docketNumber: row.docket_number || null,
+        filedAt: row.latest_docket_filed_at || row.updated_at || row.date_filed || null,
+        priority:
+          row.tags_marker?.includes("|seller_tro|")
+            ? 0
+            : row.tags_marker?.includes("|tro|") || row.tags_marker?.includes("|schedule_a|")
+              ? 1
+              : 2,
+        priorityFeed: true,
+        courtListener: Boolean(row.courtlistener_docket_id || row.docket_number || row.case_name)
+      });
+    }
+
+    const courtListenerRows = this.store.getCasesNeedingCourtListenerFollowUp(
+      Math.max(followUpPoolSize, maxCases * 4),
+      {
+        recentFiledWindowDays,
+        startDate: getDiscoveryStartDate(this.config)
+      }
+    );
+    for (const row of courtListenerRows) {
+      this.mergeCrossSourceFollowUpCandidate(candidates, {
+        caseId: Number(row.id),
+        docketNumber: row.docket_number || null,
+        filedAt: row.latest_docket_filed_at || row.updated_at || row.date_filed || null,
+        priority:
+          row.tags_marker?.includes("|seller_tro|")
+            ? 0
+            : row.tags_marker?.includes("|tro|") || row.tags_marker?.includes("|schedule_a|")
+              ? 1
+              : 2,
+        priorityFeed: shouldAttemptPriorityFeedForCase(row, { force: false }),
+        courtListener: Boolean(row.courtlistener_docket_id || row.docket_number || row.case_name)
+      });
+    }
+
+    const selected = [...candidates.values()]
+      .sort((left, right) => {
+        if (Number(left.priority ?? 99) !== Number(right.priority ?? 99)) {
+          return Number(left.priority ?? 99) - Number(right.priority ?? 99);
+        }
+
+        const filedCompare = compareCaseActivityDesc(left.filedAt, right.filedAt);
+        if (filedCompare !== 0) {
+          return filedCompare;
+        }
+
+        return Number(right.caseId || 0) - Number(left.caseId || 0);
+      })
+      .slice(0, maxCases);
+
+    return new Map(selected.map((item) => [Number(item.caseId), item]));
+  }
+
+  async syncRecentExistingCaseFollowUps(mode = "recent") {
+    if (mode !== "recent") {
+      return {
+        candidateCount: 0,
+        triggeredCases: 0,
+        priorityFeedTriggered: 0,
+        priorityFeedSynced: 0,
+        courtListenerTriggered: 0,
+        courtListenerSynced: 0,
+        failedCases: 0,
+        note: null
+      };
+    }
+
+    return this.store.batchMutations(async () => {
+      const followUpCandidates = this.buildRecentExistingCaseFollowUpCandidates();
+      const followUpResult = await this.followUpCrossSourceCases(followUpCandidates);
+      const note = followUpResult.triggeredCases
+        ? `旧案 recent-filed 跟进队列本轮命中 ${followUpResult.triggeredCases} 个案件（worldtro ${followUpResult.priorityFeedTriggered}/${followUpResult.priorityFeedSynced}，CourtListener ${followUpResult.courtListenerTriggered}/${followUpResult.courtListenerSynced}${followUpResult.failedCases ? `，失败 ${followUpResult.failedCases}` : ""}）。`
+        : followUpCandidates.size
+          ? `旧案 recent-filed 跟进队列本轮候选 ${followUpCandidates.size} 个，但未形成新的跨源补抓。`
+          : "旧案 recent-filed 跟进队列当前没有候选案件。";
+
+      return {
+        ...followUpResult,
+        note
+      };
+    });
   }
 
   async syncCourtFeedsRecent(mode = "recent") {

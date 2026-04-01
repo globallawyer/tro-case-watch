@@ -201,6 +201,7 @@ export const config = {
     discoveryMaxPagesPerRun: envInt("DISCOVERY_MAX_PAGES_PER_RUN", 3),
     backfillMaxPagesPerRun: envInt("BACKFILL_MAX_PAGES_PER_RUN", 50),
     recentDocketFollowUpDays: envInt("RECENT_DOCKET_FOLLOW_UP_DAYS", 2),
+    recentExistingCaseFollowUpMaxCasesPerRun: envInt("RECENT_EXISTING_CASE_FOLLOW_UP_MAX_CASES_PER_RUN", 6),
     workerCycleSleepMs: envInt("WORKER_CYCLE_SLEEP_MS", 30 * 1000),
     workerErrorBackoffMs: envInt("WORKER_ERROR_BACKOFF_MS", 15 * 1000),
     workerBackfillEveryMs: envInt("WORKER_BACKFILL_EVERY_MS", 60 * 60 * 1000),
