@@ -81,6 +81,7 @@ const backgroundCaseHydrations = new Map();
 const publicResponseCache = new Map();
 const publicRateLimitBuckets = new Map();
 const publicBehaviorBuckets = new Map();
+const publicChallengeBuckets = new Map();
 const pendingLookupImports = new Map();
 let lastTroDailyUpdatesRefreshQueuedAt = 0;
 const browserGuardCookieName = "__tt_guard";
@@ -712,6 +713,81 @@ function getBehaviorBucket(request) {
   return nextBucket;
 }
 
+function pruneChallengeBuckets() {
+  const cutoff = Date.now() - config.server.publicTemporaryBlockMs * 2;
+  for (const [key, bucket] of publicChallengeBuckets.entries()) {
+    if ((bucket.blockedUntil || 0) < cutoff && (bucket.firstStrikeAt || 0) < cutoff) {
+      publicChallengeBuckets.delete(key);
+    }
+  }
+}
+
+function getChallengeBucket(request) {
+  if (publicChallengeBuckets.size > 5000) {
+    pruneChallengeBuckets();
+  }
+
+  const key = getPublicBehaviorKey(request);
+  const existing = publicChallengeBuckets.get(key);
+  if (existing) {
+    return existing;
+  }
+
+  const nextBucket = {
+    strikeCount: 0,
+    firstStrikeAt: 0,
+    blockedUntil: 0
+  };
+  publicChallengeBuckets.set(key, nextBucket);
+  return nextBucket;
+}
+
+function registerBehaviorStrike(request) {
+  const bucket = getChallengeBucket(request);
+  const now = Date.now();
+  const resetAfterMs = config.server.publicRateLimitWindowMs * 4;
+  if (!bucket.firstStrikeAt || now - bucket.firstStrikeAt > resetAfterMs) {
+    bucket.strikeCount = 1;
+    bucket.firstStrikeAt = now;
+  } else {
+    bucket.strikeCount += 1;
+  }
+
+  if (bucket.strikeCount >= config.server.publicBehaviorStrikeLimit) {
+    bucket.blockedUntil = now + config.server.publicTemporaryBlockMs;
+    bucket.strikeCount = 0;
+    bucket.firstStrikeAt = 0;
+  }
+
+  return bucket;
+}
+
+function sendTemporaryBlock(response, blockedUntil) {
+  const retryAfter = Math.max(1, Math.ceil((blockedUntil - Date.now()) / 1000));
+  response.writeHead(429, {
+    ...buildApiHeaders(),
+    "retry-after": String(retryAfter)
+  });
+  response.end(JSON.stringify({
+    error: "Temporarily blocked",
+    retry_after_seconds: retryAfter
+  }));
+}
+
+function enforceTemporaryPublicBlock(request, response, pathname) {
+  if (request.method !== "GET" || authorize(request) || !requiresBrowserGuard(pathname)) {
+    return false;
+  }
+
+  const bucket = getChallengeBucket(request);
+  if ((bucket.blockedUntil || 0) > Date.now()) {
+    sendTemporaryBlock(response, bucket.blockedUntil);
+    return true;
+  }
+
+  return false;
+}
+
 function sendBehaviorThrottle(response, bucket, label) {
   const retryAfter = Math.max(
     1,
@@ -762,6 +838,7 @@ async function enforcePublicBehaviorThrottle(request, response, pathname, search
     if (normalizedSearch) {
       bucket.searches.add(normalizedSearch);
       if (bucket.searches.size > config.server.publicBehaviorDistinctSearchesPerWindow) {
+        registerBehaviorStrike(request);
         sendBehaviorThrottle(response, bucket, "Search");
         return true;
       }
@@ -771,6 +848,7 @@ async function enforcePublicBehaviorThrottle(request, response, pathname, search
   if (pathname.startsWith("/api/cases/")) {
     bucket.caseDetails.add(pathname);
     if (bucket.caseDetails.size > config.server.publicBehaviorDistinctCaseDetailsPerWindow) {
+      registerBehaviorStrike(request);
       sendBehaviorThrottle(response, bucket, "Case detail");
       return true;
     }
@@ -1619,6 +1697,10 @@ async function handleApi(request, response, pathname, searchParams) {
   if (request.method === "OPTIONS") {
     response.writeHead(204, buildApiHeaders(request.headers.origin || ""));
     response.end();
+    return;
+  }
+
+  if (enforceTemporaryPublicBlock(request, response, pathname)) {
     return;
   }
 
