@@ -751,7 +751,10 @@ function getBehaviorBucket(request) {
     windowStartedAt: now,
     searches: new Set(),
     caseDetails: new Set(),
-    recentCaseDetailHits: []
+    fullCaseDetails: new Set(),
+    recentCaseDetailHits: [],
+    recentFullCaseDetailHits: [],
+    lightDetailGrants: new Map()
   };
   publicBehaviorBuckets.set(key, nextBucket);
   return nextBucket;
@@ -884,6 +887,15 @@ function sendBehaviorThrottle(response, bucket, label) {
   }));
 }
 
+function hasRecentLightDetailGrant(bucket, pathname) {
+  const grantedAt = Number(bucket.lightDetailGrants.get(pathname) || 0);
+  if (!grantedAt) {
+    return false;
+  }
+
+  return Date.now() - grantedAt <= config.server.publicFullDetailGrantTtlMs;
+}
+
 function shouldApplySuspiciousDelay(request, pathname, searchParams) {
   if (!isSuspiciousUserAgent(request)) {
     return false;
@@ -939,6 +951,42 @@ async function enforcePublicBehaviorThrottle(request, response, pathname, search
       sendTemporaryBlock(response, Date.now() + config.server.publicTemporaryBlockMs);
       return true;
     }
+
+    const fullDetail = searchParams?.get("full") === "1";
+    if (fullDetail) {
+      if (!hasRecentLightDetailGrant(bucket, pathname)) {
+        registerBehaviorStrike(request);
+        sendBehaviorThrottle(response, bucket, "Full docket");
+        return true;
+      }
+
+      bucket.fullCaseDetails.add(pathname);
+      bucket.recentFullCaseDetailHits = bucket.recentFullCaseDetailHits.filter(
+        (timestamp) => now - timestamp < config.server.publicFullCaseDetailBurstWindowMs
+      );
+      bucket.recentFullCaseDetailHits.push(now);
+      if (bucket.recentFullCaseDetailHits.length > config.server.publicFullCaseDetailBurstMaxRequests) {
+        registerBehaviorStrike(request, {
+          immediateBlockMs: config.server.publicTemporaryBlockMs
+        });
+        sendTemporaryBlock(response, Date.now() + config.server.publicTemporaryBlockMs);
+        return true;
+      }
+
+      if (bucket.fullCaseDetails.size > config.server.publicBehaviorDistinctFullCaseDetailsPerWindow) {
+        registerBehaviorStrike(request);
+        sendBehaviorThrottle(response, bucket, "Full docket");
+        return true;
+      }
+    } else {
+      bucket.lightDetailGrants.set(pathname, now);
+      for (const [grantedPath, grantedAt] of bucket.lightDetailGrants.entries()) {
+        if (now - grantedAt > config.server.publicFullDetailGrantTtlMs) {
+          bucket.lightDetailGrants.delete(grantedPath);
+        }
+      }
+    }
+
     if (bucket.caseDetails.size > config.server.publicBehaviorDistinctCaseDetailsPerWindow) {
       registerBehaviorStrike(request);
       sendBehaviorThrottle(response, bucket, "Case detail");
