@@ -124,6 +124,9 @@ export const config = {
     publicRateLimitStatusPerWindow: envInt("PUBLIC_RATE_LIMIT_STATUS_PER_WINDOW", 24),
     publicRateLimitHealthPerWindow: envInt("PUBLIC_RATE_LIMIT_HEALTH_PER_WINDOW", 24),
     suspiciousRateLimitPerWindow: envInt("SUSPICIOUS_RATE_LIMIT_PER_WINDOW", 6),
+    publicBehaviorDistinctSearchesPerWindow: envInt("PUBLIC_BEHAVIOR_DISTINCT_SEARCHES_PER_WINDOW", 8),
+    publicBehaviorDistinctCaseDetailsPerWindow: envInt("PUBLIC_BEHAVIOR_DISTINCT_CASE_DETAILS_PER_WINDOW", 18),
+    suspiciousPenaltyDelayMs: envInt("SUSPICIOUS_PENALTY_DELAY_MS", 1200),
     suspiciousUserAgentPatterns: envList("SUSPICIOUS_USER_AGENT_PATTERNS", [
       "python-requests",
       "curl/",

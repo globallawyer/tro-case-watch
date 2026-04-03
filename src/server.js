@@ -80,6 +80,7 @@ const syncService = new CaseSyncService({
 const backgroundCaseHydrations = new Map();
 const publicResponseCache = new Map();
 const publicRateLimitBuckets = new Map();
+const publicBehaviorBuckets = new Map();
 const pendingLookupImports = new Map();
 let lastTroDailyUpdatesRefreshQueuedAt = 0;
 const browserGuardCookieName = "__tt_guard";
@@ -673,6 +674,113 @@ function pruneRateLimitBuckets() {
       publicRateLimitBuckets.delete(key);
     }
   }
+}
+
+function getPublicBehaviorKey(request) {
+  const browserGuard = parseCookies(request)[browserGuardCookieName];
+  return browserGuard || fingerprintClient(request);
+}
+
+function pruneBehaviorBuckets() {
+  const cutoff = Date.now() - config.server.publicRateLimitWindowMs * 2;
+  for (const [key, bucket] of publicBehaviorBuckets.entries()) {
+    if (bucket.windowStartedAt < cutoff) {
+      publicBehaviorBuckets.delete(key);
+    }
+  }
+}
+
+function getBehaviorBucket(request) {
+  if (publicBehaviorBuckets.size > 5000) {
+    pruneBehaviorBuckets();
+  }
+
+  const key = getPublicBehaviorKey(request);
+  const now = Date.now();
+  const windowMs = config.server.publicRateLimitWindowMs;
+  const existing = publicBehaviorBuckets.get(key);
+  if (existing && now - existing.windowStartedAt < windowMs) {
+    return existing;
+  }
+
+  const nextBucket = {
+    windowStartedAt: now,
+    searches: new Set(),
+    caseDetails: new Set()
+  };
+  publicBehaviorBuckets.set(key, nextBucket);
+  return nextBucket;
+}
+
+function sendBehaviorThrottle(response, bucket, label) {
+  const retryAfter = Math.max(
+    1,
+    Math.ceil((bucket.windowStartedAt + config.server.publicRateLimitWindowMs - Date.now()) / 1000)
+  );
+  response.writeHead(429, {
+    ...buildApiHeaders(),
+    "retry-after": String(retryAfter)
+  });
+  response.end(JSON.stringify({
+    error: `${label} rate limited`,
+    retry_after_seconds: retryAfter
+  }));
+}
+
+function shouldApplySuspiciousDelay(request, pathname, searchParams) {
+  if (!isSuspiciousUserAgent(request)) {
+    return false;
+  }
+
+  if (pathname.startsWith("/api/cases/")) {
+    return true;
+  }
+
+  if (pathname === "/api/cases" && String(searchParams?.get("search") || "").trim()) {
+    return true;
+  }
+
+  return false;
+}
+
+async function enforcePublicBehaviorThrottle(request, response, pathname, searchParams) {
+  if (request.method !== "GET" || authorize(request)) {
+    return false;
+  }
+
+  if (pathname !== "/api/cases" && !pathname.startsWith("/api/cases/")) {
+    return false;
+  }
+
+  const bucket = getBehaviorBucket(request);
+
+  if (pathname === "/api/cases") {
+    const normalizedSearch = String(searchParams?.get("search") || "")
+      .trim()
+      .toLowerCase()
+      .slice(0, 80);
+    if (normalizedSearch) {
+      bucket.searches.add(normalizedSearch);
+      if (bucket.searches.size > config.server.publicBehaviorDistinctSearchesPerWindow) {
+        sendBehaviorThrottle(response, bucket, "Search");
+        return true;
+      }
+    }
+  }
+
+  if (pathname.startsWith("/api/cases/")) {
+    bucket.caseDetails.add(pathname);
+    if (bucket.caseDetails.size > config.server.publicBehaviorDistinctCaseDetailsPerWindow) {
+      sendBehaviorThrottle(response, bucket, "Case detail");
+      return true;
+    }
+  }
+
+  if (shouldApplySuspiciousDelay(request, pathname, searchParams)) {
+    await new Promise((resolve) => setTimeout(resolve, config.server.suspiciousPenaltyDelayMs));
+  }
+
+  return false;
 }
 
 function enforcePublicReadRateLimit(request, response, pathname) {
@@ -1523,6 +1631,10 @@ async function handleApi(request, response, pathname, searchParams) {
   }
 
   if (enforcePublicApiToken(request, response, pathname)) {
+    return;
+  }
+
+  if (await enforcePublicBehaviorThrottle(request, response, pathname, searchParams)) {
     return;
   }
 
