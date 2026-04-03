@@ -2355,7 +2355,7 @@ export class Store {
     return collapseDuplicateCases(rows);
   }
 
-  getFastPathTextSearchCases(startDate, rawSearch, { category = "all", selectedCourt = "", limit = 1500 } = {}) {
+  getFastPathTextSearchCases(startDate, rawSearch, { category = "all", selectedCourt = "", limit = 400 } = {}) {
     const rawNeedle = String(rawSearch || "").trim().toLowerCase();
     const searchNeedle = normalizeText(rawSearch);
     const docketNeedle = normalizeDocket(rawSearch);
@@ -2400,7 +2400,7 @@ export class Store {
         ORDER BY COALESCE(latest_docket_filed_at, date_filed, updated_at) DESC, updated_at DESC
         LIMIT ?
       `)
-      .all(...params, Math.max(limit, 200))
+      .all(...params, Math.max(limit, 120))
       .map(buildCaseView);
 
     return collapseDuplicateCases(rows);
@@ -2538,8 +2538,12 @@ export class Store {
           .sort((left, right) => this.compareSearchPriority(left, right, searchTerm))
       : categoryFiltered;
 
+    const courtFacetRows =
+      searchFiltered.length > 200 && !selectedCourt
+        ? searchFiltered.slice(0, 200)
+        : searchFiltered;
     const courtsMap = new Map();
-    for (const row of searchFiltered) {
+    for (const row of courtFacetRows) {
       const key = `${row.court_id || ""}|${row.court_name || ""}`;
       if (!courtsMap.has(key)) {
         courtsMap.set(key, {
@@ -2821,7 +2825,11 @@ export class Store {
         const gap = Math.max(0, expectedEntries - totalEntries);
         const hasActivityAheadOfTimeline = isActivityAheadOfTimeline(activityAtRaw, coverage.latestEntryFiledAt);
         const hasCourtListenerDocket = Number(row.courtlistener_docket_id || 0) > 0;
-        const shouldSync = hasCivilDocketNumber && isRecentFiledFollowUp && (hasTargetTags || hasCourtListenerDocket || gap > 0);
+        const shouldSync =
+          hasCivilDocketNumber &&
+          isRecentFiledFollowUp &&
+          hasTargetTags &&
+          (hasActivityAheadOfTimeline || hasCourtListenerDocket || gap > 0);
 
         return {
           row,

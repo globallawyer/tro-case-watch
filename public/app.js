@@ -293,7 +293,7 @@ function runLookupSearch() {
   state.search = lookupInput.value.trim();
   state.page = 1;
   loadCases({
-    autoSelectFirst: true,
+    autoSelectFirst: shouldAutoOpenFirstResult(),
     preserveSelection: false
   })
     .then((payload) => {
@@ -302,6 +302,15 @@ function runLookupSearch() {
       }
     })
     .catch(console.error);
+}
+
+function looksLikeDirectDocketSearch(value = "") {
+  const search = String(value || "").trim();
+  return /^\d{5,6}$/.test(search) || /^(?:\d+:)?\d{2}-cv-\d{5,6}$/i.test(search);
+}
+
+function shouldAutoOpenFirstResult() {
+  return !state.search || looksLikeDirectDocketSearch(state.search);
 }
 
 function clearLookupPendingRetry() {
@@ -589,11 +598,20 @@ function renderCases(payload) {
   const fallbackItem = payload.items[0] || null;
 
   if ((!state.selectedCaseId || !selectedItem) && fallbackItem && !routeCaseId) {
-    state.selectedCaseId = fallbackItem.id;
-    loadCaseDetail(state.selectedCaseId, {
-      summaryItem: fallbackItem,
-      updateRoute: true
-    }).catch(console.error);
+    if (shouldAutoOpenFirstResult()) {
+      state.selectedCaseId = fallbackItem.id;
+      loadCaseDetail(state.selectedCaseId, {
+        summaryItem: fallbackItem,
+        updateRoute: true
+      }).catch(console.error);
+    } else {
+      detailPanel.innerHTML = `
+        <div class="panel-head">
+          <h2>Docket 展示页</h2>
+          <p>已加载搜索结果，点击左侧案件查看最新 docket 时间线。</p>
+        </div>
+      `;
+    }
   }
 
   caseList.innerHTML = payload.items.map(renderCaseRow).join("");
@@ -967,6 +985,9 @@ function cancelIdle(taskId) {
 
 function prefetchVisibleCaseDetails(items = [], maxItems = 2) {
   cancelIdle(prefetchDetailsTimer);
+  if (Number(maxItems || 0) <= 0) {
+    return;
+  }
   const targets = items.slice(0, maxItems).map((item) => item.id).filter(Boolean);
   if (!targets.length) {
     return;
@@ -1016,7 +1037,7 @@ async function loadCases({ autoSelectFirst = false, preserveSelection = true, si
 
   renderCases(payload);
   if (payload.items?.length) {
-    prefetchVisibleCaseDetails(payload.items, state.search ? 2 : 1);
+    prefetchVisibleCaseDetails(payload.items, state.search ? 0 : 1);
   }
   if (payload.lookupPending && state.search) {
     scheduleLookupPendingRetry(state.search);
@@ -1089,7 +1110,7 @@ courtFilter.addEventListener("change", (event) => {
   state.court = String(event.target.value || "");
   state.page = 1;
   loadCases({
-    autoSelectFirst: true,
+    autoSelectFirst: shouldAutoOpenFirstResult(),
     preserveSelection: false
   }).then((payload) => {
     if (payload) {
@@ -1105,7 +1126,7 @@ prevPageButton.addEventListener("click", () => {
   state.page -= 1;
   state.selectedCaseId = null;
   loadCases({
-    autoSelectFirst: true,
+    autoSelectFirst: shouldAutoOpenFirstResult(),
     preserveSelection: false
   }).catch(console.error);
 });
@@ -1117,7 +1138,7 @@ nextPageButton.addEventListener("click", () => {
   state.page += 1;
   state.selectedCaseId = null;
   loadCases({
-    autoSelectFirst: true,
+    autoSelectFirst: shouldAutoOpenFirstResult(),
     preserveSelection: false
   }).catch(console.error);
 });
