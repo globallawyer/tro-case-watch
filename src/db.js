@@ -2355,6 +2355,57 @@ export class Store {
     return collapseDuplicateCases(rows);
   }
 
+  getFastPathTextSearchCases(startDate, rawSearch, { category = "all", selectedCourt = "", limit = 1500 } = {}) {
+    const rawNeedle = String(rawSearch || "").trim().toLowerCase();
+    const searchNeedle = normalizeText(rawSearch);
+    const docketNeedle = normalizeDocket(rawSearch);
+    const needles = [...new Set([rawNeedle, searchNeedle, docketNeedle].filter(Boolean))];
+    if (!needles.length) {
+      return [];
+    }
+
+    const whereClauses = [`date(date_filed) >= date(?)`];
+    const params = [startDate];
+    const categoryClause = this.buildCategoryWhereClause(category);
+    if (categoryClause !== "1 = 1") {
+      whereClauses.push(`(${categoryClause})`);
+    }
+    if (selectedCourt) {
+      whereClauses.push(`court_id = ?`);
+      params.push(selectedCourt);
+    }
+
+    const searchExpression = `
+      lower(
+        COALESCE(case_name, '') || ' ' ||
+        COALESCE(case_name_zh, '') || ' ' ||
+        COALESCE(docket_number, '') || ' ' ||
+        COALESCE(court_name, '') || ' ' ||
+        COALESCE(recent_activity_summary, '') || ' ' ||
+        COALESCE(recent_activity_summary_zh, '') || ' ' ||
+        COALESCE(plaintiffs_json, '') || ' ' ||
+        COALESCE(defendants_json, '') || ' ' ||
+        COALESCE(source_urls_json, '') || ' ' ||
+        COALESCE(tags_marker, '')
+      )
+    `;
+    whereClauses.push(`(${needles.map(() => `${searchExpression} LIKE ?`).join(" OR ")})`);
+    params.push(...needles.map((needle) => `%${needle}%`));
+
+    const rows = this.db
+      .prepare(`
+        SELECT *
+        FROM cases
+        WHERE ${whereClauses.join("\n          AND ")}
+        ORDER BY COALESCE(latest_docket_filed_at, date_filed, updated_at) DESC, updated_at DESC
+        LIMIT ?
+      `)
+      .all(...params, Math.max(limit, 200))
+      .map(buildCaseView);
+
+    return collapseDuplicateCases(rows);
+  }
+
   buildCategoryWhereClause(category) {
     if (category === "watchlist") {
       return "(tags_marker LIKE '%|tro|%' OR tags_marker LIKE '%|schedule_a|%' OR tags_marker LIKE '%|seller_tro|%')";
@@ -2472,9 +2523,13 @@ export class Store {
       return cloneListPayload(payload);
     }
 
-    const rows = looksLikeDocketSearch(rawSearch)
+    const fastRows = looksLikeDocketSearch(rawSearch)
       ? this.getFastPathDocketCases(startDate, rawSearch)
-      : this.getHydratedCases(startDate);
+      : this.getFastPathTextSearchCases(startDate, rawSearch, {
+          category,
+          selectedCourt
+        });
+    const rows = fastRows.length ? fastRows : this.getHydratedCases(startDate);
 
     const categoryFiltered = rows.filter((row) => this.matchesCategory(row, category));
     const searchFiltered = searchTerm

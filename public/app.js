@@ -15,6 +15,7 @@ let detailRequestToken = 0;
 let casesRequestToken = 0;
 let detailRefreshTimer = null;
 let prefetchDetailsTimer = null;
+let lookupPendingRetryTimer = null;
 const inflightDetailRequests = new Map();
 const caseRoutePattern = /^\/case\/(\d+)\/?$/;
 let latestStatusPayload = null;
@@ -303,6 +304,41 @@ function runLookupSearch() {
     .catch(console.error);
 }
 
+function clearLookupPendingRetry() {
+  if (lookupPendingRetryTimer) {
+    window.clearTimeout(lookupPendingRetryTimer);
+    lookupPendingRetryTimer = null;
+  }
+}
+
+function scheduleLookupPendingRetry(searchValue, attempt = 0) {
+  const delays = [1200, 2800, 5000];
+  if (attempt >= delays.length) {
+    return;
+  }
+
+  clearLookupPendingRetry();
+  lookupPendingRetryTimer = window.setTimeout(async () => {
+    lookupPendingRetryTimer = null;
+    if (state.search !== searchValue) {
+      return;
+    }
+
+    try {
+      const payload = await loadCases({
+        autoSelectFirst: false,
+        preserveSelection: true,
+        silent: true
+      });
+      if (payload?.lookupPending) {
+        scheduleLookupPendingRetry(searchValue, attempt + 1);
+      }
+    } catch {
+      scheduleLookupPendingRetry(searchValue, attempt + 1);
+    }
+  }, delays[attempt]);
+}
+
 function playLookupThawSequence(onComplete) {
   if (!lookupForm) {
     onComplete?.();
@@ -319,12 +355,12 @@ function playLookupThawSequence(onComplete) {
 
   window.clearTimeout(lookupThawTimer);
   lookupForm.classList.add("is-thawing");
+  onComplete?.();
 
   lookupThawTimer = window.setTimeout(() => {
     lookupForm.classList.remove("is-thawing");
     thawLookupSurface();
-    onComplete?.();
-  }, 520);
+  }, 180);
 }
 
 function bindQrCardFrost() {
@@ -522,6 +558,9 @@ function renderCases(payload) {
   if (payload.liveImported?.imported) {
     messages.push(`已实时导入 ${payload.liveImported.imported} 个匹配案件`);
   }
+  if (payload.lookupPending) {
+    messages.push("正在后台补抓该案公开 docket，结果会自动刷新");
+  }
   if (payload.lookupError) {
     messages.push(`实时导入失败：${payload.lookupError}`);
   }
@@ -532,14 +571,14 @@ function renderCases(payload) {
   if (!payload.items.length) {
     caseList.innerHTML = `
       <article class="case-row">
-        <h3>没有命中案件</h3>
-        <p>你可以继续输完整案号，系统会尝试现场补抓公开案件。</p>
+        <h3>${payload.lookupPending ? "正在后台补抓案件" : "没有命中案件"}</h3>
+        <p>${payload.lookupPending ? "系统已经开始后台补抓公开 docket，结果会自动刷新。" : "你可以继续输完整案号，系统会尝试现场补抓公开案件。"}</p>
       </article>
     `;
     detailPanel.innerHTML = `
       <div class="panel-head">
         <h2>Docket 展示页</h2>
-        <p>当前搜索没有命中。</p>
+        <p>${payload.lookupPending ? "后台补抓进行中，稍后会自动刷新结果。" : "当前搜索没有命中。"}</p>
       </div>
     `;
     return;
@@ -926,9 +965,9 @@ function cancelIdle(taskId) {
   window.clearTimeout(taskId);
 }
 
-function prefetchVisibleCaseDetails(items = []) {
+function prefetchVisibleCaseDetails(items = [], maxItems = 2) {
   cancelIdle(prefetchDetailsTimer);
-  const targets = items.slice(0, 3).map((item) => item.id).filter(Boolean);
+  const targets = items.slice(0, maxItems).map((item) => item.id).filter(Boolean);
   if (!targets.length) {
     return;
   }
@@ -950,10 +989,13 @@ async function loadTroDailyUpdates() {
   renderTroDailyUpdates(payload);
 }
 
-async function loadCases({ autoSelectFirst = false, preserveSelection = true } = {}) {
+async function loadCases({ autoSelectFirst = false, preserveSelection = true, silent = false } = {}) {
   const requestToken = ++casesRequestToken;
+  clearLookupPendingRetry();
   lookupInput.value = state.search;
-  renderCasesLoading(state.search ? `正在检索 ${state.search} ...` : "正在刷新案件列表...");
+  if (!silent) {
+    renderCasesLoading(state.search ? `正在检索 ${state.search} ...` : "正在刷新案件列表...");
+  }
 
   const params = new URLSearchParams({
     category: state.category,
@@ -973,6 +1015,12 @@ async function loadCases({ autoSelectFirst = false, preserveSelection = true } =
   }
 
   renderCases(payload);
+  if (payload.items?.length) {
+    prefetchVisibleCaseDetails(payload.items, state.search ? 2 : 1);
+  }
+  if (payload.lookupPending && state.search) {
+    scheduleLookupPendingRetry(state.search);
+  }
   return payload;
 }
 

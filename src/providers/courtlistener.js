@@ -1,11 +1,23 @@
 export class CourtListenerClient {
-  constructor(config) {
+  constructor(config, pacerConfig = {}) {
     this.baseUrl = config.baseUrl.replace(/\/$/, "");
     this.apiToken = config.apiToken || "";
     this.enableDocketSync = Boolean(config.enableDocketSync);
+    this.recapFetchEnabled = Boolean(config.recapFetchEnabled);
+    this.recapFetchPollIntervalMs = Math.max(500, Number(config.recapFetchPollIntervalMs || 2000));
+    this.recapFetchMaxPollMs = Math.max(this.recapFetchPollIntervalMs, Number(config.recapFetchMaxPollMs || 12000));
+    this.recapFetchShowPartiesAndCounsel = Boolean(config.recapFetchShowPartiesAndCounsel);
+    this.pacerUsername = pacerConfig.loginId || "";
+    this.pacerPassword = pacerConfig.password || "";
+    this.pacerClientCode = pacerConfig.clientCode || "";
     this.capabilities = {
       docket: Boolean(this.apiToken) && this.enableDocketSync,
-      docketEntries: Boolean(this.apiToken) && this.enableDocketSync
+      docketEntries: Boolean(this.apiToken) && this.enableDocketSync,
+      recapFetch:
+        Boolean(this.apiToken) &&
+        this.recapFetchEnabled &&
+        Boolean(this.pacerUsername) &&
+        Boolean(this.pacerPassword)
     };
   }
 
@@ -15,6 +27,10 @@ export class CourtListenerClient {
 
   hasDocketEntriesAccess() {
     return this.capabilities.docketEntries;
+  }
+
+  hasRecapFetchAccess() {
+    return this.capabilities.recapFetch;
   }
 
   absoluteUrl(value) {
@@ -76,28 +92,87 @@ export class CourtListenerClient {
     return entries;
   }
 
-  async fetchJson(url, { requiresAuth }) {
-    return this.fetchJsonWithRetry(url, { requiresAuth }, 0);
+  async requestDocketViaRecapFetch({
+    docketId = null,
+    docketNumber = "",
+    court = "",
+    pacerCaseId = "",
+    showPartiesAndCounsel = this.recapFetchShowPartiesAndCounsel
+  } = {}) {
+    if (!this.hasRecapFetchAccess()) {
+      return null;
+    }
+
+    const body = new URLSearchParams();
+    body.set("request_type", "1");
+    body.set("pacer_username", this.pacerUsername);
+    body.set("pacer_password", this.pacerPassword);
+
+    if (this.pacerClientCode) {
+      body.set("client_code", this.pacerClientCode);
+    }
+
+    if (showPartiesAndCounsel) {
+      body.set("show_parties_and_counsel", "true");
+    }
+
+    if (Number(docketId) > 0) {
+      body.set("docket", String(docketId));
+    } else if (String(pacerCaseId || "").trim() && String(court || "").trim()) {
+      body.set("pacer_case_id", String(pacerCaseId).trim());
+      body.set("court", String(court).trim());
+    } else if (String(docketNumber || "").trim() && String(court || "").trim()) {
+      body.set("docket_number", String(docketNumber).trim());
+      body.set("court", String(court).trim());
+    } else {
+      return null;
+    }
+
+    return this.fetchJson(`${this.baseUrl}/recap-fetch/`, {
+      requiresAuth: true,
+      method: "POST",
+      body,
+      contentType: "application/x-www-form-urlencoded; charset=utf-8"
+    });
   }
 
-  async fetchJsonWithRetry(url, { requiresAuth }, attempt) {
+  async fetchRecapFetchRequest(requestId) {
+    if (!this.hasRecapFetchAccess() || !Number(requestId)) {
+      return null;
+    }
+
+    return this.fetchJson(`${this.baseUrl}/recap-fetch/${encodeURIComponent(String(requestId))}/`, {
+      requiresAuth: true
+    });
+  }
+
+  async fetchJson(url, options = {}) {
+    return this.fetchJsonWithRetry(url, options, 0);
+  }
+
+  async fetchJsonWithRetry(url, options, attempt) {
+    const { requiresAuth, method = "GET", body = undefined, contentType = "" } = options || {};
     const headers = {
       accept: "application/json",
       "user-agent": "tro-case-watch/0.1"
     };
+
+    if (contentType) {
+      headers["content-type"] = contentType;
+    }
 
     if (this.apiToken) {
       headers.authorization = `Token ${this.apiToken}`;
     }
 
     try {
-      const response = await fetch(url, { headers });
+      const response = await fetch(url, { method, headers, body });
       const text = await response.text();
 
       if (!response.ok) {
         if (attempt < 2 && shouldRetryStatus(response.status)) {
           await delay(retryDelayMs(response.headers.get("retry-after"), attempt));
-          return this.fetchJsonWithRetry(url, { requiresAuth }, attempt + 1);
+          return this.fetchJsonWithRetry(url, options, attempt + 1);
         }
 
         const error = new Error(`CourtListener request failed: ${response.status}`);
@@ -111,7 +186,7 @@ export class CourtListenerClient {
     } catch (error) {
       if (attempt < 2 && shouldRetryError(error)) {
         await delay(retryDelayMs(null, attempt));
-        return this.fetchJsonWithRetry(url, { requiresAuth }, attempt + 1);
+        return this.fetchJsonWithRetry(url, options, attempt + 1);
       }
 
       throw error;

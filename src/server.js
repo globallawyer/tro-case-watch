@@ -51,7 +51,7 @@ const currentScriptPath = fileURLToPath(import.meta.url);
 ensureSeedDatabase();
 
 const store = createStoreWithRecovery();
-const courtListener = new CourtListenerClient(config.courtListener);
+const courtListener = new CourtListenerClient(config.courtListener, config.pacer);
 const courtFeeds = new CourtFeedClient(config.courtFeeds);
 const recentFilings = new RecentFilingsClient(config.recentFilings);
 const lawFirms = new LawFirmClient(config.lawFirms);
@@ -80,6 +80,7 @@ const syncService = new CaseSyncService({
 const backgroundCaseHydrations = new Map();
 const publicResponseCache = new Map();
 const publicRateLimitBuckets = new Map();
+const pendingLookupImports = new Map();
 let lastTroDailyUpdatesRefreshQueuedAt = 0;
 const browserGuardCookieName = "__tt_guard";
 const publicSiteOrigins = new Set([
@@ -101,6 +102,41 @@ function spawnDetachedTask(args = []) {
     stdio: "ignore"
   });
   child.unref();
+}
+
+function queueLookupImport(term, { courtName = "", caseName = "" } = {}) {
+  const lookupTerm = String(term || "").trim();
+  if (!lookupTerm) {
+    return false;
+  }
+
+  const dedupeKey = JSON.stringify({
+    term: lookupTerm.toLowerCase(),
+    courtName: String(courtName || "").trim().toLowerCase(),
+    caseName: String(caseName || "").trim().slice(0, 120).toLowerCase()
+  });
+  const existing = pendingLookupImports.get(dedupeKey);
+  if (existing && Date.now() - existing.startedAt < 90 * 1000) {
+    return false;
+  }
+
+  pendingLookupImports.set(dedupeKey, {
+    startedAt: Date.now()
+  });
+
+  const args = ["--import-lookup", lookupTerm];
+  if (String(courtName || "").trim()) {
+    args.push("--court-name", String(courtName).trim());
+  }
+  if (String(caseName || "").trim()) {
+    args.push("--case-name", String(caseName).trim().slice(0, 120));
+  }
+
+  spawnDetachedTask(args);
+  setTimeout(() => {
+    pendingLookupImports.delete(dedupeKey);
+  }, 90 * 1000);
+  return true;
 }
 
 function runSyncModeChild(mode, extraArgs = [], extraEnv = {}, { streamLogs = false } = {}) {
@@ -954,8 +990,43 @@ function shouldForcePriorityFeedRefresh(item = {}) {
   return priorityFeedRowCount > 0 && Number(item.entries?.length || 0) < priorityFeedRowCount;
 }
 
+function latestEntryFiledAtForItem(item = {}) {
+  const entries = Array.isArray(item.entries) ? item.entries : [];
+  return entries.reduce((latest, entry) => {
+    const filedAt = String(entry?.filed_at || "").trim();
+    if (!filedAt) {
+      return latest;
+    }
+
+    if (!latest || filedAt.localeCompare(latest) > 0) {
+      return filedAt;
+    }
+
+    return latest;
+  }, null);
+}
+
+function hasCaseLevelActivityLead(item = {}) {
+  const latestActivityAt = String(item?.latest_docket_filed_at || "").trim();
+  if (!latestActivityAt) {
+    return false;
+  }
+
+  const latestEntryFiledAt = latestEntryFiledAtForItem(item);
+  if (!latestEntryFiledAt) {
+    return true;
+  }
+
+  return latestActivityAt.localeCompare(latestEntryFiledAt) > 0;
+}
+
 function shouldHydrateCourtListenerOnDemand(item = {}) {
-  if (!courtListener.hasDocketAccess() || !item?.courtlistener_docket_id) {
+  if (!courtListener.hasDocketAccess()) {
+    return false;
+  }
+
+  const docketNumber = String(item?.docket_number || "");
+  if (!item?.courtlistener_docket_id && !/\b\d{2}-cv-\d{3,6}\b/i.test(docketNumber)) {
     return false;
   }
 
@@ -971,12 +1042,13 @@ function shouldHydrateCourtListenerOnDemand(item = {}) {
     latestNumber
   );
 
-  if (entryCount >= expectedEntries) {
+  const hasActivityLead = hasCaseLevelActivityLead(item);
+  if (!hasActivityLead && entryCount >= expectedEntries) {
     return false;
   }
 
   const syncedAt = item.last_docket_sync_at ? Date.parse(item.last_docket_sync_at) : 0;
-  if (syncedAt && Date.now() - syncedAt < 2 * 60 * 60 * 1000) {
+  if (!hasActivityLead && syncedAt && Date.now() - syncedAt < 2 * 60 * 60 * 1000) {
     return false;
   }
 
@@ -1034,13 +1106,14 @@ function buildCaseHydrationPlan(item = {}) {
 }
 
 function shouldHydratePublicCaseDetailOnDemand(item = {}) {
+  const hasActivityLead = hasCaseLevelActivityLead(item);
   const entryCount = Number(item.entries?.length || 0);
-  if (entryCount >= 4) {
+  if (!hasActivityLead && entryCount >= 4) {
     return false;
   }
 
   const syncedAt = item.last_docket_sync_at ? Date.parse(item.last_docket_sync_at) : 0;
-  if (syncedAt && Date.now() - syncedAt < 4 * 60 * 60 * 1000) {
+  if (!hasActivityLead && syncedAt && Date.now() - syncedAt < 4 * 60 * 60 * 1000) {
     return false;
   }
 
@@ -1167,6 +1240,7 @@ function serializePublicCasesPayload(payload = {}) {
           matched: Number(payload.liveImported.matched || 0)
         }
       : null,
+    lookupPending: Boolean(payload.lookupPending),
     lookupError: payload.lookupError || null
   };
 }
@@ -1381,15 +1455,17 @@ async function handleApi(request, response, pathname, searchParams) {
   }
 
   if (request.method === "GET" && pathname === "/api/cases") {
-    const cached = getCachedPublicPayload(request, pathname);
+    const rawSearch = searchParams.get("search") || "";
+    const useCache = !String(rawSearch || "").trim();
+    const cached = useCache ? getCachedPublicPayload(request, pathname) : null;
     if (cached) {
       return sendJson(response, 200, cached);
     }
 
     const filters = {
       startDate: config.sync.startDate,
-      category: resolveSearchCategory(searchParams.get("search") || "", searchParams.get("category") || ""),
-      search: searchParams.get("search") || "",
+      category: resolveSearchCategory(rawSearch, searchParams.get("category") || ""),
+      search: rawSearch,
       court: searchParams.get("court") || "",
       page: Number(searchParams.get("page") || 1),
       pageSize: Math.min(Number(searchParams.get("pageSize") || 25), config.server.publicCasesMaxPageSize)
@@ -1413,23 +1489,14 @@ async function handleApi(request, response, pathname, searchParams) {
     }
 
     if (filters.search && payload.total === 0 && isStrictDirectDocketLookup) {
-      try {
-        const imported = await syncService.importLookup(filters.search);
-        payload = store.listCases(filters);
-        if (payload.total === 0 && isDirectDocketLookup) {
-          const relaxedPayload = findRelaxedPayload(store, filters);
-          if (relaxedPayload) {
-            payload = relaxedPayload;
-          }
-        }
-        payload.liveImported = imported;
-      } catch (error) {
-        payload.lookupError = error.message;
-      }
+      queueLookupImport(filters.search);
+      payload.lookupPending = true;
     }
 
     const serialized = serializePublicCasesPayload(payload);
-    setCachedPublicPayload(request, pathname, serialized);
+    if (useCache && !serialized.lookupPending) {
+      setCachedPublicPayload(request, pathname, serialized);
+    }
     return sendJson(response, 200, serialized);
   }
 
@@ -1874,6 +1941,23 @@ async function main() {
     }));
     console.log(`[sync] enriched case ${caseId} with ${completedProviders.join(",") || "none"}`);
     process.exit(completedProviders.length ? 0 : 1);
+  }
+
+  const importLookupIndex = process.argv.indexOf("--import-lookup");
+  if (importLookupIndex !== -1) {
+    const term = String(process.argv[importLookupIndex + 1] || "").trim();
+    const courtNameIndex = process.argv.indexOf("--court-name");
+    const caseNameIndex = process.argv.indexOf("--case-name");
+    const courtName = courtNameIndex !== -1 ? String(process.argv[courtNameIndex + 1] || "").trim() : "";
+    const caseName = caseNameIndex !== -1 ? String(process.argv[caseNameIndex + 1] || "").trim() : "";
+    const result = await syncService.importLookup(term, { courtName, caseName });
+    console.log(JSON.stringify({
+      term,
+      courtName,
+      caseName,
+      ...result
+    }));
+    process.exit(0);
   }
 
   const syncOnlyIndex = process.argv.indexOf("--sync-only");

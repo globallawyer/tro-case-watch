@@ -38,6 +38,12 @@ function uniqueByNormalized(values) {
   return [...unique.values()];
 }
 
+function waitForMs(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
 function parseComparableDocketNumber(value) {
   const normalized = String(value || "").trim().replace(/\.0$/, "");
   const parsed = Number.parseInt(normalized, 10);
@@ -533,6 +539,38 @@ function higherOrderValue(left, right) {
   return rightNumber > leftNumber ? right : left;
 }
 
+function parseCourtListenerResourceId(value) {
+  const match = String(value || "").match(/\/(\d+)\/?$/);
+  if (!match) {
+    return 0;
+  }
+
+  const parsed = Number.parseInt(match[1], 10);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function getLatestKnownEntryFiledAt(store, caseId) {
+  if (!Number(caseId)) {
+    return null;
+  }
+
+  return store.getEntryCoverageForCaseIds([Number(caseId)]).get(Number(caseId))?.latestEntryFiledAt || null;
+}
+
+function hasCaseLevelActivityLead(store, caseRow = {}) {
+  const latestActivityAt = String(caseRow.latest_docket_filed_at || "").trim();
+  if (!latestActivityAt || !Number(caseRow.id)) {
+    return false;
+  }
+
+  const latestEntryFiledAt = getLatestKnownEntryFiledAt(store, caseRow.id);
+  if (!latestEntryFiledAt) {
+    return true;
+  }
+
+  return latestActivityAt.localeCompare(String(latestEntryFiledAt)) > 0;
+}
+
 function buildCourtDocketKey(courtId, docketNumber) {
   const normalizedDocket = normalizeDocket(docketNumber);
   if (!normalizedDocket) {
@@ -755,7 +793,8 @@ export class CaseSyncService {
         courtlistener: {
           searchEnabled: true,
           docketEnabled: this.courtListener.hasDocketAccess(),
-          docketEntriesEnabled: this.courtListener.hasDocketEntriesAccess() && !knownNoDocketEntries
+          docketEntriesEnabled: this.courtListener.hasDocketEntriesAccess() && !knownNoDocketEntries,
+          recapFetchEnabled: this.courtListener.hasRecapFetchAccess()
         },
         priorityFeed: this.priorityFeed.getStatus(),
         pacermonitor: this.pacerMonitor.getStatus(),
@@ -2609,6 +2648,127 @@ export class CaseSyncService {
     });
   }
 
+  persistCourtListenerRecapFetchState(caseRow, recapFetch = {}, { docketId = null } = {}) {
+    if (!caseRow?.id) {
+      return caseRow;
+    }
+
+    const timestamp = new Date().toISOString();
+    const nextDocketId = Number(docketId || caseRow.courtlistener_docket_id || 0) || null;
+    const previousState = caseRow.raw?.courtlistener?.recapFetch || {};
+    const recapFetchState = {
+      ...previousState,
+      ...recapFetch,
+      id: Number(recapFetch.id || previousState.id || 0) || null,
+      status: recapFetch.status ?? previousState.status ?? null,
+      docket: recapFetch.docket || previousState.docket || null,
+      docketId: nextDocketId || Number(previousState.docketId || 0) || null,
+      errorMessage: recapFetch.error_message || recapFetch.errorMessage || previousState.errorMessage || "",
+      requestedAt: previousState.requestedAt || timestamp,
+      updatedAt: timestamp
+    };
+
+    return this.store.upsertCase({
+      source_case_key: caseRow.source_case_key,
+      primary_source: caseRow.primary_source,
+      source_case_id: caseRow.source_case_id,
+      courtlistener_docket_id: nextDocketId,
+      pacer_case_id: caseRow.pacer_case_id,
+      court_id: caseRow.court_id,
+      court_name: caseRow.court_name,
+      case_name: caseRow.case_name,
+      docket_number: caseRow.docket_number,
+      date_filed: caseRow.date_filed,
+      date_terminated: caseRow.date_terminated,
+      cause: caseRow.cause,
+      nature_of_suit: caseRow.nature_of_suit,
+      status: caseRow.status,
+      tags_marker: caseRow.tags_marker,
+      docket_url: caseRow.docket_url,
+      source_urls: caseRow.source_urls || [],
+      plaintiffs: caseRow.plaintiffs || [],
+      defendants: caseRow.defendants || [],
+      recent_activity_summary: caseRow.recent_activity_summary,
+      latest_docket_filed_at: caseRow.latest_docket_filed_at,
+      latest_docket_number: caseRow.latest_docket_number,
+      docket_count: caseRow.docket_count,
+      last_seen_at: caseRow.last_seen_at || timestamp,
+      last_synced_at: timestamp,
+      last_docket_sync_at: caseRow.last_docket_sync_at,
+      raw: {
+        ...(caseRow.raw || {}),
+        courtlistener: {
+          ...(caseRow.raw?.courtlistener || {}),
+          recapFetch: recapFetchState
+        }
+      }
+    });
+  }
+
+  async runCourtListenerRecapFetch(caseRow, { force = false } = {}) {
+    if (!caseRow || !this.courtListener.hasRecapFetchAccess() || !hasCivilCaseDocket(caseRow)) {
+      return { requested: false, reason: "not-applicable" };
+    }
+
+    const previousState = caseRow.raw?.courtlistener?.recapFetch || {};
+    const lastTouchedAtMs = Date.parse(String(previousState.updatedAt || previousState.requestedAt || ""));
+    if (!force && Number.isFinite(lastTouchedAtMs) && Date.now() - lastTouchedAtMs < 30 * 60 * 1000) {
+      return { requested: false, reason: "fresh" };
+    }
+
+    const request = await this.courtListener.requestDocketViaRecapFetch({
+      docketId: caseRow.courtlistener_docket_id,
+      docketNumber: caseRow.docket_number,
+      court: caseRow.court_id || "",
+      pacerCaseId: caseRow.pacer_case_id
+    });
+    if (!request?.id) {
+      return { requested: false, reason: "request-failed" };
+    }
+
+    let current = request;
+    let docketId = parseCourtListenerResourceId(current.docket) || Number(caseRow.courtlistener_docket_id || 0) || null;
+    this.persistCourtListenerRecapFetchState(caseRow, {
+      ...current,
+      requestedAt: new Date().toISOString()
+    }, { docketId });
+
+    const activeStatuses = new Set([1, 4, 5]);
+    const deadline = Date.now() + this.courtListener.recapFetchMaxPollMs;
+
+    while (current?.id && activeStatuses.has(Number(current.status || 0)) && Date.now() < deadline) {
+      await waitForMs(this.courtListener.recapFetchPollIntervalMs);
+      const next = await this.courtListener.fetchRecapFetchRequest(current.id);
+      if (!next) {
+        break;
+      }
+
+      current = next;
+      docketId = parseCourtListenerResourceId(current.docket) || docketId;
+      const refreshedCase = this.store.getCase(caseRow.id) || caseRow;
+      this.persistCourtListenerRecapFetchState(refreshedCase, current, { docketId });
+    }
+
+    const status = Number(current?.status || 0);
+    return {
+      requested: true,
+      completed: status === 2,
+      status,
+      docketId,
+      reason:
+        status === 2
+          ? "completed"
+          : activeStatuses.has(status)
+            ? "queued"
+            : status === 6
+              ? "invalid"
+              : status === 7
+                ? "insufficient-metadata"
+                : "error",
+      errorMessage: current?.error_message || ""
+    };
+  }
+
   async enrichCaseWithCourtListener(caseId, { force = false } = {}) {
     return this.store.batchMutations(async () => {
       const caseRow = this.store.getCase(caseId);
@@ -2618,7 +2778,8 @@ export class CaseSyncService {
 
       const syncedAt = caseRow.last_docket_sync_at ? Date.parse(caseRow.last_docket_sync_at) : 0;
       const staleAfterMs = 2 * 60 * 60 * 1000;
-      if (!force && syncedAt && Date.now() - syncedAt < staleAfterMs) {
+      const activityAheadOfTimeline = hasCaseLevelActivityLead(this.store, caseRow);
+      if (!force && !activityAheadOfTimeline && syncedAt && Date.now() - syncedAt < staleAfterMs) {
         return { enriched: false, reason: "fresh" };
       }
 
@@ -2630,7 +2791,7 @@ export class CaseSyncService {
         });
       }
 
-      const refreshedCase =
+      let refreshedCase =
         this.store.getCase(caseId) ||
         this.store.findCaseByCourtAndDocket({
           courtId: caseRow.court_id,
@@ -2640,10 +2801,57 @@ export class CaseSyncService {
         });
 
       if (!refreshedCase?.courtlistener_docket_id) {
-        return { enriched: false, reason: "not-found" };
+        const recapFetchResult = await this.runCourtListenerRecapFetch(caseRow, {
+          force: force || activityAheadOfTimeline
+        });
+        refreshedCase =
+          this.store.getCase(caseId) ||
+          this.store.findCaseByCourtAndDocket({
+            courtId: caseRow.court_id,
+            courtName: caseRow.court_name,
+            docketNumber: caseRow.docket_number,
+            startDate: getDiscoveryStartDate(this.config)
+          });
+
+        if (!refreshedCase?.courtlistener_docket_id) {
+          return {
+            enriched: false,
+            reason: recapFetchResult.requested ? recapFetchResult.reason : "not-found"
+          };
+        }
       }
 
-      return this.syncSingleCourtListenerDocket(refreshedCase);
+      let result = await this.syncSingleCourtListenerDocket(refreshedCase);
+      const shouldEscalateToRecapFetch =
+        this.courtListener.hasRecapFetchAccess() &&
+        (force || activityAheadOfTimeline || hasCaseLevelActivityLead(this.store, refreshedCase)) &&
+        (result.reason === "metadata-only" || result.reason === "empty" || !result.enriched);
+
+      if (!shouldEscalateToRecapFetch) {
+        return result;
+      }
+
+      const recapFetchResult = await this.runCourtListenerRecapFetch(refreshedCase, { force: true });
+      const fetchedCase =
+        this.store.getCase(caseId) ||
+        this.store.findCaseByCourtAndDocket({
+          courtId: refreshedCase.court_id,
+          courtName: refreshedCase.court_name,
+          docketNumber: refreshedCase.docket_number,
+          startDate: getDiscoveryStartDate(this.config)
+        });
+
+      if (fetchedCase?.courtlistener_docket_id && recapFetchResult.completed) {
+        result = await this.syncSingleCourtListenerDocket(fetchedCase);
+      }
+
+      return {
+        ...result,
+        recapFetch: recapFetchResult.requested ? {
+          status: recapFetchResult.status,
+          reason: recapFetchResult.reason
+        } : null
+      };
     });
   }
 
