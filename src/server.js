@@ -467,6 +467,14 @@ function authorize(request) {
 }
 
 function getClientIp(request) {
+  const cloudflareIp = String(request.headers["cf-connecting-ip"] || request.headers["true-client-ip"] || "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean)[0];
+  if (cloudflareIp) {
+    return cloudflareIp;
+  }
+
   const forwarded = String(request.headers["x-forwarded-for"] || "")
     .split(",")
     .map((item) => item.trim())
