@@ -2523,18 +2523,24 @@ export class Store {
       return cloneListPayload(payload);
     }
 
-    const fastRows = looksLikeDocketSearch(rawSearch)
+    const isDocketSearch = looksLikeDocketSearch(rawSearch);
+    const fastRows = isDocketSearch
       ? this.getFastPathDocketCases(startDate, rawSearch)
       : this.getFastPathTextSearchCases(startDate, rawSearch, {
           category,
           selectedCourt
         });
-    const rows = fastRows.length ? fastRows : this.getHydratedCases(startDate);
+    const rows = fastRows.length
+      ? fastRows
+      : isDocketSearch
+        ? this.getHydratedCases(startDate)
+        : [];
 
-    const categoryFiltered = rows.filter((row) => this.matchesCategory(row, category));
+    const categoryFiltered = fastRows.length ? rows : rows.filter((row) => this.matchesCategory(row, category));
     const searchFiltered = searchTerm
-      ? categoryFiltered
-          .filter((row) => this.matchesSearch(row, searchTerm))
+      ? (fastRows.length
+          ? categoryFiltered
+          : categoryFiltered.filter((row) => this.matchesSearch(row, searchTerm)))
           .sort((left, right) => this.compareSearchPriority(left, right, searchTerm))
       : categoryFiltered;
 
