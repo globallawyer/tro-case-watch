@@ -572,11 +572,23 @@ const HEADLINE_ALIAS_RULES = [
   { pattern: /lionel messi|梅西/i, label: "足球巨星梅西" },
   { pattern: /casio|卡西欧/i, label: "卡西欧" },
   { pattern: /hatsune miku|初音未来/i, label: "初音未来" },
-  { pattern: /sega/i, label: "Sega游戏IP" },
+  { pattern: /sega|metaphor re fantazio|如龙|persona|sonic/i, label: "Sega游戏IP" },
   { pattern: /mattel|美泰/i, label: "美泰" },
   { pattern: /levi strauss|levi'?s|李维斯/i, label: "李维斯" },
   { pattern: /nike|耐克/i, label: "耐克" },
   { pattern: /disney|迪士尼/i, label: "迪士尼" }
+];
+
+const HEADLINE_CATEGORY_RULES = [
+  { pattern: /园艺|garden|gardening/i, label: "园艺类" },
+  { pattern: /纹身|tattoo/i, label: "纹身类" },
+  { pattern: /宠物|pet/i, label: "宠物用品" },
+  { pattern: /美妆|beauty|cosmetic/i, label: "美妆类" },
+  { pattern: /玩具|toy/i, label: "玩具类" },
+  { pattern: /家居|home decor|furniture/i, label: "家居类" },
+  { pattern: /服装|apparel|clothing/i, label: "服饰类" },
+  { pattern: /珠宝|饰品|jewelry/i, label: "饰品类" },
+  { pattern: /箱包|bag|handbag/i, label: "箱包类" }
 ];
 
 function stripCompanySuffix(value = "") {
@@ -614,6 +626,12 @@ function resolveHeadlineAlias(value = "") {
   return matched?.label || "";
 }
 
+function resolveHeadlineCategory(value = "") {
+  const text = normalizeText(value);
+  const matched = HEADLINE_CATEGORY_RULES.find((rule) => rule.pattern.test(text));
+  return matched?.label || "";
+}
+
 function headlineHasAction(value = "") {
   return /(发起TRO|重磅维权|卖家踩坑|卖家预警|和解进展|撤诉解冻|案件动态)$/i.test(normalizeText(value));
 }
@@ -622,9 +640,6 @@ function buildActionLabel(group) {
   const haystack = group.articles.map((item) => `${item.title || ""} ${item.summary || ""}`).join(" ").toLowerCase();
   if (/(\d+)\s*个卖家/.test(haystack) || /踩坑/i.test(haystack)) {
     return "卖家踩坑";
-  }
-  if (/卖家|seller|排查|下架|高危链接|预警/i.test(haystack)) {
-    return "卖家预警";
   }
   if (/撤诉|dismiss|解冻|解除冻结/i.test(haystack)) {
     return "撤诉解冻";
@@ -637,6 +652,9 @@ function buildActionLabel(group) {
   }
   if (/起诉|立案|complaint|filed|lawsuit|维权/i.test(haystack)) {
     return "重磅维权";
+  }
+  if (/卖家|seller|排查|下架|高危链接|预警/i.test(haystack)) {
+    return "卖家预警";
   }
   return "案件动态";
 }
@@ -651,8 +669,9 @@ function normalizeHeadlineCandidate(value = "") {
       .replace(/[【】\[\]()（）|｜丨]+/g, " ")
       .replace(/[,:：;；]/g, " ")
       .replace(/(?:[A-Za-z]+|[\u4e00-\u9fff]{1,12})律所代理/gi, " ")
+      .replace(/(?:维权再升级|商标版权齐上阵|商标版权双线维权|商标版权全面开火|隐匿维权)/gi, " ")
       .replace(/跨境卖家[^。！？!?,，]{0,30}/gi, " ")
-      .replace(/(?:速排查|下架高危链接|高危链接|卖家速看|速看详情)/gi, " ")
+      .replace(/(?:速排查|下架高危链接|高危链接|卖家速看|速看详情|避险攻略|避险指南)/gi, " ")
       .replace(/\b(?:schedule a|tro|temporary restraining order)\b/gi, " ")
       .replace(/\s+/g, " ")
       .replace(/^[，,、.。:：\-—–\s]+/, "")
@@ -660,23 +679,59 @@ function normalizeHeadlineCandidate(value = "") {
   );
 }
 
-function pickHeadlineSubject(group) {
-  const aliasCandidate = resolveHeadlineAlias(
-    group.articles.map((article) => `${article.title} ${article.summary}`).join(" ") || group.caseName || ""
+function cleanHeadlineSubjectCandidate(value = "") {
+  return normalizeText(
+    String(value || "")
+      .replace(/(?:发起TRO|重磅维权|卖家踩坑|卖家预警|和解进展|撤诉解冻|案件动态)$/g, "")
+      .replace(/(?:速看|快看|攻略|指南|排查|下架|高危链接|链接风险).*$/i, "")
+      .replace(/(?:起诉|立案|维权|冻结|TRO|temporary restraining order).*$/i, "")
+      .replace(/\s+/g, " ")
+      .trim()
   );
+}
+
+function extractSellerCountSubject(group) {
+  const articleTexts = sortArticlesByTime(group.articles).map((article) => normalizeHeadlineCandidate(article.title));
+  const haystack = articleTexts.join(" ");
+  const countMatch = haystack.match(/(\d+)\s*个卖家/);
+  if (!countMatch?.[1]) {
+    return "";
+  }
+
+  const categoryLabel = resolveHeadlineCategory(haystack);
+  if (categoryLabel) {
+    return `${categoryLabel}${countMatch[1]}个卖家`;
+  }
+
+  return `${countMatch[1]}个卖家`;
+}
+
+function pickHeadlineSubject(group) {
+  const articleHaystack = group.articles.map((article) => `${article.title} ${article.summary}`).join(" ");
+  const aliasCandidate = resolveHeadlineAlias(articleHaystack || group.caseName || "");
   if (aliasCandidate) {
     return aliasCandidate;
   }
 
+  const sellerCountSubject = extractSellerCountSubject(group);
+  if (sellerCountSubject) {
+    return sellerCountSubject;
+  }
+
   const candidates = sortArticlesByTime(group.articles)
-    .map((article) => normalizeHeadlineCandidate(article.title))
+    .map((article) => cleanHeadlineSubjectCandidate(normalizeHeadlineCandidate(article.title)))
     .filter(Boolean)
     .map((value) => value.replace(/(?:隐匿维权|重磅维权|发起TRO|卖家踩坑|卖家预警|和解进展|撤诉解冻)$/g, "").trim())
     .filter(Boolean);
 
-  const chineseCandidate = candidates.find((value) => /[\u4e00-\u9fff]/.test(value) && value.length >= 3);
+  const chineseCandidate = candidates.find((value) => /[\u4e00-\u9fff]/.test(value) && value.length >= 2);
   if (chineseCandidate) {
-    return summarizeText(chineseCandidate, 22);
+    return summarizeText(chineseCandidate, 16);
+  }
+
+  const categoryCandidate = resolveHeadlineCategory(articleHaystack || "");
+  if (categoryCandidate) {
+    return categoryCandidate;
   }
 
   const plaintiffLabel = extractPlaintiffLabel(group.caseName || "");
@@ -684,8 +739,8 @@ function pickHeadlineSubject(group) {
     return plaintiffLabel;
   }
 
-  const fallback = candidates[0] || summarizeText(group.caseName || group.docketNumber || "TRO案件", 20);
-  return summarizeText(fallback, 20);
+  const fallback = candidates[0] || summarizeText(group.caseName || group.docketNumber || "TRO案件", 16);
+  return summarizeText(fallback, 16);
 }
 
 function inferFocus(group) {
@@ -725,7 +780,10 @@ function buildRoundupTitle(group) {
   const docketLabel = docketDisplayNumber(group.docketNumber || "");
   const subjectLabel = pickHeadlineSubject(group);
   const actionLabel = headlineHasAction(subjectLabel) ? "" : buildActionLabel(group);
-  const titleBody = `${subjectLabel}${actionLabel}`.trim();
+  const compactActionLabel = subjectLabel.endsWith("个卖家")
+    ? actionLabel.replace(/^卖家/, "")
+    : actionLabel;
+  const titleBody = `${subjectLabel}${compactActionLabel}`.trim();
   if (docketLabel) {
     return `${docketLabel} ${titleBody}`.trim();
   }
