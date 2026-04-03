@@ -42,6 +42,10 @@ const troDailyUpdatesPollMs = 30 * 60 * 1000;
 const apiBase = "";
 let lookupThawTimer = null;
 
+function detailCacheKey(caseId, { full = false } = {}) {
+  return `${Number(caseId)}:${full ? "full" : "light"}`;
+}
+
 function getRouteCaseId() {
   const match = window.location.pathname.match(caseRoutePattern);
   if (!match) {
@@ -710,6 +714,7 @@ function timelineSourceSummary(entries) {
 function renderDetail(item) {
   const insights = item.insights || {};
   const entries = item.entries || [];
+  const entriesTruncated = Boolean(item.entries_truncated);
   const newestTimelineFiledAt = latestTimelineFiledAt(entries);
   const hasCaseLevelUpdateGap =
     Boolean(item.latest_docket_filed_at) &&
@@ -766,6 +771,7 @@ function renderDetail(item) {
           <span class="tag-pill">最近案级节点 ${formatDate(item.latest_docket_filed_at || item.date_filed)}</span>
           ${entries.length ? `<span class="tag-pill">最新站内 docket ${formatDate(newestTimelineFiledAt)}</span>` : ""}
           <span class="tag-pill">${timelineSummary}</span>
+          ${entriesTruncated ? '<span class="tag-pill">完整时间线继续加载中</span>' : ""}
         </div>
       </div>
     </div>
@@ -781,6 +787,7 @@ function renderDetail(item) {
         <div>
           <h3>站内 Docket 时间线</h3>
           <p>按时间倒序归档公开可见 docket 文本，适合卖家直接判断当前是否已签 TRO、是否进入 PI、是否有和解或结案信号。</p>
+          ${entriesTruncated ? '<p class="focus-text">为了先把页面打开，当前先展示最近一段时间线；完整 docket 会继续在后台补齐。</p>' : ""}
         </div>
       </div>
       ${
@@ -862,13 +869,22 @@ function renderDetailLoading(item = {}) {
 }
 
 function getCachedDetail(caseId) {
-  const cached = detailCache.get(caseId);
+  const fullCached = detailCache.get(detailCacheKey(caseId, { full: true }));
+  if (fullCached) {
+    if (Date.now() - fullCached.cachedAt > detailCacheTtlMs) {
+      detailCache.delete(detailCacheKey(caseId, { full: true }));
+    } else {
+      return fullCached.item;
+    }
+  }
+
+  const cached = detailCache.get(detailCacheKey(caseId, { full: false }));
   if (!cached) {
     return null;
   }
 
   if (Date.now() - cached.cachedAt > detailCacheTtlMs) {
-    detailCache.delete(caseId);
+    detailCache.delete(detailCacheKey(caseId, { full: false }));
     return null;
   }
 
@@ -893,45 +909,80 @@ function clearDetailRefreshTimer() {
 
 function cacheDetailItem(caseId, item) {
   if (shouldCacheDetail(item)) {
-    detailCache.set(caseId, {
+    detailCache.set(detailCacheKey(caseId, { full: !item.entries_truncated }), {
       item,
       cachedAt: Date.now()
     });
     return;
   }
 
-  detailCache.delete(caseId);
+  detailCache.delete(detailCacheKey(caseId, { full: false }));
+  detailCache.delete(detailCacheKey(caseId, { full: true }));
 }
 
-async function fetchCaseDetail(caseId, { force = false } = {}) {
-  const cached = force ? null : getCachedDetail(caseId);
+async function fetchCaseDetail(caseId, { force = false, full = false } = {}) {
+  const requestKey = detailCacheKey(caseId, { full });
+  let directCached = null;
+  if (full) {
+    const fullCached = detailCache.get(requestKey);
+    if (fullCached) {
+      if (Date.now() - fullCached.cachedAt > detailCacheTtlMs) {
+        detailCache.delete(requestKey);
+      } else {
+        directCached = fullCached.item;
+      }
+    }
+  }
+  const cached = force ? null : (full ? directCached : getCachedDetail(caseId));
   if (cached) {
     return cached;
   }
 
-  if (inflightDetailRequests.has(caseId)) {
-    return inflightDetailRequests.get(caseId);
+  if (inflightDetailRequests.has(requestKey)) {
+    return inflightDetailRequests.get(requestKey);
   }
 
-  const requestPromise = request(`/api/cases/${caseId}`)
+  const requestPromise = request(`/api/cases/${caseId}${full ? "?full=1" : ""}`)
     .then((item) => {
       cacheDetailItem(caseId, item);
       return item;
     })
     .finally(() => {
-      inflightDetailRequests.delete(caseId);
+      inflightDetailRequests.delete(requestKey);
     });
 
-  inflightDetailRequests.set(caseId, requestPromise);
+  inflightDetailRequests.set(requestKey, requestPromise);
   return requestPromise;
 }
 
 function prefetchCaseDetail(caseId) {
-  if (!caseId || getCachedDetail(caseId) || inflightDetailRequests.has(caseId)) {
+  if (!caseId || getCachedDetail(caseId) || inflightDetailRequests.has(detailCacheKey(caseId, { full: false }))) {
     return;
   }
 
   fetchCaseDetail(caseId).catch(() => {});
+}
+
+function scheduleFullDetailUpgrade(caseId, requestToken) {
+  window.setTimeout(async () => {
+    if (requestToken !== detailRequestToken || state.selectedCaseId !== caseId) {
+      return;
+    }
+
+    try {
+      const item = await fetchCaseDetail(caseId, { full: true });
+      if (requestToken !== detailRequestToken || state.selectedCaseId !== caseId) {
+        return;
+      }
+
+      renderDetail(item);
+      if (shouldRefreshIncompleteDetail(item)) {
+        scheduleIncompleteDetailRefresh(caseId, requestToken);
+      }
+    } catch {
+      // Keep the lightweight detail visible if the full timeline takes longer.
+    }
+  }, 120);
 }
 
 function scheduleIncompleteDetailRefresh(caseId, requestToken, attempt = 0) {
@@ -947,8 +998,9 @@ function scheduleIncompleteDetailRefresh(caseId, requestToken, attempt = 0) {
     }
 
     try {
-      detailCache.delete(caseId);
-      const item = await fetchCaseDetail(caseId, { force: true });
+      detailCache.delete(detailCacheKey(caseId, { full: false }));
+      detailCache.delete(detailCacheKey(caseId, { full: true }));
+      const item = await fetchCaseDetail(caseId, { force: true, full: true });
       if (requestToken !== detailRequestToken || state.selectedCaseId !== caseId) {
         return;
       }
@@ -1061,6 +1113,9 @@ async function loadCaseDetail(caseId, { summaryItem = null, focus = false, updat
   if (cached) {
     if (requestToken === detailRequestToken) {
       renderDetail(cached);
+      if (cached.entries_truncated) {
+        scheduleFullDetailUpgrade(caseId, requestToken);
+      }
       if (shouldRefreshIncompleteDetail(cached)) {
         scheduleIncompleteDetailRefresh(caseId, requestToken);
       }
@@ -1078,6 +1133,9 @@ async function loadCaseDetail(caseId, { summaryItem = null, focus = false, updat
   }
 
   renderDetail(item);
+  if (item.entries_truncated) {
+    scheduleFullDetailUpgrade(caseId, requestToken);
+  }
   if (shouldRefreshIncompleteDetail(item)) {
     scheduleIncompleteDetailRefresh(caseId, requestToken);
   }

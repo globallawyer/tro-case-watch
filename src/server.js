@@ -1209,6 +1209,7 @@ function serializePublicCaseSummary(item = {}) {
 function serializePublicCaseDetail(item = {}) {
   return {
     ...serializePublicCaseSummary(item),
+    entries_truncated: Boolean(item.entries_truncated),
     hydration_pending: item.hydration_pending
       ? {
           pending: Boolean(item.hydration_pending.pending)
@@ -1507,7 +1508,10 @@ async function handleApi(request, response, pathname, searchParams) {
     }
 
     const caseId = Number(pathname.split("/").pop());
-    let item = store.getCase(caseId);
+    const fullDetail = searchParams.get("full") === "1";
+    let item = store.getCase(caseId, {
+      recentEntriesLimit: fullDetail ? 0 : config.server.publicCaseDetailInitialEntries
+    });
 
     if (!item) {
       return sendJson(response, 404, { error: "Case not found" });

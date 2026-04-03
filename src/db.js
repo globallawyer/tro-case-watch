@@ -2589,8 +2589,9 @@ export class Store {
     return cloneListPayload(payload);
   }
 
-  getCase(id) {
-    const cacheKey = Number(id);
+  getCase(id, { recentEntriesLimit = 0 } = {}) {
+    const normalizedLimit = Math.max(0, Number(recentEntriesLimit || 0));
+    const cacheKey = `${Number(id)}:${normalizedLimit || "full"}`;
     const cached = this.caseDetailCache.get(cacheKey);
     if (cached && cached.version === this.caseCacheVersion) {
       return cached.value;
@@ -2633,15 +2634,18 @@ export class Store {
     const canonicalRow = mergeDuplicateCaseGroup(peerRows.map(buildCaseView));
     const peerIds = [...new Set(peerRows.map((candidate) => Number(candidate.id)).filter((value) => Number.isFinite(value) && value > 0))];
     const placeholders = peerIds.map(() => "?").join(", ");
-    const entries = this.db
+    const rawEntries = this.db
       .prepare(`
         SELECT *
         FROM docket_entries
         WHERE case_id IN (${placeholders})
         ORDER BY COALESCE(filed_at, created_at) DESC, id DESC
+        ${normalizedLimit > 0 ? "LIMIT ?" : ""}
       `)
-      .all(...peerIds)
+      .all(...peerIds, ...(normalizedLimit > 0 ? [normalizedLimit + 1] : []))
       .map(hydrateEntry);
+    const entriesTruncated = normalizedLimit > 0 && rawEntries.length > normalizedLimit;
+    const entries = entriesTruncated ? rawEntries.slice(0, normalizedLimit) : rawEntries;
 
     const uniqueEntries = dedupeEntries(entries);
     const displayEntries = hasPriorityFeedAuthority(canonicalRow, entries)
@@ -2651,6 +2655,7 @@ export class Store {
     const detail = applyAuthoritativeDocketPreference({
       ...canonicalRow,
       entries: displayEntries,
+      entries_truncated: entriesTruncated,
       insights: deriveCaseInsights({
         ...canonicalRow,
         entries: displayEntries

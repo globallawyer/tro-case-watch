@@ -116,6 +116,7 @@ export const config = {
     publicTroDailyUpdatesCacheTtlMs: envInt("PUBLIC_TRO_DAILY_UPDATES_CACHE_TTL_MS", 5 * 60_000),
     publicCasesCacheTtlMs: envInt("PUBLIC_CASES_CACHE_TTL_MS", 30_000),
     publicCaseDetailCacheTtlMs: envInt("PUBLIC_CASE_DETAIL_CACHE_TTL_MS", 45_000),
+    publicCaseDetailInitialEntries: envInt("PUBLIC_CASE_DETAIL_INITIAL_ENTRIES", 120),
     publicApiCacheMaxEntries: envInt("PUBLIC_API_CACHE_MAX_ENTRIES", 300),
     publicRateLimitWindowMs: envInt("PUBLIC_RATE_LIMIT_WINDOW_MS", 60_000),
     publicRateLimitCasesPerWindow: envInt("PUBLIC_RATE_LIMIT_CASES_PER_WINDOW", 36),
