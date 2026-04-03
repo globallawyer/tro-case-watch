@@ -652,6 +652,28 @@ function hasTargetSignals({ text = "", tags = [], cause = "", natureOfSuit = "",
   );
 }
 
+function hasHighConfidenceTargetCase(caseLike = {}) {
+  const insights = caseLike?.insights || {};
+  const tags = new Set(Array.isArray(caseLike?.tags) ? caseLike.tags : []);
+  const caseName = normalizeText(caseLike?.case_name || "");
+  const cause = normalizeText(caseLike?.cause || "");
+  const natureOfSuit = normalizeText(caseLike?.nature_of_suit || "");
+  const sourceUrls = asArray(caseLike?.source_urls);
+
+  return Boolean(
+    tags.has("seller_tro") ||
+    tags.has("schedule_a") ||
+    insights?.is_seller_case ||
+    insights?.is_schedule_a_case ||
+    (insights?.is_tro_case && Number(insights?.seller_relevance_score || 0) >= 4) ||
+    /\b(820|830|840)\b/.test(natureOfSuit) ||
+    COURTLISTENER_IP_CAUSE_PATTERNS.some((pattern) => pattern.test(cause)) ||
+    caseName.includes("schedule a") ||
+    caseName.includes("unincorporated associations") ||
+    sourceUrls.some((value) => sourceUrlUsesPriorityFeed(value))
+  );
+}
+
 function shouldTrackCourtListenerResult(result, existingCase, tags) {
   const docketNumber = String(valueOf(result.docketNumber, existingCase?.docket_number) || "");
   if (!/\b\d{2}-cv-\d{3,6}\b/i.test(docketNumber) && !/\b\d+:\d{2}-cv-\d{3,6}\b/i.test(docketNumber)) {
@@ -1454,6 +1476,9 @@ export class CaseSyncService {
     const { text, cause, natureOfSuit } = buildCourtFeedTrackingContext(item, existingCase);
 
     if (existingCase) {
+      if (!hasHighConfidenceTargetCase(existingCase) && !this.matchesCourtFeedWatchKeywords(item)) {
+        return false;
+      }
       return hasTargetSignals({ text, tags, cause, natureOfSuit, existingCase }) || this.matchesCourtFeedWatchKeywords(item);
     }
 
@@ -1515,6 +1540,10 @@ export class CaseSyncService {
 
   buildCourtFeedCrossSourceFollowUpCandidate(item, existingCase, savedCase, tags, savedEntry) {
     if (hasCourtFeedNegativeSignals(item, savedCase)) {
+      return null;
+    }
+
+    if (!hasHighConfidenceTargetCase(existingCase || savedCase)) {
       return null;
     }
 
