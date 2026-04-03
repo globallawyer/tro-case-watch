@@ -83,6 +83,8 @@ const publicRateLimitBuckets = new Map();
 const pendingLookupImports = new Map();
 let lastTroDailyUpdatesRefreshQueuedAt = 0;
 const browserGuardCookieName = "__tt_guard";
+const publicApiTokenMetaName = "tt-public-api-token";
+const publicApiTokenHeaderName = "x-tt-public-token";
 const publicSiteOrigins = new Set([
   "https://trotracker.com",
   "https://www.trotracker.com",
@@ -372,7 +374,7 @@ function buildApiHeaders(origin = "") {
   if (publicSiteOrigins.has(origin)) {
     headers["access-control-allow-origin"] = origin;
     headers["access-control-allow-methods"] = "GET,POST,OPTIONS";
-    headers["access-control-allow-headers"] = "content-type,x-admin-token";
+    headers["access-control-allow-headers"] = `content-type,x-admin-token,${publicApiTokenHeaderName}`;
     headers["vary"] = "Origin";
   }
 
@@ -476,6 +478,15 @@ function createBrowserGuardToken(request, expiresAtMs) {
   return `${body}.${signature}`;
 }
 
+function createPublicApiToken(request, expiresAtMs) {
+  const body = `${Math.floor(expiresAtMs)}.${fingerprintClient(request)}.public-api`;
+  const signature = crypto
+    .createHmac("sha256", buildBrowserGuardSecret())
+    .update(body)
+    .digest("base64url");
+  return `${body}.${signature}`;
+}
+
 function hasValidBrowserGuard(request) {
   if (authorize(request)) {
     return true;
@@ -510,6 +521,67 @@ function attachBrowserGuardCookie(request, headers = {}) {
   const expiresAtMs = Date.now() + maxAgeSeconds * 1000;
   headers["set-cookie"] = `${browserGuardCookieName}=${encodeURIComponent(createBrowserGuardToken(request, expiresAtMs))}; Path=/; Max-Age=${maxAgeSeconds}; HttpOnly; Secure; SameSite=Lax`;
   return headers;
+}
+
+function hasValidPublicApiToken(request) {
+  if (authorize(request)) {
+    return true;
+  }
+
+  const token = String(request.headers[publicApiTokenHeaderName] || "").trim();
+  if (!token) {
+    return false;
+  }
+
+  const parts = token.split(".");
+  if (parts.length !== 4) {
+    return false;
+  }
+
+  const [expiresAtRaw, fingerprint, scope, signature] = parts;
+  const expiresAt = Number(expiresAtRaw || 0);
+  if (!expiresAt || expiresAt <= Date.now() || scope !== "public-api") {
+    return false;
+  }
+
+  const body = `${expiresAt}.${fingerprint}.${scope}`;
+  const expectedSignature = crypto
+    .createHmac("sha256", buildBrowserGuardSecret())
+    .update(body)
+    .digest("base64url");
+
+  if (signature !== expectedSignature) {
+    return false;
+  }
+
+  return fingerprint === fingerprintClient(request);
+}
+
+function escapeHtmlAttribute(value = "") {
+  return String(value || "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("\"", "&quot;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+
+function injectPublicApiTokenIntoHtml(request, htmlBuffer) {
+  const expiresAtMs = Date.now() + 2 * 60 * 60 * 1000;
+  const token = createPublicApiToken(request, expiresAtMs);
+  const metaTag = `    <meta name="${publicApiTokenMetaName}" content="${escapeHtmlAttribute(token)}" />\n`;
+  const html = Buffer.isBuffer(htmlBuffer) ? htmlBuffer.toString("utf-8") : String(htmlBuffer || "");
+  if (html.includes(`name="${publicApiTokenMetaName}"`)) {
+    return html.replace(
+      new RegExp(`<meta name="${publicApiTokenMetaName}" content="[^"]*" ?/?>`),
+      metaTag.trim()
+    );
+  }
+
+  if (html.includes("</head>")) {
+    return html.replace("</head>", `${metaTag}</head>`);
+  }
+
+  return `${metaTag}${html}`;
 }
 
 function isSuspiciousUserAgent(request) {
@@ -680,6 +752,22 @@ function enforceBrowserGuard(request, response, pathname) {
   response.writeHead(403, buildApiHeaders());
   response.end(JSON.stringify({
     error: "Browser session required"
+  }));
+  return true;
+}
+
+function enforcePublicApiToken(request, response, pathname) {
+  if (request.method !== "GET" || !requiresBrowserGuard(pathname) || authorize(request)) {
+    return false;
+  }
+
+  if (hasValidPublicApiToken(request)) {
+    return false;
+  }
+
+  response.writeHead(403, buildApiHeaders());
+  response.end(JSON.stringify({
+    error: "Signed page session required"
   }));
   return true;
 }
@@ -1434,6 +1522,10 @@ async function handleApi(request, response, pathname, searchParams) {
     return;
   }
 
+  if (enforcePublicApiToken(request, response, pathname)) {
+    return;
+  }
+
   if (request.method === "GET" && pathname === "/api/health") {
     const cached = getCachedPublicPayload(request, pathname);
     if (cached) {
@@ -1834,9 +1926,10 @@ function serveStatic(request, response, pathname) {
     const fallback = path.join(config.publicDir, "index.html");
     response.writeHead(200, attachBrowserGuardCookie(request, {
       "content-type": "text/html; charset=utf-8",
-      "x-content-type-options": "nosniff"
+      "x-content-type-options": "nosniff",
+      "cache-control": "no-store"
     }));
-    response.end(fs.readFileSync(fallback));
+    response.end(injectPublicApiTokenIntoHtml(request, fs.readFileSync(fallback)));
     return;
   }
 
@@ -1856,12 +1949,13 @@ function serveStatic(request, response, pathname) {
   if (extension === ".html") {
     headers["content-security-policy"] =
       "default-src 'self'; img-src 'self' data:; style-src 'self' https://fonts.googleapis.com 'unsafe-inline'; font-src 'self' https://fonts.gstatic.com data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self' mailto:";
+    headers["cache-control"] = "no-store";
   }
   if (extension === ".html") {
     attachBrowserGuardCookie(request, headers);
   }
   response.writeHead(200, headers);
-  response.end(fs.readFileSync(filePath));
+  response.end(extension === ".html" ? injectPublicApiTokenIntoHtml(request, fs.readFileSync(filePath)) : fs.readFileSync(filePath));
 }
 
 const server = http.createServer(async (request, response) => {
@@ -1877,7 +1971,7 @@ const server = http.createServer(async (request, response) => {
     if (url.pathname.startsWith("/api/")) {
       response.setHeader("access-control-allow-origin", buildApiHeaders(request.headers.origin || "")["access-control-allow-origin"] || "");
       response.setHeader("access-control-allow-methods", "GET,POST,OPTIONS");
-      response.setHeader("access-control-allow-headers", "content-type,x-admin-token");
+      response.setHeader("access-control-allow-headers", `content-type,x-admin-token,${publicApiTokenHeaderName}`);
       await handleApi(request, response, url.pathname, url.searchParams);
       return;
     }

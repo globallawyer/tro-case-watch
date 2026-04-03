@@ -41,6 +41,8 @@ const statusPollMs = 5 * 60 * 1000;
 const troDailyUpdatesPollMs = 30 * 60 * 1000;
 const apiBase = "";
 let lookupThawTimer = null;
+const publicApiToken =
+  document.querySelector('meta[name="tt-public-api-token"]')?.getAttribute("content")?.trim() || "";
 
 function detailCacheKey(caseId, { full = false } = {}) {
   return `${Number(caseId)}:${full ? "full" : "light"}`;
@@ -101,7 +103,16 @@ function latestTimelineFiledAt(entries = []) {
 }
 
 function request(path, options) {
-  return fetch(`${apiBase}${path}`, options).then(async (response) => {
+  const headers = new Headers(options?.headers || {});
+  if (publicApiToken) {
+    headers.set("x-tt-public-token", publicApiToken);
+  }
+  headers.set("x-requested-with", "trotracker-web");
+
+  return fetch(`${apiBase}${path}`, {
+    ...options,
+    headers
+  }).then(async (response) => {
     if (!response.ok) {
       throw new Error(`HTTP ${response.status}`);
     }
