@@ -87,6 +87,41 @@ let lastTroDailyUpdatesRefreshQueuedAt = 0;
 const browserGuardCookieName = "__tt_guard";
 const publicApiTokenMetaName = "tt-public-api-token";
 const publicApiTokenHeaderName = "x-tt-public-token";
+const scannerPathFragments = [
+  "/.env",
+  "/.git",
+  "/wp-admin",
+  "/wp-login",
+  "/phpmyadmin",
+  "/pma",
+  "/adminer",
+  "/vendor/phpunit",
+  "/cgi-bin/",
+  "/.aws/",
+  "/.ssh/",
+  "/server-status",
+  "/actuator",
+  "/boaform",
+  "/hnap1",
+  "/jmx-console",
+  "/solr/",
+  "/_ignition/",
+  "/autodiscover",
+  "/owa/",
+  "/debug/default/view",
+  "/containers/json",
+  "/v2/_catalog"
+];
+const scannerQueryFragments = [
+  "../",
+  "..%2f",
+  "${jndi:",
+  "union select",
+  "<script",
+  "xdebug_session_start",
+  "phpunit",
+  "thinkphp"
+];
 const publicSiteOrigins = new Set([
   "https://trotracker.com",
   "https://www.trotracker.com",
@@ -707,7 +742,8 @@ function getBehaviorBucket(request) {
   const nextBucket = {
     windowStartedAt: now,
     searches: new Set(),
-    caseDetails: new Set()
+    caseDetails: new Set(),
+    recentCaseDetailHits: []
   };
   publicBehaviorBuckets.set(key, nextBucket);
   return nextBucket;
@@ -742,9 +778,16 @@ function getChallengeBucket(request) {
   return nextBucket;
 }
 
-function registerBehaviorStrike(request) {
+function registerBehaviorStrike(request, { immediateBlockMs = 0 } = {}) {
   const bucket = getChallengeBucket(request);
   const now = Date.now();
+  if (immediateBlockMs > 0) {
+    bucket.blockedUntil = now + immediateBlockMs;
+    bucket.strikeCount = 0;
+    bucket.firstStrikeAt = 0;
+    return bucket;
+  }
+
   const resetAfterMs = config.server.publicRateLimitWindowMs * 4;
   if (!bucket.firstStrikeAt || now - bucket.firstStrikeAt > resetAfterMs) {
     bucket.strikeCount = 1;
@@ -786,6 +829,36 @@ function enforceTemporaryPublicBlock(request, response, pathname) {
   }
 
   return false;
+}
+
+function matchesScannerProbe(pathname = "", searchParams) {
+  const loweredPath = String(pathname || "").trim().toLowerCase();
+  if (scannerPathFragments.some((fragment) => loweredPath.includes(fragment))) {
+    return true;
+  }
+
+  const flattenedQuery = searchParams ? searchParams.toString().toLowerCase() : "";
+  return scannerQueryFragments.some((fragment) => flattenedQuery.includes(fragment));
+}
+
+function enforceScannerShield(request, response, pathname, searchParams) {
+  if (request.method !== "GET" || authorize(request)) {
+    return false;
+  }
+
+  if (!matchesScannerProbe(pathname, searchParams)) {
+    return false;
+  }
+
+  registerBehaviorStrike(request, {
+    immediateBlockMs: config.server.publicScannerBlockMs
+  });
+  response.writeHead(404, {
+    "content-type": "text/plain; charset=utf-8",
+    "cache-control": "no-store"
+  });
+  response.end("Not Found");
+  return true;
 }
 
 function sendBehaviorThrottle(response, bucket, label) {
@@ -847,6 +920,17 @@ async function enforcePublicBehaviorThrottle(request, response, pathname, search
 
   if (pathname.startsWith("/api/cases/")) {
     bucket.caseDetails.add(pathname);
+    const now = Date.now();
+    const burstWindowMs = config.server.publicCaseDetailBurstWindowMs;
+    bucket.recentCaseDetailHits = bucket.recentCaseDetailHits.filter((timestamp) => now - timestamp < burstWindowMs);
+    bucket.recentCaseDetailHits.push(now);
+    if (bucket.recentCaseDetailHits.length > config.server.publicCaseDetailBurstMaxRequests) {
+      registerBehaviorStrike(request, {
+        immediateBlockMs: config.server.publicTemporaryBlockMs
+      });
+      sendTemporaryBlock(response, Date.now() + config.server.publicTemporaryBlockMs);
+      return true;
+    }
     if (bucket.caseDetails.size > config.server.publicBehaviorDistinctCaseDetailsPerWindow) {
       registerBehaviorStrike(request);
       sendBehaviorThrottle(response, bucket, "Case detail");
@@ -2161,6 +2245,10 @@ const server = http.createServer(async (request, response) => {
     }
 
     const url = new URL(request.url, `http://${request.headers.host}`);
+
+    if (enforceScannerShield(request, response, url.pathname, url.searchParams)) {
+      return;
+    }
 
     if (url.pathname.startsWith("/api/")) {
       response.setHeader("access-control-allow-origin", buildApiHeaders(request.headers.origin || "")["access-control-allow-origin"] || "");

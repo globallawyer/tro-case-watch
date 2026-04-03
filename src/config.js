@@ -128,6 +128,9 @@ export const config = {
     publicBehaviorDistinctCaseDetailsPerWindow: envInt("PUBLIC_BEHAVIOR_DISTINCT_CASE_DETAILS_PER_WINDOW", 18),
     publicBehaviorStrikeLimit: envInt("PUBLIC_BEHAVIOR_STRIKE_LIMIT", 2),
     publicTemporaryBlockMs: envInt("PUBLIC_TEMPORARY_BLOCK_MS", 10 * 60_000),
+    publicScannerBlockMs: envInt("PUBLIC_SCANNER_BLOCK_MS", 30 * 60_000),
+    publicCaseDetailBurstWindowMs: envInt("PUBLIC_CASE_DETAIL_BURST_WINDOW_MS", 10_000),
+    publicCaseDetailBurstMaxRequests: envInt("PUBLIC_CASE_DETAIL_BURST_MAX_REQUESTS", 10),
     suspiciousPenaltyDelayMs: envInt("SUSPICIOUS_PENALTY_DELAY_MS", 1200),
     suspiciousUserAgentPatterns: envList("SUSPICIOUS_USER_AGENT_PATTERNS", [
       "python-requests",
