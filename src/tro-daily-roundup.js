@@ -573,6 +573,8 @@ const HEADLINE_ALIAS_RULES = [
   { pattern: /casio|卡西欧/i, label: "卡西欧" },
   { pattern: /hatsune miku|初音未来/i, label: "初音未来" },
   { pattern: /sega|metaphor re fantazio|如龙|persona|sonic/i, label: "Sega游戏IP" },
+  { pattern: /morgan wallen/i, label: "Morgan Wallen周边" },
+  { pattern: /the wild robot/i, label: "The Wild Robot" },
   { pattern: /mattel|美泰/i, label: "美泰" },
   { pattern: /levi strauss|levi'?s|李维斯/i, label: "李维斯" },
   { pattern: /nike|耐克/i, label: "耐克" },
@@ -637,15 +639,9 @@ function headlineHasAction(value = "") {
 }
 
 function buildActionLabel(group) {
-  const haystack = group.articles.map((item) => `${item.title || ""} ${item.summary || ""}`).join(" ").toLowerCase();
+  const haystack = group.articles.map((item) => `${item.title || ""} ${item.rawTitleHint || ""}`).join(" ").toLowerCase();
   if (/(\d+)\s*个卖家/.test(haystack) || /踩坑/i.test(haystack)) {
     return "卖家踩坑";
-  }
-  if (/撤诉|dismiss|解冻|解除冻结/i.test(haystack)) {
-    return "撤诉解冻";
-  }
-  if (/和解|settlement|stipulation/i.test(haystack)) {
-    return "和解进展";
   }
   if (/temporary restraining order|\btro\b|冻结|restraining|injunction/i.test(haystack)) {
     return "发起TRO";
@@ -655,6 +651,12 @@ function buildActionLabel(group) {
   }
   if (/卖家|seller|排查|下架|高危链接|预警/i.test(haystack)) {
     return "卖家预警";
+  }
+  if (/撤诉|dismiss|解冻|解除冻结/i.test(haystack)) {
+    return "撤诉解冻";
+  }
+  if (/和解|settlement|stipulation/i.test(haystack)) {
+    return "和解进展";
   }
   return "案件动态";
 }
@@ -690,6 +692,33 @@ function cleanHeadlineSubjectCandidate(value = "") {
   );
 }
 
+function extractEnglishHeadlineEntity(group) {
+  const text = sortArticlesByTime(group.articles)
+    .map((article) => normalizeHeadlineCandidate(article.title || article.rawTitleHint || ""))
+    .join(" ");
+
+  const singerMatch = text.match(/歌手\s*([A-Z][A-Za-z0-9'&.\-]+(?:\s+[A-Z][A-Za-z0-9'&.\-]+){0,3})/);
+  if (singerMatch?.[1]) {
+    return summarizeText(`${singerMatch[1]}周边`, 16);
+  }
+
+  const englishEntityMatch = text.match(
+    /\b([A-Z][A-Za-z0-9'&.\-]*(?:\s+[A-Z][A-Za-z0-9'&.\-]*){0,4})\b(?=\s*(?:周边|版权|商标|品牌|IP|产品|侵权|维权|冻结|风险))/i
+  );
+  if (!englishEntityMatch?.[1]) {
+    return "";
+  }
+
+  const candidate = normalizeText(englishEntityMatch[1])
+    .replace(/^(?:TRO|GBC|David)\b/i, "")
+    .trim();
+  if (!candidate || /\b(?:LLC|INC|LTD|GROUP|SERVICES)\b/i.test(candidate)) {
+    return "";
+  }
+
+  return summarizeText(candidate, 16);
+}
+
 function extractSellerCountSubject(group) {
   const articleTexts = sortArticlesByTime(group.articles).map((article) => normalizeHeadlineCandidate(article.title));
   const haystack = articleTexts.join(" ");
@@ -716,6 +745,11 @@ function pickHeadlineSubject(group) {
   const sellerCountSubject = extractSellerCountSubject(group);
   if (sellerCountSubject) {
     return sellerCountSubject;
+  }
+
+  const englishEntityCandidate = extractEnglishHeadlineEntity(group);
+  if (englishEntityCandidate) {
+    return englishEntityCandidate;
   }
 
   const candidates = sortArticlesByTime(group.articles)
