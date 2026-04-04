@@ -1132,46 +1132,84 @@ export class CaseSyncService {
     }
   }
 
-  async importLookup(term, { courtName = "", caseName = "" } = {}) {
+  async importLookup(term, { courtName = "", caseName = "", sources = [] } = {}) {
     const rawTerm = String(term || "").trim();
     if (!rawTerm) {
-      return { imported: 0, matched: 0 };
+      return {
+        imported: 0,
+        matched: 0,
+        sourceResults: {}
+      };
     }
 
+    const requestedSources = new Set(
+      (Array.isArray(sources) && sources.length ? sources : ["courtlistener", "recentfilings", "61tro"])
+        .map((value) => String(value || "").trim().toLowerCase())
+        .filter(Boolean)
+    );
+    const includeCourtListener = requestedSources.has("courtlistener");
+    const includeRecentFilings = requestedSources.has("recentfilings");
+    const include61tro = requestedSources.has("61tro");
     const candidates = [];
     const queries = this.buildLookupQueries(rawTerm, { courtName, caseName });
+    const sourceResults = {
+      courtlistener: {
+        attempted: includeCourtListener,
+        matched: 0,
+        imported: 0
+      },
+      recentfilings: {
+        attempted: includeRecentFilings && docketLooksLike(rawTerm),
+        matched: 0,
+        imported: 0
+      },
+      "61tro": {
+        attempted: include61tro && docketLooksLike(rawTerm),
+        matched: 0,
+        imported: 0
+      }
+    };
 
-    for (const query of queries) {
-      const payload = await this.courtListener.search({
-        query,
-        startDate: getDiscoveryStartDate(this.config),
-        pageSize: 20
-      });
+    if (includeCourtListener) {
+      for (const query of queries) {
+        const payload = await this.courtListener.search({
+          query,
+          startDate: getDiscoveryStartDate(this.config),
+          pageSize: 20
+        });
 
-      const matches = (payload.results || []).filter((result) =>
-        this.lookupMatches(rawTerm, result, { courtName, caseName })
-      );
-      for (const match of matches) {
-        if (!candidates.some((item) => item.docket_id === match.docket_id)) {
-          candidates.push(match);
+        const matches = (payload.results || []).filter((result) =>
+          this.lookupMatches(rawTerm, result, { courtName, caseName })
+        );
+        for (const match of matches) {
+          if (!candidates.some((item) => item.docket_id === match.docket_id)) {
+            candidates.push(match);
+          }
+        }
+
+        if (candidates.length >= 10) {
+          break;
         }
       }
 
-      if (candidates.length >= 10) {
-        break;
-      }
+      sourceResults.courtlistener.matched = candidates.length;
     }
 
-    const ingest = this.ingestSearchResults(candidates, {
-      tags: []
-    });
+    const ingest = includeCourtListener
+      ? this.ingestSearchResults(candidates, {
+          tags: []
+        })
+      : { casesUpserted: 0 };
     let imported = ingest.casesUpserted;
     let matched = candidates.length;
+    sourceResults.courtlistener.imported = Number(ingest.casesUpserted || 0);
 
     if (docketLooksLike(rawTerm)) {
       const caseIndex = this.buildCourtFeedCaseIndex();
 
-      const recentFilingsMatch = await this.recentFilings.lookupByDocket(rawTerm, { courtName }).catch(() => null);
+      const recentFilingsMatch = includeRecentFilings
+        ? await this.recentFilings.lookupByDocket(rawTerm, { courtName }).catch(() => null)
+        : null;
       if (recentFilingsMatch?.item) {
         const recentIngest = this.ingestRecentFilingsItems(
           {
@@ -1183,11 +1221,15 @@ export class CaseSyncService {
         );
         imported += Number(recentIngest.casesUpserted || 0);
         matched += 1;
+        sourceResults.recentfilings.matched = 1;
+        sourceResults.recentfilings.imported = Number(recentIngest.casesUpserted || 0);
       }
 
-      const supplementalMatch = await this.lawFirms.lookupByDocket(rawTerm, {
-        sourceIds: ["61tro"]
-      }).catch(() => null);
+      const supplementalMatch = include61tro
+        ? await this.lawFirms.lookupByDocket(rawTerm, {
+            sourceIds: ["61tro"]
+          }).catch(() => null)
+        : null;
       if (supplementalMatch?.item) {
         const supplementalIngest = this.ingestLawFirmItems(
           {
@@ -1199,12 +1241,15 @@ export class CaseSyncService {
         );
         imported += Number(supplementalIngest.casesUpserted || 0);
         matched += 1;
+        sourceResults["61tro"].matched = 1;
+        sourceResults["61tro"].imported = Number(supplementalIngest.casesUpserted || 0);
       }
     }
 
     return {
       imported,
-      matched
+      matched,
+      sourceResults
     };
   }
 
