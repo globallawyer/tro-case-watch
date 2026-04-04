@@ -26,6 +26,10 @@ function cleanText(value) {
   return decodeHtml(stripTags(value)).replace(/\s+/g, " ").trim();
 }
 
+function normalizeLookupText(value) {
+  return cleanText(value).toLowerCase().replace(/[^\w]+/g, " ").replace(/\s+/g, " ").trim();
+}
+
 function absoluteUrl(value, baseUrl) {
   const raw = String(value || "").trim();
   if (!raw) {
@@ -83,6 +87,19 @@ function parseDocketNumber(value) {
 
   const division = match[1] ? `${match[1]}:` : "";
   return `${division}${match[2]}-cv-${match[3]}`;
+}
+
+function lawFirmMatchesCourtName(item = {}, courtName = "") {
+  const left = normalizeLookupText(item?.courtName || "");
+  const right = normalizeLookupText(courtName);
+  if (!right) {
+    return true;
+  }
+  if (!left) {
+    return false;
+  }
+
+  return left === right || left.includes(right) || right.includes(left);
 }
 
 function cleanCaseName(value) {
@@ -928,7 +945,7 @@ export class LawFirmClient {
     };
   }
 
-  async lookupByDocket(docketNumber, { sourceIds = [] } = {}) {
+  async lookupByDocket(docketNumber, { sourceIds = [], courtName = "" } = {}) {
     if (!this.enabled) {
       return null;
     }
@@ -943,8 +960,8 @@ export class LawFirmClient {
         continue;
       }
 
-      const item = await this.lookup61troByDocket(source, docketNumber);
-      if (item) {
+      const item = await this.lookup61troByDocket(source, docketNumber, { courtName });
+      if (item && lawFirmMatchesCourtName(item, courtName)) {
         return {
           source,
           item,
@@ -956,7 +973,7 @@ export class LawFirmClient {
     return null;
   }
 
-  async lookup61troByDocket(source, docketNumber) {
+  async lookup61troByDocket(source, docketNumber, { courtName = "" } = {}) {
     for (const term of build61troSearchTerms(docketNumber)) {
       const searchUrl = `${source.baseUrl}/search.html?sn=${encodeURIComponent(term)}`;
       const html = await this.fetchText(searchUrl);
@@ -969,7 +986,8 @@ export class LawFirmClient {
       const item = parse61troCasePage(pageHtml, detailUrl, source);
       if (
         item?.docketNumber &&
-        normalizeDocketLookupCoreKey(item.docketNumber) === normalizeDocketLookupCoreKey(docketNumber)
+        normalizeDocketLookupCoreKey(item.docketNumber) === normalizeDocketLookupCoreKey(docketNumber) &&
+        lawFirmMatchesCourtName(item, courtName)
       ) {
         return item;
       }

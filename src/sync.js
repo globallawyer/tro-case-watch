@@ -1227,7 +1227,8 @@ export class CaseSyncService {
 
       const supplementalMatch = include61tro
         ? await this.lawFirms.lookupByDocket(rawTerm, {
-            sourceIds: ["61tro"]
+            sourceIds: ["61tro"],
+            courtName
           }).catch(() => null)
         : null;
       if (supplementalMatch?.item) {
@@ -3042,7 +3043,8 @@ export class CaseSyncService {
       }
 
       const sourceResult = await this.lawFirms.lookupByDocket(docketNumber, {
-        sourceIds: normalizedSourceIds
+        sourceIds: normalizedSourceIds,
+        courtName: caseRow.court_name || ""
       }).catch(() => null);
       if (!sourceResult?.item) {
         return { enriched: false, reason: "not-found" };
