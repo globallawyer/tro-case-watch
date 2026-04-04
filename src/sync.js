@@ -572,7 +572,7 @@ function getLatestKnownEntryFiledAt(store, caseId) {
 }
 
 function hasCaseLevelActivityLead(store, caseRow = {}) {
-  const latestActivityAt = String(caseRow.latest_docket_filed_at || "").trim();
+  const latestActivityAt = String(getCasePriorityActivityAt(caseRow) || "").trim();
   if (!latestActivityAt || !Number(caseRow.id)) {
     return false;
   }

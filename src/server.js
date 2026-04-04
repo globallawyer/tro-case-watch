@@ -1460,7 +1460,9 @@ function latestEntryFiledAtForItem(item = {}) {
 }
 
 function hasCaseLevelActivityLead(item = {}) {
-  const latestActivityAt = String(item?.latest_docket_filed_at || "").trim();
+  const latestActivityAt = String(
+    laterIso(laterIso(item?.updated_at, item?.latest_docket_filed_at), item?.date_filed) || ""
+  ).trim();
   if (!latestActivityAt) {
     return false;
   }
