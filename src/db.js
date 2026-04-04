@@ -1385,15 +1385,24 @@ function applyAuthoritativeDocketPreference(caseLike, entries = null) {
       ...(caseLike.source_urls ? [caseLike.source_urls] : []),
       getPriorityFeedRaw(caseLike)?.url ? [[getPriorityFeedRaw(caseLike).url]] : []
     ),
-    recent_activity_summary: newestEntry?.description || caseLike.recent_activity_summary,
-    latest_docket_filed_at: newestEntry?.filed_at || caseLike.latest_docket_filed_at,
-    latest_docket_number: newestEntry?.row_number || newestEntry?.document_number || newestEntry?.entry_number ||
-      (priorityFeedRowCount > 0 ? String(priorityFeedRowCount) : caseLike.latest_docket_number),
-    docket_count: priorityFeedEntries?.length || priorityFeedRowCount || Number(caseLike.docket_count || 0)
+    recent_activity_summary: caseLike.recent_activity_summary || newestEntry?.description || null,
+    latest_docket_filed_at: laterIso(caseLike.latest_docket_filed_at, newestEntry?.filed_at || null),
+    latest_docket_number: higherOrderValue(
+      caseLike.latest_docket_number,
+      newestEntry?.row_number ||
+        newestEntry?.document_number ||
+        newestEntry?.entry_number ||
+        (priorityFeedRowCount > 0 ? String(priorityFeedRowCount) : null)
+    ),
+    docket_count: Math.max(
+      Number(caseLike.docket_count || 0),
+      Number(priorityFeedEntries?.length || 0),
+      Number(priorityFeedRowCount || 0)
+    )
   };
 
   if (Array.isArray(entries)) {
-    preferred.entries = priorityFeedEntries;
+    preferred.entries = entries;
   }
 
   return preferred;
@@ -2786,10 +2795,7 @@ export class Store {
     const entriesTruncated = normalizedLimit > 0 && rawEntries.length > normalizedLimit;
     const entries = entriesTruncated ? rawEntries.slice(0, normalizedLimit) : rawEntries;
 
-    const uniqueEntries = dedupeEntries(entries);
-    const displayEntries = hasPriorityFeedAuthority(canonicalRow, entries)
-      ? getPriorityFeedEntries(entries)
-      : uniqueEntries;
+    const displayEntries = dedupeEntries(entries);
 
     const detail = applyAuthoritativeDocketPreference({
       ...canonicalRow,
