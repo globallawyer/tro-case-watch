@@ -535,6 +535,10 @@ function laterIso(left, right) {
   return String(left).localeCompare(String(right)) >= 0 ? left : right;
 }
 
+function getCasePriorityActivityAt(caseRow = {}) {
+  return laterIso(laterIso(caseRow.updated_at, caseRow.latest_docket_filed_at), caseRow.date_filed);
+}
+
 function higherOrderValue(left, right) {
   const leftNumber = parseNumericLike(left);
   const rightNumber = parseNumericLike(right);
@@ -2322,7 +2326,7 @@ export class CaseSyncService {
   isRecentFiledExistingCase(caseRow, recentFiledWindowDays = 2) {
     const recentFiledCutoff = Date.now() - Math.max(1, Number(recentFiledWindowDays || 2)) * 24 * 60 * 60 * 1000;
     const createdAtMs = Date.parse(String(caseRow?.created_at || ""));
-    const activityAtMs = Date.parse(String(caseRow?.latest_docket_filed_at || caseRow?.updated_at || caseRow?.date_filed || ""));
+    const activityAtMs = Date.parse(String(getCasePriorityActivityAt(caseRow) || ""));
     return Number.isFinite(createdAtMs) && Number.isFinite(activityAtMs) && createdAtMs < recentFiledCutoff && activityAtMs >= recentFiledCutoff;
   }
 
@@ -2356,7 +2360,7 @@ export class CaseSyncService {
       this.mergeCrossSourceFollowUpCandidate(candidates, {
         caseId,
         docketNumber: row.docket_number || null,
-        filedAt: row.latest_docket_filed_at || row.updated_at || row.date_filed || null,
+        filedAt: getCasePriorityActivityAt(row),
         priority:
           row.tags_marker?.includes("|seller_tro|")
             ? -3
@@ -2383,7 +2387,7 @@ export class CaseSyncService {
       this.mergeCrossSourceFollowUpCandidate(candidates, {
         caseId: Number(row.id),
         docketNumber: row.docket_number || null,
-        filedAt: row.latest_docket_filed_at || row.updated_at || row.date_filed || null,
+        filedAt: getCasePriorityActivityAt(row),
         priority:
           row.tags_marker?.includes("|seller_tro|")
             ? 0
@@ -2406,7 +2410,7 @@ export class CaseSyncService {
       this.mergeCrossSourceFollowUpCandidate(candidates, {
         caseId: Number(row.id),
         docketNumber: row.docket_number || null,
-        filedAt: row.latest_docket_filed_at || row.updated_at || row.date_filed || null,
+        filedAt: getCasePriorityActivityAt(row),
         priority:
           row.tags_marker?.includes("|seller_tro|")
             ? 0

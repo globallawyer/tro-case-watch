@@ -417,6 +417,12 @@ function laterIso(left, right) {
   return String(left).localeCompare(String(right)) >= 0 ? left : right;
 }
 
+function getCasePriorityActivityAt(caseLike = {}) {
+  return laterIso(laterIso(caseLike.updated_at, caseLike.latest_docket_filed_at), caseLike.date_filed);
+}
+
+const CASE_PRIORITY_ACTIVITY_SQL = `MAX(COALESCE(updated_at, ''), COALESCE(latest_docket_filed_at, ''), COALESCE(date_filed, ''))`;
+
 function chunkArray(values = [], size = 500) {
   const chunks = [];
   for (let index = 0; index < values.length; index += size) {
@@ -2705,7 +2711,7 @@ export class Store {
                    0,
                    CAST(REPLACE(COALESCE(latest_docket_number, '0'), '.0', '') AS INTEGER) - COALESCE(docket_count, 0)
                  ) DESC,
-                 COALESCE(latest_docket_filed_at, date_filed, updated_at) DESC
+                 ${CASE_PRIORITY_ACTIVITY_SQL} DESC
         LIMIT ?
       `)
       .all(Math.max(limit * 12, 120))
@@ -2728,8 +2734,8 @@ export class Store {
 
       if (leftIsCurrentYear && rightIsCurrentYear) {
         const currentYearActivityCompare = compareCaseActivityDesc(
-          left.latest_docket_filed_at || left.date_filed || left.updated_at,
-          right.latest_docket_filed_at || right.date_filed || right.updated_at
+          getCasePriorityActivityAt(left),
+          getCasePriorityActivityAt(right)
         );
         if (currentYearActivityCompare !== 0) {
           return currentYearActivityCompare;
@@ -2767,8 +2773,8 @@ export class Store {
       }
 
       return compareCaseActivityDesc(
-        left.latest_docket_filed_at || left.date_filed || left.updated_at,
-        right.latest_docket_filed_at || right.date_filed || right.updated_at
+        getCasePriorityActivityAt(left),
+        getCasePriorityActivityAt(right)
       );
     });
 
@@ -2807,8 +2813,8 @@ export class Store {
         WHERE date(date_filed) >= date(?)
           AND docket_number IS NOT NULL
           AND TRIM(docket_number) <> ''
-          AND COALESCE(latest_docket_filed_at, updated_at, date_filed) >= ?
-        ORDER BY COALESCE(latest_docket_filed_at, updated_at, date_filed) DESC
+          AND ${CASE_PRIORITY_ACTIVITY_SQL} >= ?
+        ORDER BY ${CASE_PRIORITY_ACTIVITY_SQL} DESC
         LIMIT ?
       `)
       .all(String(startDate || "2025-01-01"), recentFiledCutoffIso, candidatePoolSize)
@@ -2823,7 +2829,7 @@ export class Store {
           courtlistenerEntries: 0,
           latestEntryFiledAt: null
         };
-        const activityAtRaw = row.latest_docket_filed_at || row.updated_at || row.date_filed;
+        const activityAtRaw = getCasePriorityActivityAt(row);
         const activityAtMs = Number.isFinite(Date.parse(activityAtRaw || "")) ? Date.parse(activityAtRaw || "") : 0;
         const createdAtMs = Number.isFinite(Date.parse(row.created_at || "")) ? Date.parse(row.created_at || "") : 0;
         const isRecentFiledFollowUp = createdAtMs > 0 && createdAtMs < recentFiledCutoff && activityAtMs >= recentFiledCutoff;
@@ -2912,8 +2918,8 @@ export class Store {
         WHERE date(date_filed) >= date(?)
           AND docket_number IS NOT NULL
           AND TRIM(docket_number) <> ''
-          AND COALESCE(latest_docket_filed_at, updated_at, date_filed) >= ?
-        ORDER BY COALESCE(latest_docket_filed_at, updated_at, date_filed) DESC
+          AND ${CASE_PRIORITY_ACTIVITY_SQL} >= ?
+        ORDER BY ${CASE_PRIORITY_ACTIVITY_SQL} DESC
         LIMIT ?
       `)
       .all(String(startDate || "2025-01-01"), recentFiledCutoffIso, candidatePoolSize)
@@ -2927,7 +2933,7 @@ export class Store {
           totalEntries: 0,
           latestEntryFiledAt: null
         };
-        const activityAtRaw = row.latest_docket_filed_at || row.updated_at || row.date_filed;
+        const activityAtRaw = getCasePriorityActivityAt(row);
         const activityAtMs = Number.isFinite(Date.parse(activityAtRaw || "")) ? Date.parse(activityAtRaw || "") : 0;
         const createdAtMs = Number.isFinite(Date.parse(row.created_at || "")) ? Date.parse(row.created_at || "") : 0;
         const isRecentFiledFollowUp = createdAtMs > 0 && createdAtMs < recentFiledCutoff && activityAtMs >= recentFiledCutoff;
@@ -3098,15 +3104,15 @@ export class Store {
     };
 
     const recentRows = fetchCandidateRows(
-      `date(COALESCE(latest_docket_filed_at, date_filed, updated_at)) >= date('now', '-45 day')`,
+      `date(${CASE_PRIORITY_ACTIVITY_SQL}) >= date('now', '-45 day')`,
       [],
-      `COALESCE(latest_docket_filed_at, date_filed, updated_at) DESC, updated_at DESC`,
+      `${CASE_PRIORITY_ACTIVITY_SQL} DESC, updated_at DESC`,
       Math.max(poolSize, limit * 8)
     );
     const knownPriorityFeedRows = fetchCandidateRows(
       `(${PRIORITY_FEED_URL_CLAUSE} OR ${PRIORITY_FEED_RAW_CLAUSE})`,
       [],
-      `COALESCE(latest_docket_filed_at, date_filed, updated_at) DESC, docket_count DESC, id ASC`,
+      `${CASE_PRIORITY_ACTIVITY_SQL} DESC, docket_count DESC, id ASC`,
       knownPriorityFeedPoolSize,
       { startDate: null, requirePriorityTags: false }
     ).filter((row) => hasConcretePriorityFeedLink(row) || getPriorityFeedRowCount(row) > 0);
@@ -3130,7 +3136,7 @@ export class Store {
           const isCurrentYearCase = isCurrentPriorityYearCase(row);
           const hasRecentGapIssue = isGapPriorityCase(row) && Number(coverage.gapPriorityScore || 0) > 0;
           const currentYearGapWeight = getCurrentYearGapPriorityWeight(row, coverage, minimumExpectedEntries);
-          const activityAtRaw = row.latest_docket_filed_at || row.date_filed || row.updated_at;
+          const activityAtRaw = getCasePriorityActivityAt(row);
           const activityAtMs = Number.isFinite(Date.parse(activityAtRaw || "")) ? Date.parse(activityAtRaw || "") : 0;
           const createdAtMs = Number.isFinite(Date.parse(row.created_at || "")) ? Date.parse(row.created_at || "") : 0;
           const isRecentFiledFollowUp = createdAtMs > 0 && createdAtMs < recentFiledFollowUpBefore && activityAtMs >= recentFiledFollowUpBefore;
@@ -3221,7 +3227,7 @@ export class Store {
        AND NOT (${PRIORITY_FEED_URL_CLAUSE})`,
       [],
       `docket_count DESC,
-       COALESCE(latest_docket_filed_at, date_filed, updated_at) DESC,
+       ${CASE_PRIORITY_ACTIVITY_SQL} DESC,
        COALESCE(last_synced_at, '1970-01-01T00:00:00.000Z') ASC,
        id ASC`,
       Math.max(limit * 20, 240)
@@ -3229,7 +3235,7 @@ export class Store {
     const sparseRows = fetchCandidateRows(
       `docket_count <= ?`,
       [4],
-      `COALESCE(latest_docket_filed_at, date_filed, updated_at) DESC, updated_at DESC`,
+      `${CASE_PRIORITY_ACTIVITY_SQL} DESC, updated_at DESC`,
       Math.max(limit * 8, 120)
     );
     const legacyUnsyncedRows = fetchCandidateRows(
@@ -3238,7 +3244,7 @@ export class Store {
        AND docket_count >= ?`,
       [8],
       `docket_count DESC,
-       COALESCE(latest_docket_filed_at, date_filed, updated_at) DESC,
+       ${CASE_PRIORITY_ACTIVITY_SQL} DESC,
        COALESCE(last_synced_at, '1970-01-01T00:00:00.000Z') ASC,
        id ASC`,
       Math.max(limit * 20, 240)
@@ -3277,7 +3283,7 @@ export class Store {
         const isCurrentYearCase = isCurrentPriorityYearCase(row);
         const hasRecentGapIssue = isGapPriorityCase(row) && Number(coverage.gapPriorityScore || 0) > 0;
         const currentYearGapWeight = getCurrentYearGapPriorityWeight(row, coverage, minimumExpectedEntries);
-        const activityAtRaw = row.latest_docket_filed_at || row.date_filed || row.updated_at;
+        const activityAtRaw = getCasePriorityActivityAt(row);
         const activityAtMs = Number.isFinite(Date.parse(activityAtRaw || "")) ? Date.parse(activityAtRaw || "") : 0;
         const createdAtMs = Number.isFinite(Date.parse(row.created_at || "")) ? Date.parse(row.created_at || "") : 0;
         const isRecentFiledFollowUp = createdAtMs > 0 && createdAtMs < recentFiledFollowUpBefore && activityAtMs >= recentFiledFollowUpBefore;
