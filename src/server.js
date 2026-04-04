@@ -1487,6 +1487,60 @@ function hasCaseLevelActivityLead(item = {}) {
   return latestActivityAt.localeCompare(latestEntryFiledAt) > 0;
 }
 
+function caseMatchesRecentFilingsSource(item = {}) {
+  const docketNumber = String(item?.docket_number || "");
+  if (!/\b\d{2}-cv-\d{3,6}\b/i.test(docketNumber)) {
+    return false;
+  }
+
+  const caseCourt = String(item?.court_name || item?.courtName || "").trim().toLowerCase();
+  if (!caseCourt) {
+    return false;
+  }
+
+  return recentFilings.listSources().some((source) => {
+    const sourceCourt = String(source?.courtName || "").trim().toLowerCase();
+    return sourceCourt && (sourceCourt === caseCourt || sourceCourt.includes(caseCourt) || caseCourt.includes(sourceCourt));
+  });
+}
+
+function shouldHydrateRecentFilingsOnDemand(item = {}) {
+  if (!config.recentFilings?.enabled || !caseMatchesRecentFilingsSource(item)) {
+    return false;
+  }
+
+  const hasActivityLead = hasCaseLevelActivityLead(item);
+  const recentFilingsState = Object.values(item?.raw?.recent_filings || {}).reduce((latest, value) => {
+    const syncedAt = Date.parse(String(value?.syncedAt || value?.federalRecordLookup?.updatedAt || ""));
+    return Number.isFinite(syncedAt) ? Math.max(latest, syncedAt) : latest;
+  }, 0);
+
+  if (!hasActivityLead && recentFilingsState && Date.now() - recentFilingsState < 4 * 60 * 60 * 1000) {
+    return false;
+  }
+
+  return true;
+}
+
+function shouldHydrate61troOnDemand(item = {}) {
+  if (!config.lawFirms?.enabled || !/\b\d{2}-cv-\d{3,6}\b/i.test(String(item?.docket_number || ""))) {
+    return false;
+  }
+
+  const hasPriorityProfile = Boolean(item?.insights?.is_seller_case || item?.insights?.is_tro_case || item?.insights?.is_schedule_a_case);
+  const hasActivityLead = hasCaseLevelActivityLead(item);
+  if (!hasPriorityProfile && !hasActivityLead) {
+    return false;
+  }
+
+  const syncedAt = Date.parse(String(item?.raw?.law_firm_sites?.["61tro"]?.syncedAt || ""));
+  if (!hasActivityLead && Number.isFinite(syncedAt) && Date.now() - syncedAt < 4 * 60 * 60 * 1000) {
+    return false;
+  }
+
+  return true;
+}
+
 function shouldHydrateCourtListenerOnDemand(item = {}) {
   if (!courtListener.hasDocketAccess()) {
     return false;
@@ -1635,16 +1689,20 @@ function shouldHydrateUniCourtOnDemand(item = {}) {
 }
 
 function buildCaseHydrationPlan(item = {}) {
+  const recentfilings = shouldHydrateRecentFilingsOnDemand(item);
+  const lawfirm61tro = shouldHydrate61troOnDemand(item);
   const courtlistener = shouldHydrateCourtListenerOnDemand(item);
   const priorityFeed = shouldHydratePriorityFeedOnDemand(item);
   const pacermonitor = shouldHydratePacerMonitorOnDemand(item);
   const docketalarm = shouldHydrateDocketAlarmOnDemand(item);
   const unicourtPlan = shouldHydrateUniCourtOnDemand(item);
   const lookup = Boolean(String(item?.docket_number || item?.case_name || "").trim()) &&
-    (courtlistener || priorityFeed || pacermonitor || docketalarm || unicourtPlan);
+    (recentfilings || lawfirm61tro || courtlistener || priorityFeed || pacermonitor || docketalarm || unicourtPlan);
   return {
-    pending: lookup || courtlistener || priorityFeed || pacermonitor || docketalarm || unicourtPlan,
+    pending: lookup || recentfilings || lawfirm61tro || courtlistener || priorityFeed || pacermonitor || docketalarm || unicourtPlan,
     lookup,
+    recentfilings,
+    lawfirm61tro,
     courtlistener,
     priority: priorityFeed,
     pacermonitor,
@@ -1687,10 +1745,31 @@ function queueCaseHydration(caseId, initialItem) {
         if (lookupTerm) {
           await syncService.importLookup(lookupTerm, {
             courtName: current?.court_name || "",
-            caseName: current?.case_name || ""
+            caseName: current?.case_name || "",
+            sources: ["courtlistener"]
           });
           current = store.getCase(caseId) || current;
         }
+      } catch {
+        current = store.getCase(caseId) || current;
+      }
+    }
+
+    if (plan.recentfilings && shouldHydrateRecentFilingsOnDemand(current)) {
+      try {
+        await syncService.enrichCaseWithRecentFilings(caseId);
+        current = store.getCase(caseId) || current;
+      } catch {
+        current = store.getCase(caseId) || current;
+      }
+    }
+
+    if (plan.lawfirm61tro && shouldHydrate61troOnDemand(current)) {
+      try {
+        await syncService.enrichCaseWithLawFirmLookup(caseId, {
+          sourceIds: ["61tro"]
+        });
+        current = store.getCase(caseId) || current;
       } catch {
         current = store.getCase(caseId) || current;
       }
@@ -1754,12 +1833,18 @@ function queueCaseHydration(caseId, initialItem) {
 
 async function refreshCaseAcrossSources(caseId, {
   initialItem = null,
-  providers = ["lookup:courtlistener", "lookup:recentfilings", "lookup:61tro", PRIORITY_FEED_SOURCE, "courtlistener", "pacermonitor", "docketalarm", "unicourt"]
+  providers = ["lookup:courtlistener", "recentfilings", "61tro", PRIORITY_FEED_SOURCE, "courtlistener", "pacermonitor", "docketalarm", "unicourt"]
 } = {}) {
   const expandedProviders = [...new Set(
     providers.flatMap((provider) => {
       if (provider === "lookup") {
-        return ["lookup:courtlistener", "lookup:recentfilings", "lookup:61tro"];
+        return ["lookup:courtlistener", "recentfilings", "61tro"];
+      }
+      if (provider === "lookup:recentfilings") {
+        return ["recentfilings"];
+      }
+      if (provider === "lookup:61tro") {
+        return ["61tro"];
       }
       return [provider];
     })
@@ -1820,6 +1905,17 @@ async function refreshCaseAcrossSources(caseId, {
         completedProviders.push(provider);
       }
     }
+  }
+
+  if (expandedProviders.includes("recentfilings")) {
+    await runProvider("recentfilings", () => syncService.enrichCaseWithRecentFilings(caseId, { force: true }));
+  }
+
+  if (expandedProviders.includes("61tro")) {
+    await runProvider("61tro", () => syncService.enrichCaseWithLawFirmLookup(caseId, {
+      sourceIds: ["61tro"],
+      force: true
+    }));
   }
 
   if (expandedProviders.includes(PRIORITY_FEED_SOURCE)) {
@@ -2608,7 +2704,7 @@ async function main() {
           .split(",")
           .map((value) => value.trim())
           .filter(Boolean)
-      : ["lookup:courtlistener", "lookup:recentfilings", "lookup:61tro", PRIORITY_FEED_SOURCE, "courtlistener", "pacermonitor", "docketalarm", "unicourt"];
+      : ["lookup:courtlistener", "recentfilings", "61tro", PRIORITY_FEED_SOURCE, "courtlistener", "pacermonitor", "docketalarm", "unicourt"];
 
     const lookupResult = await syncService.importLookup(docketNumber, { courtName, caseName });
     const startDate = config.sync.discoveryStartDate || config.sync.startDate || "2025-01-01";
@@ -2658,7 +2754,7 @@ async function main() {
           .split(",")
           .map((value) => value.trim())
           .filter(Boolean)
-      : ["lookup:courtlistener", "lookup:recentfilings", "lookup:61tro", PRIORITY_FEED_SOURCE, "courtlistener", "pacermonitor", "docketalarm", "unicourt"];
+      : ["lookup:courtlistener", "recentfilings", "61tro", PRIORITY_FEED_SOURCE, "courtlistener", "pacermonitor", "docketalarm", "unicourt"];
 
     const result = await refreshCaseAcrossSources(caseId, {
       initialItem: store.getCase(caseId),

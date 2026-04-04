@@ -2957,7 +2957,9 @@ export class Store {
         const coverage = entryCounts.get(Number(row.id)) || {
           totalEntries: 0,
           courtlistenerEntries: 0,
-          latestEntryFiledAt: null
+          latestEntryFiledAt: null,
+          gapPriorityScore: 0,
+          hasContinuityGap: false
         };
         const activityAtRaw = getCasePriorityActivityAt(row);
         const activityAtMs = Number.isFinite(Date.parse(activityAtRaw || "")) ? Date.parse(activityAtRaw || "") : 0;
@@ -2979,13 +2981,14 @@ export class Store {
         );
         const totalEntries = Number(coverage.totalEntries || 0);
         const gap = Math.max(0, expectedEntries - totalEntries);
+        const hasContinuityGap = Boolean(coverage.hasContinuityGap);
         const hasActivityAheadOfTimeline = isActivityAheadOfTimeline(activityAtRaw, coverage.latestEntryFiledAt);
         const hasCourtListenerDocket = Number(row.courtlistener_docket_id || 0) > 0;
         const shouldSync =
           hasCivilDocketNumber &&
           isRecentFiledFollowUp &&
           hasTargetTags &&
-          (hasActivityAheadOfTimeline || hasCourtListenerDocket || gap > 0);
+          (hasActivityAheadOfTimeline || hasCourtListenerDocket || gap > 0 || hasContinuityGap);
 
         return {
           row,
@@ -2993,8 +2996,10 @@ export class Store {
           hasTargetTags: Boolean(hasTargetTags),
           hasActivityAheadOfTimeline,
           hasCourtListenerDocket,
+          hasContinuityGap,
           isCurrentYearCase: isCurrentPriorityYearCase(row),
           gap,
+          gapPriorityScore: Number(coverage.gapPriorityScore || 0),
           totalEntries,
           activityAtRaw
         };
@@ -3015,6 +3020,14 @@ export class Store {
 
         if (left.hasActivityAheadOfTimeline !== right.hasActivityAheadOfTimeline) {
           return left.hasActivityAheadOfTimeline ? -1 : 1;
+        }
+
+        if (left.hasContinuityGap !== right.hasContinuityGap) {
+          return left.hasContinuityGap ? -1 : 1;
+        }
+
+        if (left.gapPriorityScore !== right.gapPriorityScore) {
+          return right.gapPriorityScore - left.gapPriorityScore;
         }
 
         if (left.gap !== right.gap) {
@@ -3265,6 +3278,7 @@ export class Store {
           const missingMarked = isPriorityFeedMissing(row);
           const isCurrentYearCase = isCurrentPriorityYearCase(row);
           const hasRecentGapIssue = isGapPriorityCase(row) && Number(coverage.gapPriorityScore || 0) > 0;
+          const hasContinuityGap = Boolean(coverage.hasContinuityGap);
           const currentYearGapWeight = getCurrentYearGapPriorityWeight(row, coverage, minimumExpectedEntries);
           const activityAtRaw = getCasePriorityActivityAt(row);
           const activityAtMs = Number.isFinite(Date.parse(activityAtRaw || "")) ? Date.parse(activityAtRaw || "") : 0;
@@ -3275,16 +3289,17 @@ export class Store {
           const needsCompletion = priorityFeedRowCount > 0
             ? coverage.totalEntries < priorityFeedRowCount
             : hasPriorityFeedUrl
-              ? coverage.priorityFeedEntries === 0 || coverage.totalEntries < minimumExpectedEntries
+              ? coverage.priorityFeedEntries === 0 || coverage.totalEntries < minimumExpectedEntries || hasContinuityGap
               : false;
           const isStale = !syncedAt || syncedAt < freshnessCutoff;
-          const shouldSync = !isFreshlyMissing && (needsCompletion || isStale);
+          const shouldSync = !isFreshlyMissing && (needsCompletion || isStale || hasContinuityGap);
           return {
             row,
             needsCompletion,
             isCurrentYearCase,
             isRecentFiledFollowUp,
             hasRecentGapIssue,
+            hasContinuityGap,
             currentYearGapWeight,
             gapPriorityScore: Number(coverage.gapPriorityScore || 0),
             neverSynced: !syncedAt,
@@ -3323,6 +3338,10 @@ export class Store {
 
           if (left.hasRecentGapIssue !== right.hasRecentGapIssue) {
             return left.hasRecentGapIssue ? -1 : 1;
+          }
+
+          if (left.hasContinuityGap !== right.hasContinuityGap) {
+            return left.hasContinuityGap ? -1 : 1;
           }
 
           if (left.gapPriorityScore !== right.gapPriorityScore) {
@@ -3412,6 +3431,7 @@ export class Store {
         const missingMarked = isPriorityFeedMissing(row);
         const isCurrentYearCase = isCurrentPriorityYearCase(row);
         const hasRecentGapIssue = isGapPriorityCase(row) && Number(coverage.gapPriorityScore || 0) > 0;
+        const hasContinuityGap = Boolean(coverage.hasContinuityGap);
         const currentYearGapWeight = getCurrentYearGapPriorityWeight(row, coverage, minimumExpectedEntries);
         const activityAtRaw = getCasePriorityActivityAt(row);
         const activityAtMs = Number.isFinite(Date.parse(activityAtRaw || "")) ? Date.parse(activityAtRaw || "") : 0;
@@ -3428,11 +3448,12 @@ export class Store {
         const needsCompletion = priorityFeedRowCount > 0
           ? coverage.totalEntries < priorityFeedRowCount
           : hasPriorityFeedUrl
-            ? coverage.priorityFeedEntries === 0 || coverage.totalEntries < minimumExpectedEntries
-            : !hasKnownPriorityFeedSource && coverage.totalEntries < minimumExpectedEntries;
+            ? coverage.priorityFeedEntries === 0 || coverage.totalEntries < minimumExpectedEntries || hasContinuityGap
+            : !hasKnownPriorityFeedSource && (coverage.totalEntries < minimumExpectedEntries || hasContinuityGap);
         const isStale = !syncedAt || syncedAt < freshnessCutoff;
         const shouldSync = hasCivilDocketNumber && !isFreshlyMissing && (
           needsCompletion ||
+          hasContinuityGap ||
           !hasKnownPriorityFeedSource ||
           (hasKnownPriorityFeedSource && isStale) ||
           isPriorityFeedBacklog
@@ -3461,6 +3482,9 @@ export class Store {
         if (isRecentFiledFollowUp) {
           priority -= 2;
         }
+        if (hasContinuityGap) {
+          priority -= 3;
+        }
 
         return {
           row,
@@ -3469,6 +3493,7 @@ export class Store {
           isCurrentYearCase,
           isRecentFiledFollowUp,
           hasRecentGapIssue,
+          hasContinuityGap,
           currentYearGapWeight,
           gapPriorityScore: Number(coverage.gapPriorityScore || 0),
           totalEntries: coverage.totalEntries,
@@ -3510,6 +3535,10 @@ export class Store {
         return right.gapPriorityScore - left.gapPriorityScore;
       }
 
+      if (left.hasContinuityGap !== right.hasContinuityGap) {
+        return left.hasContinuityGap ? -1 : 1;
+      }
+
       const activityCompare = compareCaseActivityDesc(left.activityAtRaw, right.activityAtRaw);
       if (activityCompare !== 0) {
         return activityCompare;
@@ -3544,6 +3573,10 @@ export class Store {
 
       if (left.gapPriorityScore !== right.gapPriorityScore) {
         return right.gapPriorityScore - left.gapPriorityScore;
+      }
+
+      if (left.hasContinuityGap !== right.hasContinuityGap) {
+        return left.hasContinuityGap ? -1 : 1;
       }
 
       if (left.hasPriorityFeedUrl !== right.hasPriorityFeedUrl) {
@@ -3635,6 +3668,10 @@ export class Store {
           return right.gapPriorityScore - left.gapPriorityScore;
         }
 
+        if (left.hasContinuityGap !== right.hasContinuityGap) {
+          return left.hasContinuityGap ? -1 : 1;
+        }
+
         if (left.totalEntries !== right.totalEntries) {
           return left.totalEntries - right.totalEntries;
         }
@@ -3672,6 +3709,10 @@ export class Store {
           return right.gapPriorityScore - left.gapPriorityScore;
         }
 
+        if (left.hasContinuityGap !== right.hasContinuityGap) {
+          return left.hasContinuityGap ? -1 : 1;
+        }
+
         if (Number(left.row.docket_count || 0) !== Number(right.row.docket_count || 0)) {
           return Number(right.row.docket_count || 0) - Number(left.row.docket_count || 0);
         }
@@ -3703,6 +3744,10 @@ export class Store {
 
         if (left.gapPriorityScore !== right.gapPriorityScore) {
           return right.gapPriorityScore - left.gapPriorityScore;
+        }
+
+        if (left.hasContinuityGap !== right.hasContinuityGap) {
+          return left.hasContinuityGap ? -1 : 1;
         }
 
         if (Number(left.row.docket_count || 0) !== Number(right.row.docket_count || 0)) {
@@ -3795,6 +3840,7 @@ export class Store {
         const isRecentCase = activityAtMs >= recentCutoff;
         const isCurrentYearCase = isCurrentPriorityYearCase(row);
         const hasRecentGapIssue = isGapPriorityCase(row) && Number(coverage.gapPriorityScore || 0) > 0;
+        const hasContinuityGap = Boolean(coverage.hasContinuityGap);
         const priorityFeedRowCount = getPriorityFeedRowCount(row);
         const latestNumber = parseDocketNumber(row.latest_docket_number);
         const expectedEntries = Math.max(
@@ -3808,7 +3854,7 @@ export class Store {
         const totalEntries = Number(coverage.totalEntries || 0);
         const gap = Math.max(0, expectedEntries - totalEntries);
         const missingPriorityFeedCoverage = priorityFeedRowCount > 0 && totalEntries < priorityFeedRowCount;
-        const shouldSync = hasCivilDocketNumber && (gap > 0 || missingPriorityFeedCoverage);
+        const shouldSync = hasCivilDocketNumber && (gap > 0 || missingPriorityFeedCoverage || hasContinuityGap);
 
         let priority = missingPriorityFeedCoverage
           ? 0
@@ -3821,6 +3867,9 @@ export class Store {
         if (hasRecentGapIssue) {
           priority -= 1;
         }
+        if (hasContinuityGap) {
+          priority -= 2;
+        }
 
         return {
           row,
@@ -3830,6 +3879,7 @@ export class Store {
           isCurrentYearCase,
           currentYearGapWeight,
           gapPriorityScore: Number(coverage.gapPriorityScore || 0),
+          hasContinuityGap,
           missingPriorityFeedCoverage,
           activityAtRaw,
           shouldSync
@@ -3858,6 +3908,10 @@ export class Store {
 
         if (left.gapPriorityScore !== right.gapPriorityScore) {
           return right.gapPriorityScore - left.gapPriorityScore;
+        }
+
+        if (left.hasContinuityGap !== right.hasContinuityGap) {
+          return left.hasContinuityGap ? -1 : 1;
         }
 
         if (left.missingPriorityFeedCoverage !== right.missingPriorityFeedCoverage) {
@@ -3934,6 +3988,7 @@ export class Store {
         const isRecentCase = activityAtMs >= recentCutoff;
         const isCurrentYearCase = isCurrentPriorityYearCase(row);
         const hasRecentGapIssue = isGapPriorityCase(row) && Number(coverage.gapPriorityScore || 0) > 0;
+        const hasContinuityGap = Boolean(coverage.hasContinuityGap);
         const priorityFeedRowCount = getPriorityFeedRowCount(row);
         const expectedEntries = Math.max(
           row.insights?.is_seller_case ? 12 : 8,
@@ -3958,7 +4013,7 @@ export class Store {
         const isFresh = syncedAt && syncedAt >= freshnessCutoff;
         const needsPriorityFeedLevelCompletion =
           priorityFeedRowCount > 0 && coverage.totalEntries < priorityFeedRowCount;
-        const needsBasicCompletion = coverage.totalEntries < expectedEntries;
+        const needsBasicCompletion = coverage.totalEntries < expectedEntries || hasContinuityGap;
         const shouldSync =
           hasCivilDocketNumber &&
           (row.insights?.is_seller_case || isRecentCase) &&
@@ -3977,6 +4032,9 @@ export class Store {
         if (hasRecentGapIssue) {
           priority -= 1;
         }
+        if (hasContinuityGap) {
+          priority -= 2;
+        }
 
         return {
           row,
@@ -3985,6 +4043,7 @@ export class Store {
           isCurrentYearCase,
           currentYearGapWeight,
           gapPriorityScore: Number(coverage.gapPriorityScore || 0),
+          hasContinuityGap,
           activityAtRaw,
           totalEntries: coverage.totalEntries,
           shouldSync
@@ -4014,6 +4073,10 @@ export class Store {
 
         if (left.gapPriorityScore !== right.gapPriorityScore) {
           return right.gapPriorityScore - left.gapPriorityScore;
+        }
+
+        if (left.hasContinuityGap !== right.hasContinuityGap) {
+          return left.hasContinuityGap ? -1 : 1;
         }
 
         if (left.gap !== right.gap) {

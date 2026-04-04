@@ -80,6 +80,21 @@ function extractCoreDocketNumber(value) {
   return `${division}${match[2]}-${String(match[3] || "").toLowerCase()}-${match[4]}`;
 }
 
+function extractDocketLookupParts(value) {
+  const match = String(value || "").match(/\b(?:(\d+):)?(?:(?:20)?(\d{2}))-([a-z]{2})-(\d{3,6})\b/i);
+  if (!match) {
+    return null;
+  }
+
+  return {
+    division: match[1] ? String(match[1]) : "",
+    year: match[2],
+    type: String(match[3] || "").toLowerCase(),
+    caseNumber: match[4],
+    normalized: extractCoreDocketNumber(value)
+  };
+}
+
 function extractPacerCaseId(value) {
   const match = String(value || "").match(/[?&](\d{3,})\b/);
   return match ? match[1] : null;
@@ -242,13 +257,58 @@ function parseFlsdRows(html, source, iframeUrl = null) {
   return rows;
 }
 
+function getIlndFederalRecordLocationCode(docketNumber) {
+  const parts = extractDocketLookupParts(docketNumber);
+  if (!parts) {
+    return "1";
+  }
+
+  return parts.division === "3" ? "3" : "1";
+}
+
+function parseIlndFederalRecordRows(html, source, docketNumber) {
+  const tableMatch = String(html || "").match(/<table[^>]+id="ContentPlaceHolder1_tbl"[\s\S]*?<\/table>/i);
+  if (!tableMatch) {
+    return [];
+  }
+
+  const rows = [];
+  for (const rowHtml of extractRows(tableMatch[0])) {
+    const cells = extractCells(rowHtml);
+    if (cells.length < 6) {
+      continue;
+    }
+
+    const caseNumber = cleanText(cells[0]);
+    if (!caseNumber || /^case number$/i.test(caseNumber)) {
+      continue;
+    }
+
+    rows.push({
+      docketNumber: extractCoreDocketNumber(docketNumber) || docketNumber,
+      rawCaseNumber: caseNumber,
+      volume: cleanText(cells[1]) || null,
+      accession: cleanText(cells[2]) || null,
+      location: cleanText(cells[3]) || null,
+      box: cleanText(cells[4]) || null,
+      shipDate: cleanText(cells[5]) || null,
+      sourceId: `${source.id}-federal-record`,
+      sourceLabel: `${source.courtName} Federal Record Lookup`,
+      sourceUrl: source.recordLookupUrl || source.url
+    });
+  }
+
+  return rows;
+}
+
 const DEFAULT_RECENT_FILINGS_SOURCES = [
   {
     id: "ilnd",
     courtId: "ilnd",
     courtName: "Northern District of Illinois",
     url: "https://www.ilnd.uscourts.gov/RecentlyFiledCase.aspx",
-    parser: "ilnd-grid"
+    parser: "ilnd-grid",
+    recordLookupUrl: "https://www.ilnd.uscourts.gov/FederalRecordLookUp.aspx"
   },
   {
     id: "cand",
@@ -450,5 +510,58 @@ export class RecentFilingsClient {
     }
 
     return null;
+  }
+
+  async lookupFederalRecordByDocket(docketNumber, { courtName = "" } = {}) {
+    if (!this.enabled) {
+      return null;
+    }
+
+    const parts = extractDocketLookupParts(docketNumber);
+    if (!parts || parts.type !== "cv") {
+      return null;
+    }
+
+    const ilndSource = this.sources.find((source) =>
+      source.id === "ilnd" && recentFilingsMatchesCourtName(source, courtName || source.courtName)
+    );
+    if (!ilndSource?.recordLookupUrl) {
+      return null;
+    }
+
+    const initialHtml = await this.fetchUrl(ilndSource.recordLookupUrl);
+    const hidden = extractAspNetHiddenFields(initialHtml);
+    if (!hidden.__VIEWSTATE) {
+      return {
+        source: ilndSource,
+        records: [],
+        state: "unavailable",
+        note: `${ilndSource.courtName} Federal Record Lookup 当前未返回可提交表单。`
+      };
+    }
+
+    const resultHtml = await this.postForm(ilndSource.recordLookupUrl, {
+      __EVENTTARGET: "",
+      __EVENTARGUMENT: "",
+      __LASTFOCUS: "",
+      __VIEWSTATE: hidden.__VIEWSTATE || "",
+      __VIEWSTATEGENERATOR: hidden.__VIEWSTATEGENERATOR || "",
+      __EVENTVALIDATION: hidden.__EVENTVALIDATION || "",
+      ddlloc: getIlndFederalRecordLocationCode(parts.normalized || docketNumber),
+      "ctl00$ContentPlaceHolder1$ddlyear": parts.year,
+      "ctl00$ContentPlaceHolder1$ddltype": parts.type,
+      txtcaseno: String(Number(parts.caseNumber || 0) || parts.caseNumber || ""),
+      "ctl00$ContentPlaceHolder1$Submitbt": "Submit"
+    });
+
+    const records = parseIlndFederalRecordRows(resultHtml, ilndSource, parts.normalized || docketNumber);
+    return {
+      source: ilndSource,
+      records,
+      state: records.length ? "matched" : "not_found",
+      note: records.length
+        ? `${ilndSource.courtName} Federal Record Lookup 命中 ${records.length} 条公开记录。`
+        : `${ilndSource.courtName} Federal Record Lookup 未命中公开记录。`
+    };
   }
 }

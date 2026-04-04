@@ -1517,7 +1517,8 @@ export class CaseSyncService {
             cause: item.cause || null,
             pacerCaseId: item.pacerCaseId || null,
             syncedAt: timestamp,
-            note: sourceResult.note || null
+            note: sourceResult.note || null,
+            rawMeta: item.rawMeta || {}
           }
         }
       };
@@ -1684,7 +1685,9 @@ export class CaseSyncService {
 
     const hasCourtListenerPath = Boolean(savedCase.courtlistener_docket_id || savedCase.docket_number || savedCase.case_name);
     const hasPriorityFeedPath = shouldAttemptPriorityFeedForCase(savedCase, { force: false });
-    if (!hasCourtListenerPath && !hasPriorityFeedPath) {
+    const hasRecentFilingsPath = this.canEnrichCaseWithRecentFilings(savedCase);
+    const hasLawFirm61troPath = this.canEnrichCaseWithLawFirmLookup(savedCase, { sourceIds: ["61tro"] });
+    if (!hasCourtListenerPath && !hasPriorityFeedPath && !hasRecentFilingsPath && !hasLawFirm61troPath) {
       return null;
     }
 
@@ -1703,7 +1706,9 @@ export class CaseSyncService {
       filedAt: filedAt || savedCase.latest_docket_filed_at || new Date().toISOString(),
       priority,
       priorityFeed: hasPriorityFeedPath,
-      courtListener: hasCourtListenerPath
+      courtListener: hasCourtListenerPath,
+      recentFilings: hasRecentFilingsPath,
+      lawFirm61tro: hasLawFirm61troPath
     };
   }
 
@@ -1789,7 +1794,9 @@ export class CaseSyncService {
       priority: Math.min(Number(existing.priority ?? 99), Number(candidate.priority ?? 99)),
       filedAt: laterIso(existing.filedAt, candidate.filedAt) || existing.filedAt || candidate.filedAt || null,
       priorityFeed: Boolean(existing.priorityFeed || candidate.priorityFeed),
-      courtListener: Boolean(existing.courtListener || candidate.courtListener)
+      courtListener: Boolean(existing.courtListener || candidate.courtListener),
+      recentFilings: Boolean(existing.recentFilings || candidate.recentFilings),
+      lawFirm61tro: Boolean(existing.lawFirm61tro || candidate.lawFirm61tro)
     });
   }
 
@@ -2297,6 +2304,10 @@ export class CaseSyncService {
         priorityFeedSynced: 0,
         courtListenerTriggered: 0,
         courtListenerSynced: 0,
+        recentFilingsTriggered: 0,
+        recentFilingsSynced: 0,
+        lawFirmTriggered: 0,
+        lawFirmSynced: 0,
         failedCases: 0
       };
     }
@@ -2321,6 +2332,10 @@ export class CaseSyncService {
     let priorityFeedSynced = 0;
     let courtListenerTriggered = 0;
     let courtListenerSynced = 0;
+    let recentFilingsTriggered = 0;
+    let recentFilingsSynced = 0;
+    let lawFirmTriggered = 0;
+    let lawFirmSynced = 0;
     let failedCases = 0;
 
     for (const candidate of selected) {
@@ -2349,6 +2364,27 @@ export class CaseSyncService {
           }
         }
 
+        if (candidate.recentFilings) {
+          attempted = true;
+          recentFilingsTriggered += 1;
+          const result = await this.enrichCaseWithRecentFilings(caseId, { force: true });
+          if (result.enriched) {
+            recentFilingsSynced += 1;
+          }
+        }
+
+        if (candidate.lawFirm61tro) {
+          attempted = true;
+          lawFirmTriggered += 1;
+          const result = await this.enrichCaseWithLawFirmLookup(caseId, {
+            sourceIds: ["61tro"],
+            force: true
+          });
+          if (result.enriched) {
+            lawFirmSynced += 1;
+          }
+        }
+
         if (attempted) {
           triggeredCases += 1;
         }
@@ -2364,6 +2400,10 @@ export class CaseSyncService {
       priorityFeedSynced,
       courtListenerTriggered,
       courtListenerSynced,
+      recentFilingsTriggered,
+      recentFilingsSynced,
+      lawFirmTriggered,
+      lawFirmSynced,
       failedCases
     };
   }
@@ -2413,7 +2453,9 @@ export class CaseSyncService {
               ? -2
               : -1,
         priorityFeed: shouldAttemptPriorityFeedForCase(row, { force: false }),
-        courtListener: Boolean(row.courtlistener_docket_id || row.docket_number || row.case_name)
+        courtListener: Boolean(row.courtlistener_docket_id || row.docket_number || row.case_name),
+        recentFilings: this.canEnrichCaseWithRecentFilings(row),
+        lawFirm61tro: this.canEnrichCaseWithLawFirmLookup(row, { sourceIds: ["61tro"] })
       });
     }
 
@@ -2440,7 +2482,9 @@ export class CaseSyncService {
               ? 1
               : 2,
         priorityFeed: true,
-        courtListener: Boolean(row.courtlistener_docket_id || row.docket_number || row.case_name)
+        courtListener: Boolean(row.courtlistener_docket_id || row.docket_number || row.case_name),
+        recentFilings: this.canEnrichCaseWithRecentFilings(row),
+        lawFirm61tro: this.canEnrichCaseWithLawFirmLookup(row, { sourceIds: ["61tro"] })
       });
     }
 
@@ -2463,7 +2507,9 @@ export class CaseSyncService {
               ? 1
               : 2,
         priorityFeed: shouldAttemptPriorityFeedForCase(row, { force: false }),
-        courtListener: Boolean(row.courtlistener_docket_id || row.docket_number || row.case_name)
+        courtListener: Boolean(row.courtlistener_docket_id || row.docket_number || row.case_name),
+        recentFilings: this.canEnrichCaseWithRecentFilings(row),
+        lawFirm61tro: this.canEnrichCaseWithLawFirmLookup(row, { sourceIds: ["61tro"] })
       });
     }
 
@@ -2512,7 +2558,7 @@ export class CaseSyncService {
       });
       const selectedActivityAheadCount = [...followUpCandidates.keys()].filter((caseId) => activityAheadCaseIds.has(caseId)).length;
       const note = followUpResult.triggeredCases
-        ? `旧案 recent-filed 跟进队列本轮命中 ${followUpResult.triggeredCases} 个案件，其中案级节点领先时间线 ${selectedActivityAheadCount} 个（worldtro ${followUpResult.priorityFeedTriggered}/${followUpResult.priorityFeedSynced}，CourtListener ${followUpResult.courtListenerTriggered}/${followUpResult.courtListenerSynced}${followUpResult.failedCases ? `，失败 ${followUpResult.failedCases}` : ""}）。`
+        ? `旧案 recent-filed 跟进队列本轮命中 ${followUpResult.triggeredCases} 个案件，其中案级节点领先时间线 ${selectedActivityAheadCount} 个（worldtro ${followUpResult.priorityFeedTriggered}/${followUpResult.priorityFeedSynced}，CourtListener ${followUpResult.courtListenerTriggered}/${followUpResult.courtListenerSynced}，RecentFilings ${followUpResult.recentFilingsTriggered}/${followUpResult.recentFilingsSynced}，61TRO ${followUpResult.lawFirmTriggered}/${followUpResult.lawFirmSynced}${followUpResult.failedCases ? `，失败 ${followUpResult.failedCases}` : ""}）。`
         : followUpCandidates.size
           ? `旧案 recent-filed 跟进队列本轮候选 ${followUpCandidates.size} 个，其中案级节点领先时间线 ${selectedActivityAheadCount} 个，但未形成新的跨源补抓。`
           : "旧案 recent-filed 跟进队列当前没有候选案件。";
@@ -2621,7 +2667,7 @@ export class CaseSyncService {
 
       const note =
         successfulFeeds || failedFeeds
-          ? `官方法院 RSS 本轮巡检 ${successfulFeeds} 个法院${failedFeeds ? `，${failedFeeds} 个法院源暂时失败` : ""}；补进 ${casesUpserted} 条案件更新、${docketEntriesUpserted} 条官方 docket${lookupResult.lookupsTriggered ? `，并触发 ${lookupResult.lookupsTriggered} 次 CourtListener 精确补抓` : ""}${followUpResult.triggeredCases ? `；另对 ${followUpResult.triggeredCases} 个旧目标案触发跨源跟进（worldtro ${followUpResult.priorityFeedTriggered}/${followUpResult.priorityFeedSynced}，CourtListener ${followUpResult.courtListenerTriggered}/${followUpResult.courtListenerSynced}${followUpResult.failedCases ? `，失败 ${followUpResult.failedCases}` : ""}）` : ""}。`
+          ? `官方法院 RSS 本轮巡检 ${successfulFeeds} 个法院${failedFeeds ? `，${failedFeeds} 个法院源暂时失败` : ""}；补进 ${casesUpserted} 条案件更新、${docketEntriesUpserted} 条官方 docket${lookupResult.lookupsTriggered ? `，并触发 ${lookupResult.lookupsTriggered} 次 CourtListener 精确补抓` : ""}${followUpResult.triggeredCases ? `；另对 ${followUpResult.triggeredCases} 个旧目标案触发跨源跟进（worldtro ${followUpResult.priorityFeedTriggered}/${followUpResult.priorityFeedSynced}，CourtListener ${followUpResult.courtListenerTriggered}/${followUpResult.courtListenerSynced}，RecentFilings ${followUpResult.recentFilingsTriggered}/${followUpResult.recentFilingsSynced}，61TRO ${followUpResult.lawFirmTriggered}/${followUpResult.lawFirmSynced}${followUpResult.failedCases ? `，失败 ${followUpResult.failedCases}` : ""}）` : ""}。`
           : "官方法院 RSS 当前没有已配置法院。";
 
       return {
@@ -2706,7 +2752,7 @@ export class CaseSyncService {
 
       const note =
         successfulSources || failedSources
-          ? `官方近期立案页本轮巡检 ${successfulSources} 个法院${failedSources ? `，${failedSources} 个法院页暂时失败` : ""}；补进 ${casesUpserted} 条案件线索${lookupResult.lookupsTriggered ? `，并触发 ${lookupResult.lookupsTriggered} 次 CourtListener 精确补抓` : ""}${followUpResult.triggeredCases ? `；另对 ${followUpResult.triggeredCases} 个旧目标案触发跨源跟进（worldtro ${followUpResult.priorityFeedTriggered}/${followUpResult.priorityFeedSynced}，CourtListener ${followUpResult.courtListenerTriggered}/${followUpResult.courtListenerSynced}${followUpResult.failedCases ? `，失败 ${followUpResult.failedCases}` : ""}）` : ""}。`
+          ? `官方近期立案页本轮巡检 ${successfulSources} 个法院${failedSources ? `，${failedSources} 个法院页暂时失败` : ""}；补进 ${casesUpserted} 条案件线索${lookupResult.lookupsTriggered ? `，并触发 ${lookupResult.lookupsTriggered} 次 CourtListener 精确补抓` : ""}${followUpResult.triggeredCases ? `；另对 ${followUpResult.triggeredCases} 个旧目标案触发跨源跟进（worldtro ${followUpResult.priorityFeedTriggered}/${followUpResult.priorityFeedSynced}，CourtListener ${followUpResult.courtListenerTriggered}/${followUpResult.courtListenerSynced}，RecentFilings ${followUpResult.recentFilingsTriggered}/${followUpResult.recentFilingsSynced}，61TRO ${followUpResult.lawFirmTriggered}/${followUpResult.lawFirmSynced}${followUpResult.failedCases ? `，失败 ${followUpResult.failedCases}` : ""}）` : ""}。`
           : "官方近期立案页当前没有已配置法院。";
 
       return {
@@ -2789,7 +2835,7 @@ export class CaseSyncService {
 
       const note =
         successfulSources || failedSources
-          ? `律所官网本轮巡检 ${successfulSources} 个来源${failedSources ? `，${failedSources} 个来源暂时失败` : ""}；补进 ${casesUpserted} 条案件更新、${docketEntriesUpserted} 条律所公开文书${lookupResult.lookupsTriggered ? `，并触发 ${lookupResult.lookupsTriggered} 次 CourtListener 精确补抓` : ""}${followUpResult.triggeredCases ? `；另对 ${followUpResult.triggeredCases} 个旧目标案触发跨源跟进（worldtro ${followUpResult.priorityFeedTriggered}/${followUpResult.priorityFeedSynced}，CourtListener ${followUpResult.courtListenerTriggered}/${followUpResult.courtListenerSynced}${followUpResult.failedCases ? `，失败 ${followUpResult.failedCases}` : ""}）` : ""}。`
+          ? `律所官网本轮巡检 ${successfulSources} 个来源${failedSources ? `，${failedSources} 个来源暂时失败` : ""}；补进 ${casesUpserted} 条案件更新、${docketEntriesUpserted} 条律所公开文书${lookupResult.lookupsTriggered ? `，并触发 ${lookupResult.lookupsTriggered} 次 CourtListener 精确补抓` : ""}${followUpResult.triggeredCases ? `；另对 ${followUpResult.triggeredCases} 个旧目标案触发跨源跟进（worldtro ${followUpResult.priorityFeedTriggered}/${followUpResult.priorityFeedSynced}，CourtListener ${followUpResult.courtListenerTriggered}/${followUpResult.courtListenerSynced}，RecentFilings ${followUpResult.recentFilingsTriggered}/${followUpResult.recentFilingsSynced}，61TRO ${followUpResult.lawFirmTriggered}/${followUpResult.lawFirmSynced}${followUpResult.failedCases ? `，失败 ${followUpResult.failedCases}` : ""}）` : ""}。`
           : "律所官网当前没有已配置来源。";
 
       return {
@@ -2800,6 +2846,229 @@ export class CaseSyncService {
         lookupsTriggered: lookupResult.lookupsTriggered,
         crossSourceFollowUpCases: followUpResult.triggeredCases,
         note
+      };
+    });
+  }
+
+  canEnrichCaseWithRecentFilings(caseRow = {}) {
+    const docketNumber = String(caseRow?.docket_number || "").trim();
+    if (!this.recentFilings.enabled || !docketLooksLike(docketNumber)) {
+      return false;
+    }
+
+    const caseCourt = normalizeText(caseRow?.court_name || "");
+    if (!caseCourt) {
+      return false;
+    }
+
+    return this.recentFilings.listSources().some((source) => {
+      const sourceCourt = normalizeText(source?.courtName || "");
+      return sourceCourt && (sourceCourt === caseCourt || sourceCourt.includes(caseCourt) || caseCourt.includes(sourceCourt));
+    });
+  }
+
+  canEnrichCaseWithLawFirmLookup(caseRow = {}, { sourceIds = ["61tro"] } = {}) {
+    const docketNumber = String(caseRow?.docket_number || "").trim();
+    if (!this.lawFirms.enabled || !docketLooksLike(docketNumber)) {
+      return false;
+    }
+
+    const normalizedSourceIds = [...new Set(asArray(sourceIds).map((value) => String(value || "").trim().toLowerCase()).filter(Boolean))];
+    if (!normalizedSourceIds.length) {
+      return false;
+    }
+
+    const selectedIds = new Set(this.lawFirms.listSources().map((source) => String(source.id || "").trim().toLowerCase()));
+    if (!normalizedSourceIds.some((sourceId) => selectedIds.has(sourceId))) {
+      return false;
+    }
+
+    return Boolean(
+      caseRow?.insights?.is_seller_case ||
+      caseRow?.insights?.is_tro_case ||
+      caseRow?.insights?.is_schedule_a_case ||
+      hasCaseLevelActivityLead(this.store, caseRow)
+    );
+  }
+
+  async enrichCaseWithRecentFilings(caseId, { force = false } = {}) {
+    return this.store.batchMutations(async () => {
+      const caseRow = this.store.getCase(caseId);
+      const docketNumber = String(caseRow?.docket_number || "").trim();
+      if (!caseRow || !this.canEnrichCaseWithRecentFilings(caseRow)) {
+        return { enriched: false, reason: "not-applicable" };
+      }
+
+      const trackedSource = this.recentFilings.listSources().find((source) => {
+        const sourceCourt = normalizeText(source?.courtName || "");
+        const caseCourt = normalizeText(caseRow?.court_name || "");
+        if (!sourceCourt || !caseCourt) {
+          return false;
+        }
+        return sourceCourt === caseCourt || sourceCourt.includes(caseCourt) || caseCourt.includes(sourceCourt);
+      });
+      if (!trackedSource) {
+        return { enriched: false, reason: "not-applicable" };
+      }
+
+      const sourceState = caseRow.raw?.recent_filings?.[trackedSource.id] || {};
+      const syncedAt = sourceState.syncedAt ? Date.parse(sourceState.syncedAt) : 0;
+      const hasActivityAheadOfTimeline = hasCaseLevelActivityLead(this.store, caseRow);
+      const staleAfterMs = 4 * 60 * 60 * 1000;
+      if (!force && !hasActivityAheadOfTimeline && syncedAt && Date.now() - syncedAt < staleAfterMs) {
+        return { enriched: false, reason: "fresh" };
+      }
+
+      let casesUpserted = 0;
+      let matchedRecentCase = false;
+      const caseIndex = this.buildCourtFeedCaseIndex();
+      const recentMatch = await this.recentFilings.lookupByDocket(docketNumber, {
+        courtName: caseRow.court_name || ""
+      }).catch(() => null);
+      if (recentMatch?.item) {
+        const ingest = this.ingestRecentFilingsItems(
+          {
+            sourceId: recentMatch.source?.id || trackedSource.id,
+            note: recentMatch.note || null,
+            items: [recentMatch.item]
+          },
+          caseIndex
+        );
+        casesUpserted += Number(ingest.casesUpserted || 0);
+        matchedRecentCase = true;
+      }
+
+      const federalRecordLookup = trackedSource.id === "ilnd"
+        ? await this.recentFilings.lookupFederalRecordByDocket(docketNumber, {
+            courtName: caseRow.court_name || ""
+          }).catch(() => null)
+        : null;
+
+      if (federalRecordLookup?.source) {
+        const refreshedCase = this.store.getCase(caseId) || caseRow;
+        const timestamp = new Date().toISOString();
+        const sourceId = trackedSource.id;
+        this.store.upsertCase({
+          source_case_key: refreshedCase.source_case_key,
+          primary_source: refreshedCase.primary_source,
+          source_case_id: refreshedCase.source_case_id,
+          courtlistener_docket_id: refreshedCase.courtlistener_docket_id,
+          pacer_case_id: refreshedCase.pacer_case_id,
+          court_id: refreshedCase.court_id,
+          court_name: refreshedCase.court_name,
+          case_name: refreshedCase.case_name,
+          docket_number: refreshedCase.docket_number,
+          date_filed: refreshedCase.date_filed,
+          date_terminated: refreshedCase.date_terminated,
+          cause: refreshedCase.cause,
+          nature_of_suit: refreshedCase.nature_of_suit,
+          status: refreshedCase.status,
+          tags_marker: refreshedCase.tags_marker,
+          docket_url: refreshedCase.docket_url,
+          source_urls: [
+            ...(refreshedCase.source_urls || []),
+            federalRecordLookup.source.recordLookupUrl || null
+          ].filter(Boolean),
+          plaintiffs: refreshedCase.plaintiffs || [],
+          defendants: refreshedCase.defendants || [],
+          recent_activity_summary: refreshedCase.recent_activity_summary,
+          latest_docket_filed_at: refreshedCase.latest_docket_filed_at,
+          latest_docket_number: refreshedCase.latest_docket_number,
+          docket_count: refreshedCase.docket_count,
+          last_seen_at: refreshedCase.last_seen_at || timestamp,
+          last_synced_at: timestamp,
+          last_docket_sync_at: refreshedCase.last_docket_sync_at,
+          raw: {
+            ...(refreshedCase.raw || {}),
+            recent_filings: {
+              ...(refreshedCase.raw?.recent_filings || {}),
+              [sourceId]: {
+                ...(refreshedCase.raw?.recent_filings?.[sourceId] || {}),
+                syncedAt: timestamp,
+                federalRecordLookup: {
+                  state: federalRecordLookup.state || "not_found",
+                  records: federalRecordLookup.records || [],
+                  note: federalRecordLookup.note || null,
+                  sourceUrl: federalRecordLookup.source.recordLookupUrl || federalRecordLookup.source.url || null,
+                  updatedAt: timestamp
+                }
+              }
+            }
+          }
+        });
+      }
+
+      return {
+        enriched: Boolean(casesUpserted || matchedRecentCase || (federalRecordLookup?.records || []).length),
+        reason:
+          casesUpserted || matchedRecentCase || (federalRecordLookup?.records || []).length
+            ? "completed"
+            : federalRecordLookup
+              ? federalRecordLookup.state || "not-found"
+              : "not-found",
+        casesUpserted,
+        recentMatch: matchedRecentCase,
+        federalRecordLookup: federalRecordLookup
+          ? {
+              state: federalRecordLookup.state,
+              recordCount: Number(federalRecordLookup.records?.length || 0)
+            }
+          : null
+      };
+    });
+  }
+
+  async enrichCaseWithLawFirmLookup(caseId, { sourceIds = ["61tro"], force = false } = {}) {
+    return this.store.batchMutations(async () => {
+      const caseRow = this.store.getCase(caseId);
+      const docketNumber = String(caseRow?.docket_number || "").trim();
+      if (!caseRow || !this.canEnrichCaseWithLawFirmLookup(caseRow, { sourceIds })) {
+        return { enriched: false, reason: "not-applicable" };
+      }
+
+      const normalizedSourceIds = [...new Set(asArray(sourceIds).map((value) => String(value || "").trim().toLowerCase()).filter(Boolean))];
+      if (!normalizedSourceIds.length) {
+        return { enriched: false, reason: "not-applicable" };
+      }
+
+      const latestSourceSyncAt = normalizedSourceIds.reduce((latest, sourceId) => {
+        const syncedAt = Date.parse(String(caseRow.raw?.law_firm_sites?.[sourceId]?.syncedAt || ""));
+        return Number.isFinite(syncedAt) ? Math.max(latest, syncedAt) : latest;
+      }, 0);
+      const hasActivityAheadOfTimeline = hasCaseLevelActivityLead(this.store, caseRow);
+      const staleAfterMs = 4 * 60 * 60 * 1000;
+      if (!force && !hasActivityAheadOfTimeline && latestSourceSyncAt && Date.now() - latestSourceSyncAt < staleAfterMs) {
+        return { enriched: false, reason: "fresh" };
+      }
+
+      const sourceResult = await this.lawFirms.lookupByDocket(docketNumber, {
+        sourceIds: normalizedSourceIds
+      }).catch(() => null);
+      if (!sourceResult?.item) {
+        return { enriched: false, reason: "not-found" };
+      }
+
+      const caseIndex = this.buildCourtFeedCaseIndex();
+      const ingest = this.ingestLawFirmItems(
+        {
+          source: sourceResult.source || null,
+          note: sourceResult.note || null,
+          items: [sourceResult.item]
+        },
+        caseIndex
+      );
+      this.store.refreshCaseDocketSummary(caseId);
+
+      return {
+        enriched: Boolean(ingest.casesUpserted || ingest.docketEntriesUpserted),
+        reason:
+          ingest.docketEntriesUpserted > 0
+            ? "entries"
+            : ingest.casesUpserted > 0
+              ? "case"
+              : "matched",
+        casesUpserted: Number(ingest.casesUpserted || 0),
+        docketEntriesUpserted: Number(ingest.docketEntriesUpserted || 0)
       };
     });
   }
