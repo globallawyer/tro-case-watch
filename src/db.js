@@ -653,28 +653,17 @@ function compareCaseRowsForCanonicalChoice(left, right) {
 
   return (
     compareIsoDesc(
-      left.latest_docket_filed_at || left.date_filed || left.updated_at,
-      right.latest_docket_filed_at || right.date_filed || right.updated_at
+      getCasePriorityActivityAt(left),
+      getCasePriorityActivityAt(right)
     ) ||
     compareIsoDesc(left.updated_at, right.updated_at)
   );
 }
 
 function compareCaseListFreshness(left, right) {
-  const leftHasDocketUpdate = Boolean(left?.latest_docket_filed_at);
-  const rightHasDocketUpdate = Boolean(right?.latest_docket_filed_at);
-  if (leftHasDocketUpdate !== rightHasDocketUpdate) {
-    return leftHasDocketUpdate ? -1 : 1;
-  }
-
-  const docketActivityDiff = compareIsoDesc(left?.latest_docket_filed_at, right?.latest_docket_filed_at);
-  if (docketActivityDiff !== 0) {
-    return docketActivityDiff;
-  }
-
-  const updatedAtDiff = compareIsoDesc(left?.updated_at, right?.updated_at);
-  if (updatedAtDiff !== 0) {
-    return updatedAtDiff;
+  const activityDiff = compareIsoDesc(getCasePriorityActivityAt(left), getCasePriorityActivityAt(right));
+  if (activityDiff !== 0) {
+    return activityDiff;
   }
 
   const filedAtDiff = compareIsoDesc(left?.date_filed, right?.date_filed);
@@ -1662,7 +1651,7 @@ export class Store {
         SELECT *
         FROM cases
         WHERE date(date_filed) >= date(?)
-        ORDER BY COALESCE(latest_docket_filed_at, date_filed, updated_at) DESC, updated_at DESC
+        ORDER BY ${CASE_PRIORITY_ACTIVITY_SQL} DESC, updated_at DESC
       `)
       .all(cacheKey)
       .map(buildCaseView);
@@ -1683,7 +1672,7 @@ export class Store {
         SELECT *
         FROM cases
         WHERE date(date_filed) >= date(?)
-        ORDER BY COALESCE(latest_docket_filed_at, date_filed, updated_at) DESC, updated_at DESC
+        ORDER BY ${CASE_PRIORITY_ACTIVITY_SQL} DESC, updated_at DESC
       `)
       .all(String(startDate || "2025-01-01"))
       .map(buildCaseView);
@@ -1874,6 +1863,12 @@ export class Store {
       defendants: mergedDefendants,
       recent_activity_summary: record.recent_activity_summary ?? existing?.recent_activity_summary ?? null,
       recent_activity_summary_zh: record.recent_activity_summary_zh ?? existing?.recent_activity_summary_zh ?? null,
+      latest_docket_filed_at: laterIso(record.latest_docket_filed_at, existing?.latest_docket_filed_at),
+      latest_docket_number: higherOrderValue(record.latest_docket_number, existing?.latest_docket_number),
+      docket_count: Math.max(Number(record.docket_count ?? 0), Number(existing?.docket_count ?? 0)),
+      last_seen_at: laterIso(record.last_seen_at, existing?.last_seen_at),
+      last_synced_at: laterIso(record.last_synced_at, existing?.last_synced_at),
+      last_docket_sync_at: laterIso(record.last_docket_sync_at, existing?.last_docket_sync_at),
       raw: {
         ...(existing?.raw || {}),
         ...(record.raw || {})
@@ -1984,14 +1979,14 @@ export class Store {
         toJson(mergedUrls, "[]"),
         toJson(mergedPlaintiffs, "[]"),
         toJson(mergedDefendants, "[]"),
-        record.recent_activity_summary ?? null,
-        record.recent_activity_summary_zh ?? null,
-        record.latest_docket_filed_at ?? null,
-        record.latest_docket_number ?? null,
-        record.docket_count ?? 0,
-        record.last_seen_at ?? timestamp,
-        record.last_synced_at ?? timestamp,
-        record.last_docket_sync_at ?? null,
+        candidate.recent_activity_summary ?? null,
+        candidate.recent_activity_summary_zh ?? null,
+        candidate.latest_docket_filed_at ?? null,
+        candidate.latest_docket_number ?? null,
+        candidate.docket_count ?? 0,
+        candidate.last_seen_at ?? timestamp,
+        candidate.last_synced_at ?? timestamp,
+        candidate.last_docket_sync_at ?? null,
         record.last_translation_at ?? null,
         toJson(record.raw, "{}"),
         existing?.created_at ?? timestamp,
@@ -2042,7 +2037,7 @@ export class Store {
       .prepare(`
         SELECT *
         FROM cases
-        ORDER BY COALESCE(latest_docket_filed_at, date_filed, updated_at) DESC, updated_at DESC
+        ORDER BY ${CASE_PRIORITY_ACTIVITY_SQL} DESC, updated_at DESC
       `)
       .all()
       .map(buildCaseView)
@@ -2070,7 +2065,7 @@ export class Store {
       .prepare(`
         SELECT *
         FROM cases
-        ORDER BY COALESCE(latest_docket_filed_at, date_filed, updated_at) DESC, updated_at DESC
+        ORDER BY ${CASE_PRIORITY_ACTIVITY_SQL} DESC, updated_at DESC
       `)
       .all()
       .map(buildCaseView)
@@ -2361,7 +2356,7 @@ export class Store {
         FROM cases
         WHERE date(date_filed) >= date(?)
           AND (${clauses.join(" OR ")})
-        ORDER BY COALESCE(latest_docket_filed_at, date_filed, updated_at) DESC, updated_at DESC
+        ORDER BY ${CASE_PRIORITY_ACTIVITY_SQL} DESC, updated_at DESC
         LIMIT 250
       `)
       .all(...params)
@@ -2412,7 +2407,7 @@ export class Store {
         SELECT *
         FROM cases
         WHERE ${whereClauses.join("\n          AND ")}
-        ORDER BY COALESCE(latest_docket_filed_at, date_filed, updated_at) DESC, updated_at DESC
+        ORDER BY ${CASE_PRIORITY_ACTIVITY_SQL} DESC, updated_at DESC
         LIMIT ?
       `)
       .all(...params, Math.max(limit, 120))
@@ -3640,9 +3635,9 @@ export class Store {
             tags_marker LIKE '%|seller_tro|%'
             OR tags_marker LIKE '%|tro|%'
             OR tags_marker LIKE '%|schedule_a|%'
-            OR COALESCE(latest_docket_filed_at, date_filed, updated_at) >= ?
+            OR ${CASE_PRIORITY_ACTIVITY_SQL} >= ?
           )
-        ORDER BY COALESCE(latest_docket_filed_at, date_filed, updated_at) DESC
+        ORDER BY ${CASE_PRIORITY_ACTIVITY_SQL} DESC
         LIMIT ?
       `)
       .all(String(startDate || "2025-01-01"), recentCutoffIso, candidatePoolSize)
@@ -3660,7 +3655,7 @@ export class Store {
           hasContinuityGap: false
         };
         const hasCivilDocketNumber = /\b\d{2}-cv-\d{3,6}\b/i.test(String(row.docket_number || ""));
-        const activityAtRaw = row.latest_docket_filed_at || row.date_filed || row.updated_at;
+        const activityAtRaw = getCasePriorityActivityAt(row);
         const activityAtMs = Number.isFinite(Date.parse(activityAtRaw || "")) ? Date.parse(activityAtRaw || "") : 0;
         const isRecentCase = activityAtMs >= recentCutoff;
         const isCurrentYearCase = isCurrentPriorityYearCase(row);
@@ -3779,9 +3774,9 @@ export class Store {
           AND TRIM(docket_number) <> ''
           AND (
             tags_marker LIKE '%|seller_tro|%'
-            OR COALESCE(latest_docket_filed_at, date_filed, updated_at) >= ?
+            OR ${CASE_PRIORITY_ACTIVITY_SQL} >= ?
           )
-        ORDER BY COALESCE(latest_docket_filed_at, date_filed, updated_at) DESC
+        ORDER BY ${CASE_PRIORITY_ACTIVITY_SQL} DESC
         LIMIT ?
       `)
       .all(String(startDate || "2025-01-01"), recentCutoffIso, candidatePoolSize)
@@ -3799,7 +3794,7 @@ export class Store {
           hasContinuityGap: false
         };
         const hasCivilDocketNumber = /\b\d{2}-cv-\d{3,6}\b/i.test(String(row.docket_number || ""));
-        const activityAtRaw = row.latest_docket_filed_at || row.date_filed || row.updated_at;
+        const activityAtRaw = getCasePriorityActivityAt(row);
         const activityAtMs = Number.isFinite(Date.parse(activityAtRaw || "")) ? Date.parse(activityAtRaw || "") : 0;
         const isRecentCase = activityAtMs >= recentCutoff;
         const isCurrentYearCase = isCurrentPriorityYearCase(row);
@@ -3919,9 +3914,9 @@ export class Store {
             tags_marker LIKE '%|tro|%'
             OR tags_marker LIKE '%|schedule_a|%'
             OR tags_marker LIKE '%|seller_tro|%'
-            OR COALESCE(latest_docket_filed_at, date_filed, updated_at) >= ?
+            OR ${CASE_PRIORITY_ACTIVITY_SQL} >= ?
           )
-        ORDER BY COALESCE(latest_docket_filed_at, date_filed, updated_at) DESC
+        ORDER BY ${CASE_PRIORITY_ACTIVITY_SQL} DESC
         LIMIT ?
       `)
       .all(String(startDate || "2025-01-01"), recentCutoffIso, candidatePoolSize)
@@ -3935,7 +3930,7 @@ export class Store {
           priorityFeedEntries: 0,
           pacermonitorEntries: 0
         };
-        const activityAtRaw = row.latest_docket_filed_at || row.date_filed || row.updated_at;
+        const activityAtRaw = getCasePriorityActivityAt(row);
         const activityAtMs = Number.isFinite(Date.parse(activityAtRaw || "")) ? Date.parse(activityAtRaw || "") : 0;
         const isRecentCase = activityAtMs >= recentCutoff;
         const priorityFeedRowCount = getPriorityFeedRowCount(row);
