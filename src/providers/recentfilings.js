@@ -52,6 +52,14 @@ function extractCells(rowHtml) {
   return [...String(rowHtml || "").matchAll(/<t[dh]\b[^>]*>([\s\S]*?)<\/t[dh]>/gi)].map((match) => match[1]);
 }
 
+function extractAspNetHiddenFields(html) {
+  const fields = {};
+  for (const match of String(html || "").matchAll(/<input[^>]+type="hidden"[^>]+name="([^"]+)"[^>]+value="([^"]*)"[^>]*>/gi)) {
+    fields[match[1]] = decodeHtml(match[2]);
+  }
+  return fields;
+}
+
 function parseUsDate(value) {
   const match = String(value || "").match(/\b(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})\b/);
   if (!match) {
@@ -131,6 +139,10 @@ function parseIlndRows(html, source) {
   }
 
   return rows;
+}
+
+function hasIlndNextPage(html) {
+  return /Page\$Next/i.test(String(html || ""));
 }
 
 function parseCandRows(html, source) {
@@ -260,6 +272,7 @@ export class RecentFilingsClient {
     this.timeoutMs = Number(config.timeoutMs || 20000);
     this.minIntervalMs = Number(config.minIntervalMs || 1200);
     this.maxItemsPerCourt = Number(config.maxItemsPerCourt || 120);
+    this.maxPagesPerCourt = Number(config.maxPagesPerCourt || 3);
     this.maxLookupsPerRun = Number(config.maxLookupsPerRun || 12);
     this.selectedIds = new Set((config.courts || []).map((value) => String(value || "").trim().toLowerCase()).filter(Boolean));
     this.sources = DEFAULT_RECENT_FILINGS_SOURCES.filter((source) => !this.selectedIds.size || this.selectedIds.has(source.id));
@@ -306,14 +319,83 @@ export class RecentFilingsClient {
     return response.text();
   }
 
+  async postForm(url, body) {
+    const elapsed = Date.now() - this.lastRequestAt;
+    if (elapsed < this.minIntervalMs) {
+      await wait(this.minIntervalMs - elapsed);
+    }
+
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        "user-agent": "tro-case-watch/1.0"
+      },
+      body: new URLSearchParams(body).toString(),
+      signal: AbortSignal.timeout(this.timeoutMs)
+    });
+
+    this.lastRequestAt = Date.now();
+
+    if (!response.ok) {
+      throw new Error(`request failed: ${response.status}`);
+    }
+
+    return response.text();
+  }
+
+  async fetchIlndRecentPages(source, firstPageHtml = null) {
+    const firstPage = firstPageHtml || (await this.fetchUrl(source.url));
+    const pages = [firstPage];
+    let currentHtml = firstPage;
+
+    for (let page = 1; page < this.maxPagesPerCourt; page += 1) {
+      if (!hasIlndNextPage(currentHtml)) {
+        break;
+      }
+
+      const hidden = extractAspNetHiddenFields(currentHtml);
+      if (!hidden.__VIEWSTATE) {
+        break;
+      }
+
+      currentHtml = await this.postForm(source.url, {
+        __EVENTTARGET: "ctl00$ContentPlaceHolder1$GridView1",
+        __EVENTARGUMENT: "Page$Next",
+        __LASTFOCUS: "",
+        __VIEWSTATE: hidden.__VIEWSTATE || "",
+        __VIEWSTATEGENERATOR: hidden.__VIEWSTATEGENERATOR || "",
+        __EVENTVALIDATION: hidden.__EVENTVALIDATION || ""
+      });
+      pages.push(currentHtml);
+
+      if (pages.flatMap((html) => parseIlndRows(html, source)).length >= this.maxItemsPerCourt) {
+        break;
+      }
+    }
+
+    return pages;
+  }
+
   async fetchRecentForCourt(source) {
     const pageHtml = await this.fetchUrl(source.url);
     let items = [];
     let note = null;
 
     if (source.parser === "ilnd-grid") {
-      items = parseIlndRows(pageHtml, source);
-      note = "Northern District of Illinois recently filed cases";
+      const pages = await this.fetchIlndRecentPages(source, pageHtml);
+      const seen = new Set();
+      items = pages
+        .flatMap((html) => parseIlndRows(html, source))
+        .filter((item) => {
+          const key = `${item.docketNumber}|${item.caseName}|${item.dateFiled || ""}`;
+          if (seen.has(key)) {
+            return false;
+          }
+          seen.add(key);
+          return true;
+        });
+      note = `Northern District of Illinois recently filed cases${pages.length > 1 ? ` (${pages.length} pages)` : ""}`;
     } else if (source.parser === "cand-table") {
       items = parseCandRows(pageHtml, source);
       note = "Northern District of California recently filed cases";

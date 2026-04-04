@@ -292,6 +292,7 @@ export const config = {
     timeoutMs: envInt("RECENT_FILINGS_TIMEOUT_MS", 20000),
     minIntervalMs: envInt("RECENT_FILINGS_MIN_INTERVAL_MS", 1200),
     maxItemsPerCourt: envInt("RECENT_FILINGS_MAX_ITEMS_PER_COURT", 120),
+    maxPagesPerCourt: envInt("RECENT_FILINGS_MAX_PAGES_PER_COURT", 3),
     maxLookupsPerRun: envInt("RECENT_FILINGS_MAX_LOOKUPS_PER_RUN", 12),
     courts: envList("RECENT_FILINGS_TARGETS", ["ilnd", "cand", "flsd"])
   },

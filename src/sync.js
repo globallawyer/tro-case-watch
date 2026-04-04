@@ -1890,7 +1890,11 @@ export class CaseSyncService {
         recap_documents: asArray(item.entries).map((entry) => ({
           short_description: entry.documentType,
           description: entry.description
-        }))
+        })),
+        raw: {
+          brand: item.rawMeta?.brand || null,
+          law_firm: item.rawMeta?.listedLawFirm || item.lawFirm || null
+        }
       },
       []
     );
@@ -1940,7 +1944,7 @@ export class CaseSyncService {
       return true;
     }
 
-    if (item.sourceId === "sriplaw" || item.sourceId === "gbc") {
+    if (item.sourceId === "sriplaw" || item.sourceId === "gbc" || item.sourceId === "61tro") {
       return tags.length > 0 || asArray(item.entries).length > 0;
     }
 
