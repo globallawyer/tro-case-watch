@@ -2834,6 +2834,19 @@ async function main() {
       process.exit(0);
     }
 
+    if (rawMode === "recompute-case-summaries") {
+      const batchSizeIndex = process.argv.indexOf("--batch-size");
+      const limitIndex = process.argv.indexOf("--limit");
+      const touchUpdatedAt = process.argv.includes("--touch-updated-at");
+      const result = await store.recomputeAllCaseDocketSummaries({
+        batchSize: batchSizeIndex !== -1 ? Number(process.argv[batchSizeIndex + 1] || 500) : 500,
+        limit: limitIndex !== -1 ? Number(process.argv[limitIndex + 1] || 0) : 0,
+        touchUpdatedAt
+      });
+      console.log(`[sync] completed recompute-case-summaries ${JSON.stringify(result)}`);
+      process.exit(0);
+    }
+
     if (rawMode === "reconcile-duplicates") {
       const limitIndex = process.argv.indexOf("--limit");
       const limit = limitIndex !== -1 ? Math.min(Math.max(Number(process.argv[limitIndex + 1] || 100), 1), 500) : 100;
