@@ -517,6 +517,12 @@ function compareCaseActivityDesc(left, right) {
   return String(right || "").localeCompare(String(left || ""));
 }
 
+function getSyncModeMaxRuntimeMs(config, mode = "recent") {
+  return mode === "backfill"
+    ? Number(config.sync?.backfillMaxRuntimeMs || 0)
+    : Number(config.sync?.recentMaxRuntimeMs || 0);
+}
+
 function laterIso(left, right) {
   if (!left) {
     return right || null;
@@ -858,7 +864,11 @@ export class CaseSyncService {
 
   async run(mode = "recent") {
     if (this.state.isRunning) {
-      return this.getPublicStatus();
+      return {
+        ...this.getPublicStatus(),
+        skipped: true,
+        reason: "already-running"
+      };
     }
 
     this.state.isRunning = true;
@@ -866,11 +876,28 @@ export class CaseSyncService {
     this.state.lastStartedAt = new Date().toISOString();
     this.state.lastError = null;
 
-    const runId = this.store.claimSyncRun("system", mode);
+    const heartbeatIntervalMs = Math.max(Number(this.config.sync?.runHeartbeatIntervalMs || 30 * 1000), 5 * 1000);
+    const heartbeatTimeoutMs = Math.max(Number(this.config.sync?.runHeartbeatTimeoutMs || 3 * 60 * 1000), heartbeatIntervalMs);
+    const maxRuntimeMs = Math.max(getSyncModeMaxRuntimeMs(this.config, mode), 60 * 1000);
+    const staleRuns = this.store.reapStaleSyncRuns("system", {
+      mode,
+      heartbeatTimeoutMs,
+      maxRuntimeMs,
+      reasonPrefix: `${mode} watchdog auto-cleared stale run`
+    });
+    const claimWindowMinutes = Math.max(
+      Math.ceil(Math.max(maxRuntimeMs, heartbeatTimeoutMs) / 60000) + 5,
+      10
+    );
+    const runId = this.store.claimSyncRun("system", mode, claimWindowMinutes);
     if (!runId) {
       this.state.isRunning = false;
       this.state.currentMode = null;
-      return this.getPublicStatus();
+      return {
+        ...this.getPublicStatus(),
+        skipped: true,
+        reason: "already-running"
+      };
     }
     const stats = {
       courtFeedCasesUpserted: 0,
@@ -893,6 +920,51 @@ export class CaseSyncService {
       translationsApplied: 0,
       notes: []
     };
+    if (staleRuns.length) {
+      stats.notes.push(`watchdog 自动回收 ${staleRuns.length} 条卡住的 ${mode} 任务：${staleRuns.map((row) => `#${row.id}`).join(", ")}`);
+    }
+
+    let runClosed = false;
+    const closeRun = (status, errorText = null) => {
+      if (runClosed) {
+        return false;
+      }
+      runClosed = true;
+      this.store.finishSyncRun(runId, status, stats, errorText);
+      this.store.clearSyncRunHeartbeat(runId);
+      return true;
+    };
+    const touchHeartbeat = () => {
+      this.store.touchSyncRun(runId, {
+        provider: "system",
+        mode,
+        pid: process.pid,
+        startedAt: this.state.lastStartedAt
+      });
+    };
+    touchHeartbeat();
+    const heartbeatTimer = setInterval(() => {
+      try {
+        touchHeartbeat();
+      } catch (error) {
+        stats.notes.push(`任务心跳写入失败：${error.message}`);
+      }
+    }, heartbeatIntervalMs);
+    heartbeatTimer.unref?.();
+    const timeoutTimer = setTimeout(() => {
+      const message = `${mode} sync exceeded ${Math.round(maxRuntimeMs / 60000)} minutes and was restarted by watchdog`;
+      stats.notes.push(`watchdog 超时重启：${message}`);
+      this.state.lastError = message;
+      this.state.lastFinishedAt = new Date().toISOString();
+      this.state.isRunning = false;
+      this.state.currentMode = null;
+      try {
+        closeRun("failed", message);
+      } catch {}
+      console.error(`[sync] ${message}`);
+      process.exit(124);
+    }, maxRuntimeMs);
+    timeoutTimer.unref?.();
 
     try {
       return await this.store.batchMutations(async () => {
@@ -1031,7 +1103,7 @@ export class CaseSyncService {
         stats.notes.push(`翻译链路跳过：${error.message}`);
       }
 
-      this.store.finishSyncRun(runId, "succeeded", stats);
+      closeRun("succeeded");
       try {
         this.store.getDashboardStats();
       } catch (error) {
@@ -1043,9 +1115,14 @@ export class CaseSyncService {
       });
     } catch (error) {
       this.state.lastError = error.message;
-      this.store.finishSyncRun(runId, "failed", stats, `${error.message}\n${error.body || ""}`.trim());
+      closeRun("failed", `${error.message}\n${error.body || ""}`.trim());
       throw error;
     } finally {
+      clearInterval(heartbeatTimer);
+      clearTimeout(timeoutTimer);
+      if (!runClosed) {
+        this.store.clearSyncRunHeartbeat(runId);
+      }
       this.state.isRunning = false;
       this.state.currentMode = null;
     }

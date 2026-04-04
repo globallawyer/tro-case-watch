@@ -47,6 +47,15 @@ function toCount(value) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+function toTimestamp(value) {
+  const parsed = Date.parse(String(value || ""));
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function syncRunHeartbeatKey(id) {
+  return `sync-run-heartbeat:${Number(id || 0)}`;
+}
+
 function summarizeSyncRunStats(stats = {}) {
   return {
     casesWritten:
@@ -4136,6 +4145,7 @@ export class Store {
         .run(provider, mode, "running", nowIso());
 
       this.db.exec("COMMIT");
+      this.dashboardStatsCache = null;
       return Number(result.lastInsertRowid);
     } catch (error) {
       try {
@@ -4153,6 +4163,7 @@ export class Store {
         WHERE id = ?
       `)
       .run(status, nowIso(), toJson(stats, "{}"), errorText, id);
+    this.dashboardStatsCache = null;
   }
 
   getRecentSyncRuns(limit = 10) {
@@ -4185,6 +4196,109 @@ export class Store {
           updated_at = excluded.updated_at
       `)
       .run(key, toJson(value, "{}"), nowIso());
+  }
+
+  deleteCheckpoint(key) {
+    this.db.prepare("DELETE FROM checkpoints WHERE checkpoint_key = ?").run(key);
+  }
+
+  touchSyncRun(id, payload = {}) {
+    const heartbeatAt = nowIso();
+    this.saveCheckpoint(syncRunHeartbeatKey(id), {
+      ...payload,
+      heartbeatAt
+    });
+    return heartbeatAt;
+  }
+
+  clearSyncRunHeartbeat(id) {
+    this.deleteCheckpoint(syncRunHeartbeatKey(id));
+  }
+
+  getSyncRun(id) {
+    const row = this.db.prepare("SELECT * FROM sync_runs WHERE id = ?").get(id);
+    return row
+      ? {
+          ...row,
+          stats: parseJson(row.stats_json, {})
+        }
+      : null;
+  }
+
+  getRunningSyncRuns(provider, { mode = null } = {}) {
+    const rows = mode
+      ? this.db
+          .prepare(`
+            SELECT *
+            FROM sync_runs
+            WHERE provider = ?
+              AND mode = ?
+              AND status = 'running'
+            ORDER BY started_at ASC
+          `)
+          .all(provider, mode)
+      : this.db
+          .prepare(`
+            SELECT *
+            FROM sync_runs
+            WHERE provider = ?
+              AND status = 'running'
+            ORDER BY started_at ASC
+          `)
+          .all(provider);
+
+    return rows.map((row) => ({
+      ...row,
+      stats: parseJson(row.stats_json, {})
+    }));
+  }
+
+  reapStaleSyncRuns(provider, {
+    mode = null,
+    heartbeatTimeoutMs = 0,
+    maxRuntimeMs = 0,
+    reasonPrefix = "sync watchdog"
+  } = {}) {
+    const now = Date.now();
+    const rows = this.getRunningSyncRuns(provider, { mode });
+    const reaped = [];
+
+    for (const row of rows) {
+      const heartbeat = this.getCheckpoint(syncRunHeartbeatKey(row.id));
+      const startedAtMs = toTimestamp(row.started_at);
+      const heartbeatAtMs = toTimestamp(heartbeat?.heartbeatAt || row.started_at);
+      const reasons = [];
+
+      if (
+        heartbeatTimeoutMs > 0 &&
+        heartbeatAtMs &&
+        now - heartbeatAtMs > heartbeatTimeoutMs
+      ) {
+        reasons.push(`heartbeat stalled for ${Math.round((now - heartbeatAtMs) / 1000)}s`);
+      }
+
+      if (
+        maxRuntimeMs > 0 &&
+        startedAtMs &&
+        now - startedAtMs > maxRuntimeMs
+      ) {
+        reasons.push(`runtime exceeded ${Math.round(maxRuntimeMs / 60000)}m`);
+      }
+
+      if (!reasons.length) {
+        continue;
+      }
+
+      const errorText = `${reasonPrefix}: ${reasons.join("; ")}`;
+      this.finishSyncRun(row.id, "failed", row.stats || {}, errorText);
+      this.clearSyncRunHeartbeat(row.id);
+      reaped.push({
+        ...row,
+        error_text: errorText
+      });
+    }
+
+    return reaped;
   }
 
   addProviderUsage(provider, requestCount, estimatedCostUsd) {

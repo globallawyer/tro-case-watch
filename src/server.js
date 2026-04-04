@@ -143,6 +143,45 @@ function spawnDetachedTask(args = []) {
   child.unref();
 }
 
+function getSyncModeMaxRuntimeMs(mode = "recent") {
+  return mode === "backfill"
+    ? Number(config.sync?.backfillMaxRuntimeMs || 0)
+    : Number(config.sync?.recentMaxRuntimeMs || 0);
+}
+
+function reapAndRecoverStaleSyncRuns() {
+  if (!config.sync?.watchdogEnabled) {
+    return;
+  }
+
+  const heartbeatTimeoutMs = Math.max(Number(config.sync?.runHeartbeatTimeoutMs || 0), 30 * 1000);
+  const recentReaped = store.reapStaleSyncRuns("system", {
+    mode: "recent",
+    heartbeatTimeoutMs,
+    maxRuntimeMs: Math.max(getSyncModeMaxRuntimeMs("recent"), 60 * 1000),
+    reasonPrefix: "recent watchdog auto-cleared stale run"
+  });
+  if (recentReaped.length) {
+    console.warn(`[watchdog] reaped stale recent runs ${recentReaped.map((row) => `#${row.id}`).join(", ")}`);
+    if (config.sync.enableScheduler) {
+      spawnDetachedTask(["--sync-only", "recent"]);
+    }
+  }
+
+  const backfillReaped = store.reapStaleSyncRuns("system", {
+    mode: "backfill",
+    heartbeatTimeoutMs,
+    maxRuntimeMs: Math.max(getSyncModeMaxRuntimeMs("backfill"), 60 * 1000),
+    reasonPrefix: "backfill watchdog auto-cleared stale run"
+  });
+  if (backfillReaped.length) {
+    console.warn(`[watchdog] reaped stale backfill runs ${backfillReaped.map((row) => `#${row.id}`).join(", ")}`);
+    if (config.sync.enableBackfillScheduler && syncService.getBackfillStatus().pending) {
+      spawnDetachedTask(["--sync-only", "backfill"]);
+    }
+  }
+}
+
 function queueLookupImport(term, { courtName = "", caseName = "" } = {}) {
   const lookupTerm = String(term || "").trim();
   if (!lookupTerm) {
@@ -2590,8 +2629,14 @@ async function main() {
     }
 
     const mode = rawMode === "backfill" ? "backfill" : "recent";
-    await syncService.run(mode);
-    console.log(`[sync] completed ${mode}`);
+    const result = await syncService.run(mode);
+    if (resultJson) {
+      console.log(JSON.stringify(result));
+    } else if (result?.skipped) {
+      console.log(`[sync] skipped ${mode} ${JSON.stringify({ reason: result.reason || "already-running" })}`);
+    } else {
+      console.log(`[sync] completed ${mode}`);
+    }
     process.exit(0);
   }
 
@@ -2627,6 +2672,16 @@ async function main() {
     setInterval(() => {
       spawnDetachedTask(["--sync-only", "recent"]);
     }, config.sync.pollIntervalMs);
+  }
+
+  if (config.sync.watchdogEnabled) {
+    setTimeout(() => {
+      reapAndRecoverStaleSyncRuns();
+    }, Math.min(Number(config.sync.watchdogIntervalMs || 120000), 60 * 1000));
+
+    setInterval(() => {
+      reapAndRecoverStaleSyncRuns();
+    }, Math.max(Number(config.sync.watchdogIntervalMs || 120000), 30 * 1000));
   }
 
   if (config.sync.enableBackfillScheduler) {
