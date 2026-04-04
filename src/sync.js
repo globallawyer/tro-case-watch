@@ -4304,9 +4304,13 @@ export class CaseSyncService {
 
       for (const caseRow of candidates) {
         try {
-          const result = caseRow.courtlistener_docket_id
+          const caseId = Number(caseRow.id || 0);
+          const shouldForceFollowUp =
+            followUpIds.has(caseId) ||
+            hasCaseLevelActivityLead(this.store, caseRow);
+          const result = caseRow.courtlistener_docket_id && !shouldForceFollowUp
             ? await this.syncSingleCourtListenerDocket(caseRow)
-            : await this.enrichCaseWithCourtListener(caseRow.id, { force: followUpIds.has(Number(caseRow.id)) });
+            : await this.enrichCaseWithCourtListener(caseId, { force: shouldForceFollowUp });
           if (result.enriched) {
             syncedCases += 1;
           }
