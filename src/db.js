@@ -2246,6 +2246,70 @@ export class Store {
     return Number(coverage?.priority_entries || 0) > 0;
   }
 
+  refreshCaseDocketSummary(caseId, { touchUpdatedAt = true } = {}) {
+    const normalizedCaseId = Number(caseId || 0);
+    if (!Number.isFinite(normalizedCaseId) || normalizedCaseId <= 0) {
+      return null;
+    }
+
+    const caseRow = hydrateCase(
+      this.db.prepare("SELECT * FROM cases WHERE id = ?").get(normalizedCaseId)
+    );
+    if (!caseRow) {
+      return null;
+    }
+
+    const coverage = this.getEntryCoverageForCaseIds([normalizedCaseId]).get(normalizedCaseId) || null;
+    if (!coverage) {
+      return caseRow;
+    }
+
+    const nextLatestFiledAt = laterIso(caseRow.latest_docket_filed_at, coverage.latestEntryFiledAt);
+    const nextLatestNumber = higherOrderValue(
+      caseRow.latest_docket_number,
+      coverage.lastNumber ? String(coverage.lastNumber) : null
+    );
+    const nextDocketCount = Math.max(
+      Number(caseRow.docket_count || 0),
+      Number(coverage.totalEntries || 0),
+      Number(coverage.lastNumber || 0)
+    );
+    const hasChanged =
+      String(nextLatestFiledAt || "") !== String(caseRow.latest_docket_filed_at || "") ||
+      String(nextLatestNumber || "") !== String(caseRow.latest_docket_number || "") ||
+      nextDocketCount !== Number(caseRow.docket_count || 0);
+
+    if (!hasChanged && !touchUpdatedAt) {
+      return caseRow;
+    }
+
+    const timestamp = nowIso();
+    this.db
+      .prepare(`
+        UPDATE cases
+        SET latest_docket_filed_at = ?,
+            latest_docket_number = ?,
+            docket_count = ?,
+            updated_at = CASE
+              WHEN ? = 1 THEN ?
+              ELSE updated_at
+            END
+        WHERE id = ?
+      `)
+      .run(
+        nextLatestFiledAt ?? null,
+        nextLatestNumber ?? null,
+        nextDocketCount,
+        touchUpdatedAt || hasChanged ? 1 : 0,
+        timestamp,
+        normalizedCaseId
+      );
+
+    this.invalidateCaseViews();
+
+    return hydrateCase(this.db.prepare("SELECT * FROM cases WHERE id = ?").get(normalizedCaseId));
+  }
+
   upsertDocketEntry(record) {
     const existing = this.db
       .prepare("SELECT id, description FROM docket_entries WHERE source_entry_key = ?")
@@ -2322,45 +2386,7 @@ export class Store {
     );
 
     if (Number(record.case_id)) {
-      const caseRow = hydrateCase(
-        this.db.prepare("SELECT * FROM cases WHERE id = ?").get(Number(record.case_id))
-      );
-      if (caseRow) {
-        const candidateNumber =
-          savedEntry?.entry_number ||
-          savedEntry?.document_number ||
-          record.entry_number ||
-          record.document_number ||
-          null;
-        const nextLatestFiledAt = laterIso(caseRow.latest_docket_filed_at, savedEntry?.filed_at || record.filed_at || null);
-        const nextLatestNumber = higherOrderValue(caseRow.latest_docket_number, candidateNumber);
-        const docketCountFloor = Math.max(
-          Number(caseRow.docket_count || 0),
-          parseDocketNumber(candidateNumber),
-          0
-        );
-
-        this.db
-          .prepare(`
-            UPDATE cases
-            SET latest_docket_filed_at = ?,
-                latest_docket_number = ?,
-                docket_count = CASE
-                  WHEN ? > docket_count THEN ?
-                  ELSE docket_count
-                END,
-                updated_at = ?
-            WHERE id = ?
-          `)
-          .run(
-            nextLatestFiledAt ?? null,
-            nextLatestNumber ?? null,
-            docketCountFloor,
-            docketCountFloor,
-            timestamp,
-            Number(record.case_id)
-          );
-      }
+      this.refreshCaseDocketSummary(Number(record.case_id));
     }
 
     this.invalidateCaseViews();

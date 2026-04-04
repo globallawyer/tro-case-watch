@@ -1846,6 +1846,9 @@ async function refreshCaseAcrossSources(caseId, {
     await runProvider("unicourt", () => syncService.enrichCaseWithUniCourt(caseId, { force: true }));
   }
 
+  store.refreshCaseDocketSummary(caseId);
+  refreshCurrent();
+
   return {
     caseId,
     requestedProviders: expandedProviders,

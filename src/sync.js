@@ -4480,6 +4480,7 @@ export class CaseSyncService {
       raw: mergedRaw
     });
 
+    this.store.refreshCaseDocketSummary(caseRow.id);
     this.store.touchCaseDocketSync(caseRow.id);
 
     return {
