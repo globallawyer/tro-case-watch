@@ -513,6 +513,10 @@ function parseNumericLike(value) {
   return Number.isFinite(numeric) ? numeric : null;
 }
 
+function compareCaseActivityDesc(left, right) {
+  return String(right || "").localeCompare(String(left || ""));
+}
+
 function laterIso(left, right) {
   if (!left) {
     return right || null;
