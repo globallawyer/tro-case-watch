@@ -1443,6 +1443,18 @@ function shouldForcePriorityFeedRefresh(item = {}) {
   return priorityFeedRowCount > 0 && Number(item.entries?.length || 0) < priorityFeedRowCount;
 }
 
+function laterIso(left, right) {
+  if (!left) {
+    return right || null;
+  }
+
+  if (!right) {
+    return left || null;
+  }
+
+  return String(left).localeCompare(String(right)) >= 0 ? left : right;
+}
+
 function latestEntryFiledAtForItem(item = {}) {
   const entries = Array.isArray(item.entries) ? item.entries : [];
   return entries.reduce((latest, entry) => {
@@ -1548,15 +1560,96 @@ function shouldHydratePacerMonitorOnDemand(item = {}) {
   return true;
 }
 
+function shouldHydrateDocketAlarmOnDemand(item = {}) {
+  if (!config.docketAlarm.enabled || !docketAlarm.hasCredentials()) {
+    return false;
+  }
+
+  const docketNumber = String(item.docket_number || "");
+  if (!/\b\d{2}-cv-\d{3,6}\b/i.test(docketNumber)) {
+    return false;
+  }
+
+  const entryCount = Number(item.entries?.length || 0);
+  const expectedEntries = Math.max(
+    10,
+    Number(item.docket_count || 0),
+    Number(getPriorityFeedRaw(item.raw)?.rowCount || 0),
+    6
+  );
+
+  const hasActivityLead = hasCaseLevelActivityLead(item);
+  if (!hasActivityLead && entryCount >= expectedEntries) {
+    return false;
+  }
+
+  const syncedAt = item.raw?.docketalarm?.syncedAt ? Date.parse(item.raw.docketalarm.syncedAt) : 0;
+  const state = String(item.raw?.docketalarm?.state || "").toLowerCase();
+  const retryHours =
+    state === "not_found"
+      ? config.docketAlarm.notFoundRetryAfterHours
+      : config.docketAlarm.staleAfterHours;
+
+  if (!hasActivityLead && syncedAt && Date.now() - syncedAt < retryHours * 60 * 60 * 1000) {
+    return false;
+  }
+
+  return true;
+}
+
+function shouldHydrateUniCourtOnDemand(item = {}) {
+  if (!config.uniCourt?.enabled || !uniCourt.hasCredentials()) {
+    return false;
+  }
+
+  const docketNumber = String(item.docket_number || "");
+  if (!/\b\d{2}-cv-\d{3,6}\b/i.test(docketNumber)) {
+    return false;
+  }
+
+  const entryCount = Number(item.entries?.length || 0);
+  const expectedEntries = Math.max(
+    10,
+    Number(item.docket_count || 0),
+    Number(getPriorityFeedRaw(item.raw)?.rowCount || 0),
+    6
+  );
+
+  const hasActivityLead = hasCaseLevelActivityLead(item);
+  if (!hasActivityLead && entryCount >= expectedEntries) {
+    return false;
+  }
+
+  const syncedAt = item.raw?.unicourt?.syncedAt ? Date.parse(item.raw.unicourt.syncedAt) : 0;
+  const state = String(item.raw?.unicourt?.state || "").toLowerCase();
+  const retryHours =
+    state === "not_found"
+      ? Number(config.uniCourt?.notFoundRetryAfterHours || 24)
+      : Number(config.uniCourt?.staleAfterHours || 24);
+
+  if (!hasActivityLead && syncedAt && Date.now() - syncedAt < retryHours * 60 * 60 * 1000) {
+    return false;
+  }
+
+  return true;
+}
+
 function buildCaseHydrationPlan(item = {}) {
   const courtlistener = shouldHydrateCourtListenerOnDemand(item);
   const priorityFeed = shouldHydratePriorityFeedOnDemand(item);
   const pacermonitor = shouldHydratePacerMonitorOnDemand(item);
+  const docketalarm = shouldHydrateDocketAlarmOnDemand(item);
+  const unicourtPlan = shouldHydrateUniCourtOnDemand(item);
+  const lookup = Boolean(String(item?.docket_number || item?.case_name || "").trim()) &&
+    (courtlistener || priorityFeed || pacermonitor || docketalarm || unicourtPlan);
   return {
-    pending: courtlistener || priorityFeed || pacermonitor,
+    pending: lookup || courtlistener || priorityFeed || pacermonitor || docketalarm || unicourtPlan,
+    lookup,
     courtlistener,
     priority: priorityFeed,
-    pacermonitor
+    pacermonitor,
+    docketalarm,
+    unicourt: unicourtPlan
   };
 }
 
@@ -1588,6 +1681,21 @@ function queueCaseHydration(caseId, initialItem) {
   const task = (async () => {
     let current = store.getCase(caseId) || initialItem;
 
+    if (plan.lookup) {
+      try {
+        const lookupTerm = String(current?.docket_number || current?.case_name || "").trim();
+        if (lookupTerm) {
+          await syncService.importLookup(lookupTerm, {
+            courtName: current?.court_name || "",
+            caseName: current?.case_name || ""
+          });
+          current = store.getCase(caseId) || current;
+        }
+      } catch {
+        current = store.getCase(caseId) || current;
+      }
+    }
+
     if (plan.courtlistener && shouldHydrateCourtListenerOnDemand(current)) {
       try {
         await syncService.enrichCaseWithCourtListener(caseId);
@@ -1611,6 +1719,24 @@ function queueCaseHydration(caseId, initialItem) {
     if (shouldHydratePacerMonitorOnDemand(current)) {
       try {
         await syncService.enrichCaseWithPacerMonitor(caseId);
+        current = store.getCase(caseId) || current;
+      } catch {
+        // Keep the existing detail payload available even when the fallback source misses.
+      }
+    }
+
+    if (shouldHydrateDocketAlarmOnDemand(current)) {
+      try {
+        await syncService.enrichCaseWithDocketAlarm(caseId);
+        current = store.getCase(caseId) || current;
+      } catch {
+        current = store.getCase(caseId) || current;
+      }
+    }
+
+    if (shouldHydrateUniCourtOnDemand(current)) {
+      try {
+        await syncService.enrichCaseWithUniCourt(caseId);
       } catch {
         // Keep the existing detail payload available even when the fallback source misses.
       }
@@ -1624,6 +1750,81 @@ function queueCaseHydration(caseId, initialItem) {
 
   backgroundCaseHydrations.set(caseId, task);
   return plan;
+}
+
+async function refreshCaseAcrossSources(caseId, {
+  initialItem = null,
+  providers = ["lookup", PRIORITY_FEED_SOURCE, "courtlistener", "pacermonitor", "docketalarm", "unicourt"]
+} = {}) {
+  const completedProviders = [];
+  const failedProviders = [];
+  let lookupResult = null;
+  let current = store.getCase(caseId) || initialItem || null;
+
+  const refreshCurrent = () => {
+    current = store.getCase(caseId) || current;
+    return current;
+  };
+
+  const runProvider = async (provider, task) => {
+    try {
+      await task();
+      completedProviders.push(provider);
+      refreshCurrent();
+    } catch (error) {
+      failedProviders.push({
+        provider,
+        error: error?.message || String(error)
+      });
+      console.warn(`[sync] provider ${provider} failed for case ${caseId}: ${error?.message || error}`);
+    }
+  };
+
+  if (providers.includes("lookup") && current) {
+    await runProvider("lookup", async () => {
+      const lookupTerm = String(current?.docket_number || current?.case_name || "").trim();
+      if (!lookupTerm) {
+        return;
+      }
+
+      lookupResult = await syncService.importLookup(lookupTerm, {
+        courtName: current?.court_name || "",
+        caseName: current?.case_name || ""
+      });
+    });
+  }
+
+  if (providers.includes(PRIORITY_FEED_SOURCE)) {
+    await runProvider(PRIORITY_FEED_SOURCE, async () => {
+      await syncService.enrichCaseWithPriorityFeed(caseId, {
+        force: true
+      });
+    });
+  }
+
+  if (providers.includes("courtlistener")) {
+    await runProvider("courtlistener", () => syncService.enrichCaseWithCourtListener(caseId, { force: true }));
+  }
+
+  if (providers.includes("pacermonitor")) {
+    await runProvider("pacermonitor", () => syncService.enrichCaseWithPacerMonitor(caseId, { force: true }));
+  }
+
+  if (providers.includes("docketalarm")) {
+    await runProvider("docketalarm", () => syncService.enrichCaseWithDocketAlarm(caseId, { force: true }));
+  }
+
+  if (providers.includes("unicourt")) {
+    await runProvider("unicourt", () => syncService.enrichCaseWithUniCourt(caseId, { force: true }));
+  }
+
+  return {
+    caseId,
+    requestedProviders: providers,
+    completedProviders,
+    failedProviders,
+    lookupResult
+  };
 }
 
 function serializePublicEntry(entry = {}) {
@@ -2363,6 +2564,57 @@ const server = http.createServer(async (request, response) => {
 });
 
 async function main() {
+  const refreshCaseDocketIndex = process.argv.indexOf("--refresh-case-docket");
+  if (refreshCaseDocketIndex !== -1) {
+    const docketNumber = String(process.argv[refreshCaseDocketIndex + 1] || "").trim();
+    const courtNameIndex = process.argv.indexOf("--court-name");
+    const caseNameIndex = process.argv.indexOf("--case-name");
+    const courtName = courtNameIndex !== -1 ? String(process.argv[courtNameIndex + 1] || "").trim() : "";
+    const caseName = caseNameIndex !== -1 ? String(process.argv[caseNameIndex + 1] || "").trim() : "";
+    const providersIndex = process.argv.indexOf("--providers");
+    const providers = providersIndex !== -1
+      ? String(process.argv[providersIndex + 1] || "")
+          .split(",")
+          .map((value) => value.trim())
+          .filter(Boolean)
+      : ["lookup", PRIORITY_FEED_SOURCE, "courtlistener", "pacermonitor", "docketalarm", "unicourt"];
+
+    const lookupResult = await syncService.importLookup(docketNumber, { courtName, caseName });
+    const startDate = config.sync.discoveryStartDate || config.sync.startDate || "2025-01-01";
+    const caseRow =
+      store.findCaseByCourtAndDocket({ courtName, docketNumber, startDate }) ||
+      store.findCaseByDocketNumber(docketNumber, startDate);
+
+    if (!caseRow?.id) {
+      console.log(JSON.stringify({
+        docketNumber,
+        courtName,
+        caseName,
+        ...lookupResult,
+        resolvedCaseId: null,
+        requestedProviders: providers,
+        completedProviders: ["lookup"],
+        failedProviders: []
+      }));
+      process.exit(lookupResult.matched > 0 ? 0 : 1);
+    }
+
+    const result = await refreshCaseAcrossSources(Number(caseRow.id), {
+      initialItem: caseRow,
+      providers: providers.filter((provider) => provider !== "lookup")
+    });
+    console.log(JSON.stringify({
+      docketNumber,
+      courtName,
+      caseName,
+      resolvedCaseId: Number(caseRow.id),
+      initialLookupResult: lookupResult,
+      ...result
+    }));
+    console.log(`[sync] refreshed case ${caseRow.id} (${docketNumber}) with ${result.completedProviders.join(",") || "none"}`);
+    process.exit(result.completedProviders.length ? 0 : 1);
+  }
+
   const enrichCaseIdIndex = process.argv.indexOf("--enrich-case-id");
   if (enrichCaseIdIndex !== -1) {
     const caseId = Number(process.argv[enrichCaseIdIndex + 1]);
@@ -2372,52 +2624,15 @@ async function main() {
           .split(",")
           .map((value) => value.trim())
           .filter(Boolean)
-      : ["courtlistener", PRIORITY_FEED_SOURCE, "pacermonitor", "docketalarm", "unicourt"];
+      : ["lookup", PRIORITY_FEED_SOURCE, "courtlistener", "pacermonitor", "docketalarm", "unicourt"];
 
-    const completedProviders = [];
-    const failedProviders = [];
-
-    const runProvider = async (provider, task) => {
-      try {
-        await task();
-        completedProviders.push(provider);
-      } catch (error) {
-        failedProviders.push({
-          provider,
-          error: error?.message || String(error)
-        });
-        console.warn(`[sync] provider ${provider} failed for case ${caseId}: ${error?.message || error}`);
-      }
-    };
-
-    if (providers.includes(PRIORITY_FEED_SOURCE)) {
-      await runProvider(PRIORITY_FEED_SOURCE, () => syncService.enrichCaseWithPriorityFeed(caseId, { force: true }));
-    }
-
-    if (providers.includes("courtlistener")) {
-      await runProvider("courtlistener", () => syncService.enrichCaseWithCourtListener(caseId, { force: true }));
-    }
-
-    if (providers.includes("pacermonitor")) {
-      await runProvider("pacermonitor", () => syncService.enrichCaseWithPacerMonitor(caseId, { force: true }));
-    }
-
-    if (providers.includes("docketalarm")) {
-      await runProvider("docketalarm", () => syncService.enrichCaseWithDocketAlarm(caseId, { force: true }));
-    }
-
-    if (providers.includes("unicourt")) {
-      await runProvider("unicourt", () => syncService.enrichCaseWithUniCourt(caseId, { force: true }));
-    }
-
-    console.log(JSON.stringify({
-      caseId,
-      requestedProviders: providers,
-      completedProviders,
-      failedProviders
-    }));
-    console.log(`[sync] enriched case ${caseId} with ${completedProviders.join(",") || "none"}`);
-    process.exit(completedProviders.length ? 0 : 1);
+    const result = await refreshCaseAcrossSources(caseId, {
+      initialItem: store.getCase(caseId),
+      providers
+    });
+    console.log(JSON.stringify(result));
+    console.log(`[sync] enriched case ${caseId} with ${result.completedProviders.join(",") || "none"}`);
+    process.exit(result.completedProviders.length ? 0 : 1);
   }
 
   const importLookupIndex = process.argv.indexOf("--import-lookup");
