@@ -766,6 +766,9 @@ export class CaseSyncService {
       },
       listSources() {
         return [];
+      },
+      async lookupByDocket() {
+        return null;
       }
     };
     this.lawFirms = lawFirms;
@@ -1077,10 +1080,46 @@ export class CaseSyncService {
     const ingest = this.ingestSearchResults(candidates, {
       tags: []
     });
+    let imported = ingest.casesUpserted;
+    let matched = candidates.length;
+
+    if (docketLooksLike(rawTerm)) {
+      const caseIndex = this.buildCourtFeedCaseIndex();
+
+      const recentFilingsMatch = await this.recentFilings.lookupByDocket(rawTerm, { courtName }).catch(() => null);
+      if (recentFilingsMatch?.item) {
+        const recentIngest = this.ingestRecentFilingsItems(
+          {
+            sourceId: recentFilingsMatch.source?.id || "recentfilings",
+            note: recentFilingsMatch.note || null,
+            items: [recentFilingsMatch.item]
+          },
+          caseIndex
+        );
+        imported += Number(recentIngest.casesUpserted || 0);
+        matched += 1;
+      }
+
+      const supplementalMatch = await this.lawFirms.lookupByDocket(rawTerm, {
+        sourceIds: ["61tro"]
+      }).catch(() => null);
+      if (supplementalMatch?.item) {
+        const supplementalIngest = this.ingestLawFirmItems(
+          {
+            source: supplementalMatch.source || null,
+            note: supplementalMatch.note || null,
+            items: [supplementalMatch.item]
+          },
+          caseIndex
+        );
+        imported += Number(supplementalIngest.casesUpserted || 0);
+        matched += 1;
+      }
+    }
 
     return {
-      imported: ingest.casesUpserted,
-      matched: candidates.length
+      imported,
+      matched
     };
   }
 

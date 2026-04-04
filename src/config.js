@@ -301,7 +301,7 @@ export const config = {
     minIntervalMs: envInt("LAW_FIRM_SITES_MIN_INTERVAL_MS", 1000),
     maxCasesPerSource: envInt("LAW_FIRM_SITES_MAX_CASES_PER_SOURCE", 8),
     maxLookupsPerRun: envInt("LAW_FIRM_SITES_MAX_LOOKUPS_PER_RUN", 8),
-    sources: envList("LAW_FIRM_SITES_TARGETS", ["sriplaw", "gbc"])
+    sources: envList("LAW_FIRM_SITES_TARGETS", ["sriplaw", "gbc", "61tro"])
   },
   translation: {
     provider: env("TRANSLATION_PROVIDER", "openai"),

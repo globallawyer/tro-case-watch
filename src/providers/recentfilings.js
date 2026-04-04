@@ -22,6 +22,10 @@ function cleanText(value) {
   return decodeHtml(stripTags(value)).replace(/\s+/g, " ").trim();
 }
 
+function normalizeLookupText(value) {
+  return cleanText(value).toLowerCase().replace(/[^\w]+/g, " ").replace(/\s+/g, " ").trim();
+}
+
 function absoluteUrl(value, baseUrl) {
   const raw = String(value || "").trim();
   if (!raw) {
@@ -59,8 +63,13 @@ function parseUsDate(value) {
 }
 
 function extractCoreDocketNumber(value) {
-  const match = String(value || "").match(/\b((?:\d+:)?\d{2}-[a-z]{2}-\d{3,6})\b/i);
-  return match ? match[1].trim() : "";
+  const match = String(value || "").match(/\b(?:(\d+):)?(?:(?:20)?(\d{2}))-([a-z]{2})-(\d{3,6})\b/i);
+  if (!match) {
+    return "";
+  }
+
+  const division = match[1] ? `${match[1]}:` : "";
+  return `${division}${match[2]}-${String(match[3] || "").toLowerCase()}-${match[4]}`;
 }
 
 function extractPacerCaseId(value) {
@@ -72,6 +81,16 @@ function trimCourtRows(items = [], maxItems = 100) {
   return items
     .filter((item) => item?.docketNumber)
     .slice(0, Math.max(Number(maxItems || 0), 0) || items.length);
+}
+
+function recentFilingsMatchesCourtName(source, courtName = "") {
+  const left = normalizeLookupText(source?.courtName || "");
+  const right = normalizeLookupText(courtName);
+  if (!left || !right) {
+    return false;
+  }
+
+  return left === right || left.includes(right) || right.includes(left);
 }
 
 function parseIlndRows(html, source) {
@@ -316,5 +335,38 @@ export class RecentFilingsClient {
       note,
       items: trimCourtRows(items, this.maxItemsPerCourt)
     };
+  }
+
+  async lookupByDocket(docketNumber, { courtName = "" } = {}) {
+    if (!this.enabled) {
+      return null;
+    }
+
+    const normalizedTarget = extractCoreDocketNumber(docketNumber);
+    if (!normalizedTarget) {
+      return null;
+    }
+
+    const prioritizedSources = [
+      ...this.sources.filter((source) => recentFilingsMatchesCourtName(source, courtName)),
+      ...this.sources.filter((source) => !recentFilingsMatchesCourtName(source, courtName))
+    ];
+
+    for (const source of prioritizedSources) {
+      const result = await this.fetchRecentForCourt(source);
+      const match = (result.items || []).find(
+        (item) => extractCoreDocketNumber(item.docketNumber) === normalizedTarget
+      );
+
+      if (match) {
+        return {
+          source,
+          item: match,
+          note: result.note || `${source.courtName} recently filed lookup`
+        };
+      }
+    }
+
+    return null;
   }
 }

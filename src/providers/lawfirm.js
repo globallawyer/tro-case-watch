@@ -2,6 +2,10 @@ function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function asArray(value) {
+  return Array.isArray(value) ? value : [];
+}
+
 function stripTags(value) {
   return String(value || "").replace(/<[^>]+>/g, " ");
 }
@@ -72,12 +76,19 @@ function normalizePageUrl(value) {
 }
 
 function parseDocketNumber(value) {
-  const match = String(value || "").match(/\b(?:\d+:)?\d{2}-cv-\d{3,6}\b/i);
-  return match ? match[0].trim() : "";
+  const match = String(value || "").match(/\b(?:(\d+):)?(?:(?:20)?(\d{2}))-cv-(\d{3,6})\b/i);
+  if (!match) {
+    return "";
+  }
+
+  const division = match[1] ? `${match[1]}:` : "";
+  return `${division}${match[2]}-cv-${match[3]}`;
 }
 
 function cleanCaseName(value) {
-  return cleanText(String(value || "").replace(/\s*(?:-|–|—)?\s*Case No\.?:?\s*(?:\d+:)?\d{2}-cv-\d{3,6}.*$/i, ""));
+  return cleanText(
+    String(value || "").replace(/\s*(?:-|–|—)?\s*Case No\.?:?\s*(?:\d+:)?(?:20)?\d{2}-cv-\d{3,6}.*$/i, "")
+  );
 }
 
 const DISTRICT_DIRECTION_MAP = {
@@ -122,6 +133,102 @@ const COURT_CODE_TO_ID = {
   WAWD: "wawd"
 };
 
+const COURT_ID_TO_NAME = {
+  cacd: "Central District of California",
+  cand: "Northern District of California",
+  casd: "Southern District of California",
+  flsd: "Southern District of Florida",
+  gand: "Northern District of Georgia",
+  gasd: "Southern District of Georgia",
+  ilnd: "Northern District of Illinois",
+  mdpa: "Middle District of Pennsylvania",
+  nyed: "Eastern District of New York",
+  nysd: "Southern District of New York",
+  paed: "Eastern District of Pennsylvania",
+  pawd: "Western District of Pennsylvania",
+  tned: "Eastern District of Tennessee",
+  tnmd: "Middle District of Tennessee",
+  tnwd: "Western District of Tennessee",
+  txsd: "Southern District of Texas",
+  waed: "Eastern District of Washington",
+  wawd: "Western District of Washington"
+};
+
+const TRO61_COURT_NAME_TO_META = {
+  伊利诺伊州北区法院: {
+    courtId: "ilnd",
+    courtName: "Northern District of Illinois"
+  },
+  佛罗里达州南区法院: {
+    courtId: "flsd",
+    courtName: "Southern District of Florida"
+  },
+  纽约州南区法院: {
+    courtId: "nysd",
+    courtName: "Southern District of New York"
+  },
+  纽约州东区法院: {
+    courtId: "nyed",
+    courtName: "Eastern District of New York"
+  },
+  加利福尼亚州北区法院: {
+    courtId: "cand",
+    courtName: "Northern District of California"
+  },
+  加利福尼亚州中区法院: {
+    courtId: "cacd",
+    courtName: "Central District of California"
+  },
+  加利福尼亚州南区法院: {
+    courtId: "casd",
+    courtName: "Southern District of California"
+  },
+  佐治亚州南区法院: {
+    courtId: "gasd",
+    courtName: "Southern District of Georgia"
+  },
+  佐治亚州北区法院: {
+    courtId: "gand",
+    courtName: "Northern District of Georgia"
+  },
+  宾夕法尼亚州东区法院: {
+    courtId: "paed",
+    courtName: "Eastern District of Pennsylvania"
+  },
+  宾夕法尼亚州西区法院: {
+    courtId: "pawd",
+    courtName: "Western District of Pennsylvania"
+  },
+  华盛顿州西区法院: {
+    courtId: "wawd",
+    courtName: "Western District of Washington"
+  },
+  华盛顿州东区法院: {
+    courtId: "waed",
+    courtName: "Eastern District of Washington"
+  },
+  得克萨斯州南区法院: {
+    courtId: "txsd",
+    courtName: "Southern District of Texas"
+  },
+  田纳西州东区法院: {
+    courtId: "tned",
+    courtName: "Eastern District of Tennessee"
+  },
+  田纳西州中区法院: {
+    courtId: "tnmd",
+    courtName: "Middle District of Tennessee"
+  },
+  田纳西州西区法院: {
+    courtId: "tnwd",
+    courtName: "Western District of Tennessee"
+  },
+  宾夕法尼亚州中区法院: {
+    courtId: "mdpa",
+    courtName: "Middle District of Pennsylvania"
+  }
+};
+
 function courtCodeToName(value) {
   const code = String(value || "").trim().toUpperCase().replace(/[^A-Z]/g, "");
   if (!code) {
@@ -153,6 +260,11 @@ function courtCodeToId(value) {
   return COURT_CODE_TO_ID[code] || null;
 }
 
+function courtIdToName(value) {
+  const key = String(value || "").trim().toLowerCase();
+  return COURT_ID_TO_NAME[key] || "";
+}
+
 const DEFAULT_LAW_FIRM_SOURCES = [
   {
     id: "sriplaw",
@@ -170,6 +282,14 @@ const DEFAULT_LAW_FIRM_SOURCES = [
     strategy: "gbc-pages",
     discoveryUrl:
       "https://gbc.law/wp-json/wp/v2/pages?per_page=100&_fields=id,link,slug,title,modified,content.rendered"
+  },
+  {
+    id: "61tro",
+    label: "61TRO",
+    lawFirm: "61TRO案件查询网",
+    baseUrl: "https://61tro.com",
+    strategy: "61tro-search",
+    discoveryUrl: "https://61tro.com/"
   },
   {
     id: "whitewood",
@@ -218,6 +338,197 @@ function extractSameDomainLinks(html, baseUrl) {
 
 function looksLikeStructuredCaseLink(url) {
   return /\/case\//i.test(url) || /\/case-no-/i.test(url) || /\/caseno-/i.test(url);
+}
+
+function normalizeDocketLookupKey(value) {
+  const docket = parseDocketNumber(value);
+  return String(docket || value || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "");
+}
+
+function normalizeDocketLookupCoreKey(value) {
+  const docket = parseDocketNumber(value);
+  return String(docket || value || "")
+    .toLowerCase()
+    .replace(/^[a-z]{1,6}[-:]/, "")
+    .replace(/^\d+:/, "")
+    .replace(/[^a-z0-9]+/g, "");
+}
+
+function clean61troValue(value) {
+  return cleanText(value)
+    .replace(/\s*翻译\s*$/u, "")
+    .replace(/\s+扫码.*$/u, "")
+    .trim();
+}
+
+function extract61troTextValue(html, label) {
+  const match = String(html || "").match(new RegExp(`${label}[：:]([\\s\\S]*?)<\\/span>`, "i"));
+  return cleanText(match?.[1] || "");
+}
+
+function extract61troRecentLinks(html, baseUrl) {
+  const links = [];
+  const seen = new Set();
+
+  for (const match of String(html || "").matchAll(/href=['"]([^'"]*(?:\/detail\/\d+\.html|\/view\/id\/[^'"]+\.html))['"]/gi)) {
+    const normalized = absoluteUrl(match[1], baseUrl);
+    if (!normalized || seen.has(normalized)) {
+      continue;
+    }
+    seen.add(normalized);
+    links.push(normalized);
+  }
+
+  return links;
+}
+
+function build61troSearchTerms(docketNumber) {
+  const match = String(docketNumber || "").match(/\b(?:(\d+):)?(?:(20)?(\d{2}))-cv-(\d{3,6})\b/i);
+  if (!match) {
+    return [String(docketNumber || "").trim()].filter(Boolean);
+  }
+
+  const division = match[1] ? `${match[1]}:` : "";
+  const shortYear = match[3];
+  const fullYear = `${match[2] ? "20" : "20"}${shortYear}`;
+  const number = match[4];
+
+  return [...new Set([
+    `${fullYear}-cv-${number}`,
+    `${shortYear}-cv-${number}`,
+    division ? `${division}${fullYear}-cv-${number}` : "",
+    division ? `${division}${shortYear}-cv-${number}` : ""
+  ].filter(Boolean))];
+}
+
+function extract61troSearchResultLink(html, docketNumber, baseUrl) {
+  const targetKey = normalizeDocketLookupCoreKey(docketNumber);
+  const links = [];
+
+  for (const match of String(html || "").matchAll(/<h4>\s*<a href="([^"]+)">([\s\S]*?)<\/a>\s*<\/h4>/gi)) {
+    const href = absoluteUrl(match[1], baseUrl);
+    const title = cleanText(match[2]);
+    if (!href) {
+      continue;
+    }
+    links.push({ href, title });
+  }
+
+  const exact = links.find(
+    (item) => normalizeDocketLookupCoreKey(item.title) === targetKey && /\/view\/id\//i.test(item.href)
+  );
+  if (exact) {
+    return exact.href;
+  }
+
+  const compatible = links.find((item) => normalizeDocketLookupCoreKey(item.title) === targetKey);
+  return compatible?.href || null;
+}
+
+function resolve61troCourtMeta(url, courtNameText) {
+  const rawCourtName = cleanText(courtNameText);
+  const courtNameKey = rawCourtName.replace(/\s+/g, "");
+  const known = TRO61_COURT_NAME_TO_META[courtNameKey];
+  if (known) {
+    return known;
+  }
+
+  const urlMatch = String(url || "").match(/\/view\/id\/([a-z]{4,5})-/i);
+  if (urlMatch) {
+    const courtId = urlMatch[1].toLowerCase();
+    return {
+      courtId,
+      courtName: courtIdToName(courtId) || rawCourtName || ""
+    };
+  }
+
+  return {
+    courtId: null,
+    courtName: rawCourtName || ""
+  };
+}
+
+function parse61troEntries(html) {
+  const entries = [];
+  let index = 0;
+
+  for (const match of String(html || "").matchAll(/<div class="layui-timeline-item">([\s\S]*?)<\/div>\s*<\/div>/gi)) {
+    const block = match[1];
+    const filedAt = parseUsDate(String(block).match(/layui-timeline-title">([\s\S]*?)<\/h3>/i)?.[1] || "");
+    const description = clean61troValue(String(block).match(/<p[^>]*class="[^"]*\bv-text\b[^"]*"[^>]*>([\s\S]*?)<\/p>/i)?.[1] || "");
+    if (!filedAt && !description) {
+      continue;
+    }
+
+    index += 1;
+    entries.push({
+      sourceEntryId: `${filedAt || "unknown"}:${index}`,
+      entryNumber: null,
+      documentNumber: null,
+      documentType: "Docket Entry",
+      description: description || `61TRO timeline item ${index}`,
+      filedAt,
+      absoluteUrl: null
+    });
+  }
+
+  return entries;
+}
+
+function parse61troCasePage(html, url, source) {
+  const title = cleanText(String(html || "").match(/<title>([\s\S]*?)<\/title>/i)?.[1] || "");
+  const docketNumber =
+    parseDocketNumber(String(html || "").match(/<div class="post__title">[\s\S]*?<h2>([\s\S]*?)<\/h2>/i)?.[1] || "") ||
+    parseDocketNumber(title) ||
+    parseDocketNumber(url);
+  if (!docketNumber) {
+    return null;
+  }
+
+  const caseName =
+    cleanText(String(html || "").match(/<div class="post__options">[\s\S]*?<h4>([\s\S]*?)<\/h4>/i)?.[1] || "") ||
+    cleanCaseName(title);
+  const rawCourtName = extract61troTextValue(html, "法院");
+  const courtMeta = resolve61troCourtMeta(url, rawCourtName);
+  const entries = parse61troEntries(html);
+  const latestEntry = entries[0] || entries[entries.length - 1] || null;
+  const earliestEntry = entries
+    .slice()
+    .filter((entry) => entry?.filedAt)
+    .sort((left, right) => String(left.filedAt || "").localeCompare(String(right.filedAt || "")))[0] || null;
+  const updatedAt = cleanText(String(html || "").match(/最近更新：([\d-]{10})/i)?.[1] || "");
+  const brand = extract61troTextValue(html, "品牌");
+  const state = extract61troTextValue(html, "州");
+  const lawFirm = extract61troTextValue(html, "律所");
+
+  return {
+    sourceId: source.id,
+    sourceLabel: source.label,
+    lawFirm: source.lawFirm,
+    sourceCaseId: url,
+    caseUrl: normalizePageUrl(url),
+    title,
+    caseName: caseName || title,
+    docketNumber,
+    courtCode: "",
+    courtId: courtMeta.courtId || null,
+    courtName: courtMeta.courtName || rawCourtName || "",
+    dateFiled: earliestEntry?.filedAt || null,
+    summary: latestEntry?.description || `最近更新：${updatedAt || "未知"}`,
+    latestDocketNumber: null,
+    entries,
+    syncedAt: new Date().toISOString(),
+    rawMeta: {
+      discoveryUrl: source.discoveryUrl,
+      updatedAt: updatedAt || null,
+      state: state || null,
+      brand: brand || null,
+      listedLawFirm: lawFirm || null,
+      rowCount: entries.length
+    }
+  };
 }
 
 function parseSriplawNoticeRows(html, baseUrl) {
@@ -505,6 +816,10 @@ export class LawFirmClient {
       return this.fetchGbcSource(source);
     }
 
+    if (source.strategy === "61tro-search") {
+      return this.fetch61troSource(source);
+    }
+
     return this.fetchProbeSource(source);
   }
 
@@ -582,6 +897,85 @@ export class LawFirmClient {
         ? `${source.label} 官网探测到 ${candidates.length} 个疑似案件页${failedItems ? `，${failedItems} 个页面待重试` : ""}。`
         : `${source.label} 官网当前未暴露可稳定抓取的公开案件页。`
     };
+  }
+
+  async fetch61troSource(source) {
+    const html = await this.fetchText(source.discoveryUrl);
+    const candidates = extract61troRecentLinks(html, source.baseUrl).slice(0, this.maxCasesPerSource);
+    const items = [];
+    let failedItems = 0;
+
+    for (const link of candidates) {
+      try {
+        const pageHtml = await this.fetchText(link);
+        const item = parse61troCasePage(pageHtml, link, source);
+        if (item?.docketNumber) {
+          items.push(item);
+        }
+      } catch {
+        failedItems += 1;
+      }
+    }
+
+    return {
+      source,
+      items,
+      totalCandidates: candidates.length,
+      failedItems,
+      note: candidates.length
+        ? `61TRO 本轮复核 ${candidates.length} 个公开案件页${failedItems ? `，${failedItems} 个页面待重试` : ""}。`
+        : "61TRO 当前没有识别到可稳定抓取的公开案件页。"
+    };
+  }
+
+  async lookupByDocket(docketNumber, { sourceIds = [] } = {}) {
+    if (!this.enabled) {
+      return null;
+    }
+
+    const requestedIds = new Set(asArray(sourceIds).map((value) => String(value || "").trim().toLowerCase()).filter(Boolean));
+    const sources = requestedIds.size
+      ? this.sources.filter((source) => requestedIds.has(source.id))
+      : this.sources;
+
+    for (const source of sources) {
+      if (source.strategy !== "61tro-search") {
+        continue;
+      }
+
+      const item = await this.lookup61troByDocket(source, docketNumber);
+      if (item) {
+        return {
+          source,
+          item,
+          note: `61TRO 通过案件号命中 ${item.docketNumber}。`
+        };
+      }
+    }
+
+    return null;
+  }
+
+  async lookup61troByDocket(source, docketNumber) {
+    for (const term of build61troSearchTerms(docketNumber)) {
+      const searchUrl = `${source.baseUrl}/search.html?sn=${encodeURIComponent(term)}`;
+      const html = await this.fetchText(searchUrl);
+      const detailUrl = extract61troSearchResultLink(html, docketNumber, source.baseUrl);
+      if (!detailUrl) {
+        continue;
+      }
+
+      const pageHtml = await this.fetchText(detailUrl);
+      const item = parse61troCasePage(pageHtml, detailUrl, source);
+      if (
+        item?.docketNumber &&
+        normalizeDocketLookupCoreKey(item.docketNumber) === normalizeDocketLookupCoreKey(docketNumber)
+      ) {
+        return item;
+      }
+    }
+
+    return null;
   }
 
   async fetchJson(url, options = {}) {
