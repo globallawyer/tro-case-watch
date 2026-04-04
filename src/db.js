@@ -2317,11 +2317,55 @@ export class Store {
         timestamp
       );
 
-    this.invalidateCaseViews();
-
-    return hydrateEntry(
+    const savedEntry = hydrateEntry(
       this.db.prepare("SELECT * FROM docket_entries WHERE source_entry_key = ?").get(record.source_entry_key)
     );
+
+    if (Number(record.case_id)) {
+      const caseRow = hydrateCase(
+        this.db.prepare("SELECT * FROM cases WHERE id = ?").get(Number(record.case_id))
+      );
+      if (caseRow) {
+        const candidateNumber =
+          savedEntry?.entry_number ||
+          savedEntry?.document_number ||
+          record.entry_number ||
+          record.document_number ||
+          null;
+        const nextLatestFiledAt = laterIso(caseRow.latest_docket_filed_at, savedEntry?.filed_at || record.filed_at || null);
+        const nextLatestNumber = higherOrderValue(caseRow.latest_docket_number, candidateNumber);
+        const docketCountFloor = Math.max(
+          Number(caseRow.docket_count || 0),
+          parseDocketNumber(candidateNumber),
+          0
+        );
+
+        this.db
+          .prepare(`
+            UPDATE cases
+            SET latest_docket_filed_at = ?,
+                latest_docket_number = ?,
+                docket_count = CASE
+                  WHEN ? > docket_count THEN ?
+                  ELSE docket_count
+                END,
+                updated_at = ?
+            WHERE id = ?
+          `)
+          .run(
+            nextLatestFiledAt ?? null,
+            nextLatestNumber ?? null,
+            docketCountFloor,
+            docketCountFloor,
+            timestamp,
+            Number(record.case_id)
+          );
+      }
+    }
+
+    this.invalidateCaseViews();
+
+    return savedEntry;
   }
 
   updateEntryTranslation(entryId, translation) {
