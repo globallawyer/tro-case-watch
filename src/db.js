@@ -460,11 +460,33 @@ const CASE_SEARCH_TEXT_SQL = `lower(trim(
   COALESCE(plaintiffs_json, '') || ' ' ||
   COALESCE(defendants_json, '') || ' ' ||
   COALESCE(source_urls_json, '') || ' ' ||
-  replace(COALESCE(tags_marker, ''), '|', ' ') || ' ' ||
-  COALESCE(json_extract(raw_json, '$.priorityFeed.lawFirm'), '') || ' ' ||
-  COALESCE(json_extract(raw_json, '$.firm[0]'), '') || ' ' ||
-  COALESCE(json_extract(raw_json, '$.party[0]'), '')
+  replace(COALESCE(tags_marker, ''), '|', ' ')
 ))`;
+const CASE_FAST_PATH_SET_SQL = `
+  is_tro = CASE WHEN instr(COALESCE(tags_marker, ''), '|tro|') > 0 THEN 1 ELSE 0 END,
+  is_schedule_a = CASE WHEN instr(COALESCE(tags_marker, ''), '|schedule_a|') > 0 THEN 1 ELSE 0 END,
+  is_seller_watch = CASE WHEN instr(COALESCE(tags_marker, ''), '|seller_tro|') > 0 THEN 1 ELSE 0 END,
+  is_watchlist = CASE
+    WHEN instr(COALESCE(tags_marker, ''), '|tro|') > 0
+      OR instr(COALESCE(tags_marker, ''), '|schedule_a|') > 0
+      OR instr(COALESCE(tags_marker, ''), '|seller_tro|') > 0
+    THEN 1
+    ELSE 0
+  END,
+  priority_feed_row_count = COALESCE(priority_feed_row_count, 0),
+  priority_activity_at = ${CASE_PRIORITY_ACTIVITY_SQL},
+  search_text = ${CASE_SEARCH_TEXT_SQL}
+`;
+const CASE_FAST_PATH_MISSING_WHERE_SQL = `
+  priority_activity_at IS NULL
+  OR search_text IS NULL
+  OR search_text = ''
+  OR is_watchlist IS NULL
+  OR is_tro IS NULL
+  OR is_schedule_a IS NULL
+  OR is_seller_watch IS NULL
+  OR priority_feed_row_count IS NULL
+`;
 
 function chunkArray(values = [], size = 500) {
   const chunks = [];
@@ -2263,27 +2285,8 @@ export class Store {
     this.db
       .prepare(`
         UPDATE cases
-        SET is_tro = CASE WHEN instr(COALESCE(tags_marker, ''), '|tro|') > 0 THEN 1 ELSE 0 END,
-            is_schedule_a = CASE WHEN instr(COALESCE(tags_marker, ''), '|schedule_a|') > 0 THEN 1 ELSE 0 END,
-            is_seller_watch = CASE WHEN instr(COALESCE(tags_marker, ''), '|seller_tro|') > 0 THEN 1 ELSE 0 END,
-            is_watchlist = CASE
-              WHEN instr(COALESCE(tags_marker, ''), '|tro|') > 0
-                OR instr(COALESCE(tags_marker, ''), '|schedule_a|') > 0
-                OR instr(COALESCE(tags_marker, ''), '|seller_tro|') > 0
-              THEN 1
-              ELSE 0
-            END,
-            priority_feed_row_count = COALESCE(CAST(json_extract(raw_json, '$.priorityFeed.rowCount') AS INTEGER), priority_feed_row_count, 0),
-            priority_activity_at = ${CASE_PRIORITY_ACTIVITY_SQL},
-            search_text = ${CASE_SEARCH_TEXT_SQL}
-        WHERE priority_activity_at IS NULL
-           OR search_text IS NULL
-           OR search_text = ''
-           OR is_watchlist IS NULL
-           OR is_tro IS NULL
-           OR is_schedule_a IS NULL
-           OR is_seller_watch IS NULL
-           OR priority_feed_row_count IS NULL
+        SET ${CASE_FAST_PATH_SET_SQL}
+        WHERE ${CASE_FAST_PATH_MISSING_WHERE_SQL}
       `)
       .run();
   }
@@ -2311,33 +2314,55 @@ export class Store {
   } = {}) {
     const normalizedBatchSize = Math.max(1, Number(batchSize || 1000));
     const normalizedLimit = Math.max(0, Number(limit || 0));
-    const rows = normalizedLimit > 0
-      ? this.db.prepare("SELECT * FROM cases ORDER BY id DESC LIMIT ?").all(normalizedLimit)
-      : this.db.prepare("SELECT * FROM cases ORDER BY id ASC").all();
-
     let updated = 0;
     let skipped = 0;
     const skippedCaseIds = [];
-    for (const chunk of chunkArray(rows, normalizedBatchSize)) {
-      for (const row of chunk) {
+    let processed = 0;
+    let cursor = Number.MAX_SAFE_INTEGER;
+    const safeUpdateStatement = this.db.prepare(`
+      UPDATE cases
+      SET ${CASE_FAST_PATH_SET_SQL}
+      WHERE id = ?
+    `);
+    const richUpdateStatement = this.db.prepare(`
+      UPDATE cases
+      SET is_watchlist = ?,
+          is_tro = ?,
+          is_schedule_a = ?,
+          is_seller_watch = ?,
+          priority_feed_row_count = ?,
+          priority_activity_at = ?,
+          search_text = ?
+      WHERE id = ?
+    `);
+
+    while (true) {
+      const remaining = normalizedLimit > 0 ? Math.max(normalizedLimit - processed, 0) : normalizedBatchSize;
+      if (normalizedLimit > 0 && remaining <= 0) {
+        break;
+      }
+
+      const chunk = this.db
+        .prepare("SELECT id FROM cases WHERE id < ? ORDER BY id DESC LIMIT ?")
+        .all(cursor, Math.min(normalizedBatchSize, remaining))
+        .map((row) => Number(row.id || 0))
+        .filter(Boolean);
+
+      if (!chunk.length) {
+        break;
+      }
+
+      cursor = Math.min(...chunk);
+      processed += chunk.length;
+      for (const caseId of chunk) {
         try {
+          const row = this.db.prepare("SELECT * FROM cases WHERE id = ? LIMIT 1").get(caseId);
           const hydrated = hydrateCase(row);
           const metadata = buildCaseListMetadata(hydrated, {
             updatedAt: hydrated.updated_at
           });
-          this.db
-            .prepare(`
-              UPDATE cases
-              SET is_watchlist = ?,
-                  is_tro = ?,
-                  is_schedule_a = ?,
-                  is_seller_watch = ?,
-                  priority_feed_row_count = ?,
-                  priority_activity_at = ?,
-                  search_text = ?
-              WHERE id = ?
-            `)
-            .run(
+          updated += Number(
+            richUpdateStatement.run(
               metadata.is_watchlist,
               metadata.is_tro,
               metadata.is_schedule_a,
@@ -2345,17 +2370,21 @@ export class Store {
               metadata.priority_feed_row_count,
               metadata.priority_activity_at,
               metadata.search_text,
-              hydrated.id
-            );
-          updated += 1;
-        } catch (error) {
-          skipped += 1;
-          if (skippedCaseIds.length < 25) {
-            skippedCaseIds.push(Number(row.id || 0) || null);
-          }
-          console.warn(
-            `[rebuild-case-fast-path] skipping case ${row.id}: ${error instanceof Error ? error.message : String(error)}`
+              caseId
+            )?.changes || 0
           );
+        } catch (error) {
+          try {
+            updated += Number(safeUpdateStatement.run(caseId)?.changes || 0);
+          } catch (fallbackError) {
+            skipped += 1;
+            if (skippedCaseIds.length < 25) {
+              skippedCaseIds.push(caseId);
+            }
+            console.warn(
+              `[rebuild-case-fast-path] skipping case ${caseId}: ${fallbackError instanceof Error ? fallbackError.message : String(fallbackError)}`
+            );
+          }
         }
       }
     }
