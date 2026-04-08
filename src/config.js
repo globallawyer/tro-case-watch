@@ -233,12 +233,18 @@ export const config = {
     baseUrl: env("COURTLISTENER_BASE_URL", "https://www.courtlistener.com/api/rest/v4"),
     apiToken: env("COURTLISTENER_API_TOKEN", ""),
     enableDocketSync: envBool("COURTLISTENER_ENABLE_DOCKET_SYNC", false),
+    enableDocketAlerts: envBool("COURTLISTENER_ENABLE_DOCKET_ALERTS", true),
     recapFetchEnabled: envBool("COURTLISTENER_RECAP_FETCH_ENABLED", envBool("PACER_ENABLED", false)),
     recapFetchPollIntervalMs: envInt("COURTLISTENER_RECAP_FETCH_POLL_INTERVAL_MS", 2000),
     recapFetchMaxPollMs: envInt("COURTLISTENER_RECAP_FETCH_MAX_POLL_MS", 12000),
     recapFetchShowPartiesAndCounsel: envBool("COURTLISTENER_RECAP_FETCH_SHOW_PARTIES_AND_COUNSEL", true),
     docketMaxCasesPerRun: envInt("COURTLISTENER_DOCKET_MAX_CASES_PER_RUN", 8),
     docketBackfillMaxCasesPerRun: envInt("COURTLISTENER_DOCKET_BACKFILL_MAX_CASES_PER_RUN", 40),
+    docketAlertSyncMaxCasesPerRun: envInt("COURTLISTENER_DOCKET_ALERT_SYNC_MAX_CASES_PER_RUN", 200),
+    docketAlertSyncStaleAfterHours: envInt("COURTLISTENER_DOCKET_ALERT_SYNC_STALE_AFTER_HOURS", 24),
+    docketAlertSyncBootstrapDelayMs: envInt("COURTLISTENER_DOCKET_ALERT_SYNC_BOOTSTRAP_DELAY_MS", 90 * 1000),
+    docketAlertSyncIntervalMs: envInt("COURTLISTENER_DOCKET_ALERT_SYNC_INTERVAL_MS", 6 * 60 * 60 * 1000),
+    autoReupAlerts: envBool("COURTLISTENER_AUTO_REUP_ALERTS", true),
     webhookSecret: env("COURTLISTENER_WEBHOOK_SECRET", "")
   },
   priorityFeed: {

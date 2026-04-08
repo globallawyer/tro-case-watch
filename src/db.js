@@ -2070,6 +2070,25 @@ export class Store {
     return null;
   }
 
+  getCaseByCourtListenerDocketId(docketId) {
+    const normalized = Number(docketId || 0);
+    if (!normalized) {
+      return null;
+    }
+
+    const row = this.db
+      .prepare(`
+        SELECT *
+        FROM cases
+        WHERE courtlistener_docket_id = ?
+        ORDER BY ${CASE_PRIORITY_ACTIVITY_SQL} DESC, updated_at DESC
+        LIMIT 1
+      `)
+      .get(normalized);
+
+    return row ? buildCaseView(row) : null;
+  }
+
   findCaseByDocketNumber(docketNumber, startDate = "2025-01-01") {
     const docketKey = normalizeDocket(docketNumber);
     if (!docketKey) {
@@ -3708,6 +3727,60 @@ export class Store {
       })
       .slice(0, limit)
       .map((item) => item.row);
+  }
+
+  getCasesNeedingCourtListenerAlertSync(limit, { startDate = "2025-01-01", staleAfterHours = 24, force = false } = {}) {
+    const staleBeforeMs = Date.now() - Math.max(Number(staleAfterHours || 0), 1) * 60 * 60 * 1000;
+    const poolSize = Math.max(Number(limit || 0) * 40, 400);
+
+    return this.db
+      .prepare(`
+        SELECT *
+        FROM cases
+        WHERE courtlistener_docket_id IS NOT NULL
+          AND date(date_filed) >= date(?)
+        ORDER BY ${CASE_PRIORITY_ACTIVITY_SQL} DESC, updated_at DESC
+        LIMIT ?
+      `)
+      .all(String(startDate || "2025-01-01"), Math.max(poolSize, Math.max(Number(limit || 0), 1)))
+      .map(hydrateCase)
+      .filter((row) => Number(row.courtlistener_docket_id || 0) > 0)
+      .filter((row) => {
+        if (force) {
+          return true;
+        }
+
+        const alertState = row.raw?.courtlistener?.docketAlert || {};
+        const syncedAtMs = Date.parse(String(alertState.syncedAt || alertState.updatedAt || alertState.dateModified || ""));
+        const alertType = Number(alertState.alertType ?? alertState.alert_type ?? 0);
+        const hasRemoteAlert = Number(alertState.id || 0) > 0;
+        if (!hasRemoteAlert || alertType !== 1) {
+          return true;
+        }
+
+        return !Number.isFinite(syncedAtMs) || syncedAtMs <= staleBeforeMs;
+      })
+      .sort((left, right) => {
+        const leftAlert = left.raw?.courtlistener?.docketAlert || {};
+        const rightAlert = right.raw?.courtlistener?.docketAlert || {};
+        const leftActive = Number(leftAlert.alertType ?? leftAlert.alert_type ?? 0) === 1;
+        const rightActive = Number(rightAlert.alertType ?? rightAlert.alert_type ?? 0) === 1;
+        if (leftActive !== rightActive) {
+          return leftActive ? 1 : -1;
+        }
+
+        const leftSyncedAt = String(leftAlert.syncedAt || leftAlert.updatedAt || leftAlert.dateModified || "1970-01-01T00:00:00.000Z");
+        const rightSyncedAt = String(rightAlert.syncedAt || rightAlert.updatedAt || rightAlert.dateModified || "1970-01-01T00:00:00.000Z");
+        if (leftSyncedAt !== rightSyncedAt) {
+          return leftSyncedAt.localeCompare(rightSyncedAt);
+        }
+
+        return compareCaseActivityDesc(
+          getCasePriorityActivityAt(left),
+          getCasePriorityActivityAt(right)
+        );
+      })
+      .slice(0, Math.max(Number(limit || 0), 1));
   }
 
   getCasesWithActivityAheadOfTimeline(limit, { recentFiledWindowDays = 2, startDate = "2025-01-01" } = {}) {

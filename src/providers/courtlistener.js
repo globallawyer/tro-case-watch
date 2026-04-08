@@ -3,6 +3,7 @@ export class CourtListenerClient {
     this.baseUrl = config.baseUrl.replace(/\/$/, "");
     this.apiToken = config.apiToken || "";
     this.enableDocketSync = Boolean(config.enableDocketSync);
+    this.enableDocketAlerts = Boolean(config.enableDocketAlerts);
     this.recapFetchEnabled = Boolean(config.recapFetchEnabled);
     this.recapFetchPollIntervalMs = Math.max(500, Number(config.recapFetchPollIntervalMs || 2000));
     this.recapFetchMaxPollMs = Math.max(this.recapFetchPollIntervalMs, Number(config.recapFetchMaxPollMs || 12000));
@@ -13,6 +14,7 @@ export class CourtListenerClient {
     this.capabilities = {
       docket: Boolean(this.apiToken) && this.enableDocketSync,
       docketEntries: Boolean(this.apiToken) && this.enableDocketSync,
+      docketAlerts: Boolean(this.apiToken) && this.enableDocketAlerts,
       recapFetch:
         Boolean(this.apiToken) &&
         this.recapFetchEnabled &&
@@ -27,6 +29,10 @@ export class CourtListenerClient {
 
   hasDocketEntriesAccess() {
     return this.capabilities.docketEntries;
+  }
+
+  hasDocketAlertAccess() {
+    return this.capabilities.docketAlerts;
   }
 
   hasRecapFetchAccess() {
@@ -90,6 +96,74 @@ export class CourtListenerClient {
     }
 
     return entries;
+  }
+
+  async listDocketAlerts({ cursorUrl = null, docketId = null, pageSize = 100, orderBy = "-date_created" } = {}) {
+    if (!this.hasDocketAlertAccess()) {
+      return { count: 0, next: null, previous: null, results: [] };
+    }
+
+    const url = cursorUrl ? new URL(cursorUrl) : new URL(`${this.baseUrl}/docket-alerts/`);
+    if (!cursorUrl) {
+      if (Number(docketId) > 0) {
+        url.searchParams.set("docket", String(docketId));
+      }
+      url.searchParams.set("page_size", String(pageSize));
+      url.searchParams.set("order_by", orderBy);
+    }
+
+    return this.fetchJson(url.toString(), { requiresAuth: true });
+  }
+
+  async getDocketAlertsByDocket(docketId, { pageSize = 20 } = {}) {
+    if (!this.hasDocketAlertAccess() || !Number(docketId)) {
+      return [];
+    }
+
+    let nextUrl = null;
+    const results = [];
+
+    do {
+      const payload = await this.listDocketAlerts({
+        cursorUrl: nextUrl,
+        docketId,
+        pageSize
+      });
+      results.push(...(payload.results || []));
+      nextUrl = payload.next || null;
+    } while (nextUrl);
+
+    return results;
+  }
+
+  async createDocketAlert(docketId) {
+    if (!this.hasDocketAlertAccess() || !Number(docketId)) {
+      return null;
+    }
+
+    const body = new URLSearchParams();
+    body.set("docket", String(docketId));
+    return this.fetchJson(`${this.baseUrl}/docket-alerts/`, {
+      requiresAuth: true,
+      method: "POST",
+      body,
+      contentType: "application/x-www-form-urlencoded; charset=utf-8"
+    });
+  }
+
+  async updateDocketAlert(alertId, { alertType = 1 } = {}) {
+    if (!this.hasDocketAlertAccess() || !Number(alertId)) {
+      return null;
+    }
+
+    const body = new URLSearchParams();
+    body.set("alert_type", String(alertType));
+    return this.fetchJson(`${this.baseUrl}/docket-alerts/${encodeURIComponent(String(alertId))}/`, {
+      requiresAuth: true,
+      method: "PATCH",
+      body,
+      contentType: "application/x-www-form-urlencoded; charset=utf-8"
+    });
   }
 
   async requestDocketViaRecapFetch({
@@ -192,6 +266,29 @@ export class CourtListenerClient {
       throw error;
     }
   }
+}
+
+export function extractCourtListenerWebhookDocketId(entry = {}) {
+  if (Number(entry?.docket) > 0) {
+    return String(Number(entry.docket));
+  }
+
+  if (entry?.docket) {
+    const match = String(entry.docket).match(/dockets\/(\d+)/);
+    if (match?.[1]) {
+      return String(match[1]);
+    }
+  }
+
+  if (Number(entry?.docket_id) > 0) {
+    return String(Number(entry.docket_id));
+  }
+
+  if (entry?.docket_id) {
+    return String(entry.docket_id);
+  }
+
+  return null;
 }
 
 function delay(ms) {

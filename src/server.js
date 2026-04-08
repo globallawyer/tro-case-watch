@@ -8,7 +8,7 @@ import zlib from "node:zlib";
 import { URL, fileURLToPath } from "node:url";
 import { config } from "./config.js";
 import { Store } from "./db.js";
-import { CourtListenerClient } from "./providers/courtlistener.js";
+import { CourtListenerClient, extractCourtListenerWebhookDocketId } from "./providers/courtlistener.js";
 import { CourtFeedClient } from "./providers/courtfeed.js";
 import { RecentFilingsClient } from "./providers/recentfilings.js";
 import { LawFirmClient } from "./providers/lawfirm.js";
@@ -524,21 +524,6 @@ async function readRequestBody(request) {
   return text ? JSON.parse(text) : {};
 }
 
-function extractCourtListenerWebhookDocketId(entry = {}) {
-  if (entry?.docket) {
-    const match = String(entry.docket).match(/dockets\/(\d+)/);
-    if (match?.[1]) {
-      return String(match[1]);
-    }
-  }
-
-  if (entry?.docket_id) {
-    return String(entry.docket_id);
-  }
-
-  return null;
-}
-
 async function handleCourtListenerWebhook(request, response, pathname) {
   const webhookSecret = String(config.courtListener?.webhookSecret || "").trim();
   if (!webhookSecret) {
@@ -565,10 +550,22 @@ async function handleCourtListenerWebhook(request, response, pathname) {
 
     let processed = 0;
     let skipped = 0;
+    let reupped = 0;
     const timestamp = new Date().toISOString();
     const findCaseByCLId = store.db.prepare(
       "SELECT id, case_name, docket_number FROM cases WHERE courtlistener_docket_id = ? LIMIT 1"
     );
+    const casesToRefresh = new Set();
+
+    const oldAlerts = [
+      ...(Array.isArray(body?.payload?.old_alerts) ? body.payload.old_alerts : []),
+      ...(Array.isArray(body?.payload?.disabled_alerts) ? body.payload.disabled_alerts : [])
+    ];
+    if (oldAlerts.length) {
+      const reupResult = await syncService.reupCourtListenerAlertsFromWebhook(oldAlerts);
+      reupped += Number(reupResult.processed || 0);
+      skipped += Number(reupResult.skipped || 0);
+    }
 
     for (const entry of results) {
       try {
@@ -605,6 +602,7 @@ async function handleCourtListenerWebhook(request, response, pathname) {
           last_synced_at: timestamp
         });
         processed += 1;
+        casesToRefresh.add(Number(caseRow.id));
       } catch (error) {
         console.error("[webhook] entry error:", error);
         skipped += 1;
@@ -615,8 +613,24 @@ async function handleCourtListenerWebhook(request, response, pathname) {
       clearPublicResponseCache();
     }
 
-    console.log(`[webhook] Done: processed=${processed}, skipped=${skipped}`);
-    return sendJson(response, 200, { received: true, processed, skipped, idempotencyKey });
+    const latestEntryId = [...results]
+      .map((item) => Number(item?.id || 0))
+      .filter((value) => Number.isFinite(value) && value > 0)
+      .sort((left, right) => right - left)[0] || null;
+
+    for (const caseId of casesToRefresh) {
+      syncService.handleCourtListenerWebhookEvent(caseId, {
+        eventType: webhookMeta.event_type || null,
+        idempotencyKey,
+        latestEntryId,
+        entryCount: results.length
+      }).catch((error) => {
+        console.error(`[webhook] follow-up refresh failed for case ${caseId}:`, error);
+      });
+    }
+
+    console.log(`[webhook] Done: processed=${processed}, skipped=${skipped}, reupped=${reupped}`);
+    return sendJson(response, 200, { received: true, processed, skipped, reupped, idempotencyKey });
   } catch (error) {
     console.error("[webhook] Error:", error);
     return sendJson(response, 500, { error: "Webhook processing error" });
@@ -2597,6 +2611,20 @@ async function handleApi(request, response, pathname, searchParams) {
     });
   }
 
+  if (request.method === "POST" && pathname === "/api/admin/courtlistener-alert-sync") {
+    if (!authorize(request)) {
+      return sendJson(response, 401, { error: "Unauthorized" });
+    }
+
+    spawnDetachedTask(["--sync-only", "courtlistener-alerts"]);
+    clearPublicResponseCache();
+
+    return sendJson(response, 202, {
+      accepted: true,
+      mode: "courtlistener-alert-sync"
+    });
+  }
+
   if (request.method === "POST" && pathname === "/api/admin/court-feed-sync") {
     if (!authorize(request)) {
       return sendJson(response, 401, { error: "Unauthorized" });
@@ -3060,6 +3088,19 @@ async function main() {
       process.exit(0);
     }
 
+    if (rawMode === "courtlistener-alerts") {
+      const limitIndex = process.argv.indexOf("--limit");
+      const startDateIndex = process.argv.indexOf("--start-date");
+      const force = process.argv.includes("--force");
+      const result = await syncService.syncCourtListenerAlertSubscriptions({
+        limit: limitIndex !== -1 ? Math.max(Number(process.argv[limitIndex + 1] || 0), 1) : null,
+        startDate: startDateIndex !== -1 ? String(process.argv[startDateIndex + 1] || "").trim() : null,
+        force
+      });
+      console.log(`[sync] completed courtlistener-alerts ${JSON.stringify(result)}`);
+      process.exit(0);
+    }
+
     if (rawMode === "recompute-case-summaries") {
       const batchSizeIndex = process.argv.indexOf("--batch-size");
       const limitIndex = process.argv.indexOf("--limit");
@@ -3201,6 +3242,16 @@ async function main() {
 
       spawnDetachedTask(["--sync-only", "backfill"]);
     }, config.sync.backfillIntervalMs);
+  }
+
+  if (courtListener.hasDocketAlertAccess()) {
+    setTimeout(() => {
+      spawnDetachedTask(["--sync-only", "courtlistener-alerts"]);
+    }, Math.max(Number(config.courtListener?.docketAlertSyncBootstrapDelayMs || 90 * 1000), 10 * 1000));
+
+    setInterval(() => {
+      spawnDetachedTask(["--sync-only", "courtlistener-alerts"]);
+    }, Math.max(Number(config.courtListener?.docketAlertSyncIntervalMs || 6 * 60 * 60 * 1000), 60 * 60 * 1000));
   }
 
   if (config.reports?.dailyEmail?.enabled) {

@@ -563,6 +563,27 @@ function parseCourtListenerResourceId(value) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+function normalizeCourtListenerAlertType(value, fallback = null) {
+  const parsed = Number(value ?? fallback ?? 0);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function compareCourtListenerAlerts(left = {}, right = {}) {
+  const leftActive = normalizeCourtListenerAlertType(left.alert_type, left.alertType) === 1;
+  const rightActive = normalizeCourtListenerAlertType(right.alert_type, right.alertType) === 1;
+  if (leftActive !== rightActive) {
+    return leftActive ? -1 : 1;
+  }
+
+  const leftModified = Date.parse(String(left.date_modified || left.dateModified || left.date_created || left.dateCreated || "")) || 0;
+  const rightModified = Date.parse(String(right.date_modified || right.dateModified || right.date_created || right.dateCreated || "")) || 0;
+  if (leftModified !== rightModified) {
+    return rightModified - leftModified;
+  }
+
+  return Number(right.id || 0) - Number(left.id || 0);
+}
+
 function getLatestKnownEntryFiledAt(store, caseId) {
   if (!Number(caseId)) {
     return null;
@@ -871,6 +892,7 @@ export class CaseSyncService {
           searchEnabled: true,
           docketEnabled: this.courtListener.hasDocketAccess(),
           docketEntriesEnabled: this.courtListener.hasDocketEntriesAccess() && !knownNoDocketEntries,
+          docketAlertsEnabled: this.courtListener.hasDocketAlertAccess(),
           recapFetchEnabled: this.courtListener.hasRecapFetchAccess()
         },
         priorityFeed: this.priorityFeed.getStatus(),
@@ -3210,6 +3232,287 @@ export class CaseSyncService {
     });
   }
 
+  persistCourtListenerDocketAlertState(caseRow, docketAlert = {}, {
+    syncedAt = null,
+    state = null,
+    lastWebhookAt = null,
+    lastWebhookEventType = null,
+    lastWebhookEntryId = null,
+    lastWebhookEntryCount = null,
+    lastWebhookIdempotencyKey = null,
+    reuppedAt = null
+  } = {}) {
+    if (!caseRow?.id) {
+      return caseRow;
+    }
+
+    const timestamp = syncedAt || new Date().toISOString();
+    const previousState = caseRow.raw?.courtlistener?.docketAlert || {};
+    const alertType = normalizeCourtListenerAlertType(
+      docketAlert.alert_type,
+      docketAlert.alertType ?? previousState.alertType ?? previousState.alert_type ?? null
+    );
+    const nextState = {
+      ...previousState,
+      ...docketAlert,
+      id: Number(docketAlert.id || previousState.id || 0) || null,
+      docket: Number(docketAlert.docket || caseRow.courtlistener_docket_id || previousState.docket || 0) || null,
+      alertType,
+      secretKey: docketAlert.secret_key || docketAlert.secretKey || previousState.secretKey || "",
+      dateCreated: docketAlert.date_created || docketAlert.dateCreated || previousState.dateCreated || null,
+      dateModified: docketAlert.date_modified || docketAlert.dateModified || previousState.dateModified || timestamp,
+      dateLastHit: docketAlert.date_last_hit || docketAlert.dateLastHit || previousState.dateLastHit || null,
+      syncedAt: timestamp,
+      state: state || (alertType === 1 ? "active" : alertType === 0 ? "disabled" : previousState.state || "unknown"),
+      lastWebhookAt: lastWebhookAt || previousState.lastWebhookAt || null,
+      lastWebhookEventType: lastWebhookEventType || previousState.lastWebhookEventType || null,
+      lastWebhookEntryId: lastWebhookEntryId ?? previousState.lastWebhookEntryId ?? null,
+      lastWebhookEntryCount: lastWebhookEntryCount ?? previousState.lastWebhookEntryCount ?? null,
+      lastWebhookIdempotencyKey: lastWebhookIdempotencyKey || previousState.lastWebhookIdempotencyKey || null,
+      reuppedAt: reuppedAt || previousState.reuppedAt || null
+    };
+
+    return this.store.upsertCase({
+      source_case_key: caseRow.source_case_key,
+      primary_source: caseRow.primary_source,
+      source_case_id: caseRow.source_case_id,
+      courtlistener_docket_id: caseRow.courtlistener_docket_id,
+      pacer_case_id: caseRow.pacer_case_id,
+      court_id: caseRow.court_id,
+      court_name: caseRow.court_name,
+      case_name: caseRow.case_name,
+      docket_number: caseRow.docket_number,
+      date_filed: caseRow.date_filed,
+      date_terminated: caseRow.date_terminated,
+      cause: caseRow.cause,
+      nature_of_suit: caseRow.nature_of_suit,
+      status: caseRow.status,
+      tags_marker: caseRow.tags_marker,
+      docket_url: caseRow.docket_url,
+      source_urls: caseRow.source_urls || [],
+      plaintiffs: caseRow.plaintiffs || [],
+      defendants: caseRow.defendants || [],
+      recent_activity_summary: caseRow.recent_activity_summary,
+      latest_docket_filed_at: caseRow.latest_docket_filed_at,
+      latest_docket_number: caseRow.latest_docket_number,
+      docket_count: caseRow.docket_count,
+      last_seen_at: caseRow.last_seen_at || timestamp,
+      last_synced_at: timestamp,
+      last_docket_sync_at: caseRow.last_docket_sync_at,
+      raw: {
+        ...(caseRow.raw || {}),
+        courtlistener: {
+          ...(caseRow.raw?.courtlistener || {}),
+          docketAlert: nextState
+        }
+      }
+    });
+  }
+
+  async ensureCourtListenerDocketAlert(caseRow, { force = false } = {}) {
+    if (!caseRow?.id || !this.courtListener.hasDocketAlertAccess()) {
+      return { subscribed: false, reason: "not-applicable" };
+    }
+
+    const docketId = Number(caseRow.courtlistener_docket_id || 0);
+    if (!docketId) {
+      return { subscribed: false, reason: "missing-docket-id" };
+    }
+
+    const previousState = caseRow.raw?.courtlistener?.docketAlert || {};
+    const previousSyncedAtMs = Date.parse(String(previousState.syncedAt || previousState.updatedAt || previousState.dateModified || ""));
+    const staleAfterMs = Math.max(Number(this.config.courtListener?.docketAlertSyncStaleAfterHours || 24), 1) * 60 * 60 * 1000;
+    const previousAlertType = normalizeCourtListenerAlertType(previousState.alertType, previousState.alert_type);
+
+    if (!force && Number(previousState.id || 0) > 0 && previousAlertType === 1 && Number.isFinite(previousSyncedAtMs) && Date.now() - previousSyncedAtMs < staleAfterMs) {
+      return {
+        subscribed: true,
+        created: false,
+        reupped: false,
+        skipped: true,
+        reason: "fresh",
+        alertId: Number(previousState.id || 0)
+      };
+    }
+
+    const existingAlerts = await this.courtListener.getDocketAlertsByDocket(docketId);
+    const preferredAlert = [...existingAlerts].sort(compareCourtListenerAlerts)[0] || null;
+    const timestamp = new Date().toISOString();
+
+    if (preferredAlert?.id) {
+      if (normalizeCourtListenerAlertType(preferredAlert.alert_type, preferredAlert.alertType) !== 1) {
+        const updatedAlert = await this.courtListener.updateDocketAlert(preferredAlert.id, { alertType: 1 });
+        this.persistCourtListenerDocketAlertState(caseRow, updatedAlert || preferredAlert, {
+          syncedAt: timestamp,
+          state: "active",
+          reuppedAt: timestamp
+        });
+        return {
+          subscribed: true,
+          created: false,
+          reupped: true,
+          skipped: false,
+          alertId: Number((updatedAlert || preferredAlert).id || 0)
+        };
+      }
+
+      this.persistCourtListenerDocketAlertState(caseRow, preferredAlert, {
+        syncedAt: timestamp,
+        state: "active"
+      });
+      return {
+        subscribed: true,
+        created: false,
+        reupped: false,
+        skipped: false,
+        alertId: Number(preferredAlert.id || 0)
+      };
+    }
+
+    const createdAlert = await this.courtListener.createDocketAlert(docketId);
+    if (!createdAlert?.id) {
+      return { subscribed: false, reason: "create-failed" };
+    }
+
+    this.persistCourtListenerDocketAlertState(caseRow, createdAlert, {
+      syncedAt: timestamp,
+      state: "active"
+    });
+    return {
+      subscribed: true,
+      created: true,
+      reupped: false,
+      skipped: false,
+      alertId: Number(createdAlert.id || 0)
+    };
+  }
+
+  async syncCourtListenerAlertSubscriptions({
+    limit = null,
+    startDate = null,
+    force = false
+  } = {}) {
+    if (!this.courtListener.hasDocketAlertAccess()) {
+      return {
+        candidateCases: 0,
+        subscribedCases: 0,
+        createdAlerts: 0,
+        reuppedAlerts: 0,
+        skippedCases: 0,
+        failedCases: 0,
+        note: "CourtListener docket alert API 未启用或没有 token。"
+      };
+    }
+
+    const maxCases = Math.max(
+      Number(limit || this.config.courtListener?.docketAlertSyncMaxCasesPerRun || 0),
+      1
+    );
+    const rows = this.store.getCasesNeedingCourtListenerAlertSync(maxCases, {
+      startDate: startDate || this.config.sync.startDate,
+      staleAfterHours: this.config.courtListener?.docketAlertSyncStaleAfterHours || 24,
+      force
+    });
+
+    let subscribedCases = 0;
+    let createdAlerts = 0;
+    let reuppedAlerts = 0;
+    let skippedCases = 0;
+    let failedCases = 0;
+
+    for (const row of rows) {
+      try {
+        const result = await this.ensureCourtListenerDocketAlert(row, { force });
+        if (result.subscribed) {
+          subscribedCases += 1;
+        }
+        if (result.created) {
+          createdAlerts += 1;
+        }
+        if (result.reupped) {
+          reuppedAlerts += 1;
+        }
+        if (result.skipped) {
+          skippedCases += 1;
+        }
+      } catch (error) {
+        failedCases += 1;
+        console.error(`[courtlistener-alerts] case ${row.id} failed: ${error.message}`);
+      }
+    }
+
+    return {
+      candidateCases: rows.length,
+      subscribedCases,
+      createdAlerts,
+      reuppedAlerts,
+      skippedCases,
+      failedCases,
+      note: rows.length
+        ? `CourtListener docket alert 本轮处理 ${rows.length} 个案件。`
+        : "CourtListener docket alert 本轮没有待订阅或待续订案件。"
+    };
+  }
+
+  async handleCourtListenerWebhookEvent(caseId, {
+    eventType = null,
+    idempotencyKey = null,
+    latestEntryId = null,
+    entryCount = 0
+  } = {}) {
+    const caseRow = this.store.getCase(caseId);
+    if (!caseRow) {
+      return null;
+    }
+
+    this.persistCourtListenerDocketAlertState(this.store.getCase(caseId) || caseRow, {}, {
+      syncedAt: new Date().toISOString(),
+      state: "active",
+      lastWebhookAt: new Date().toISOString(),
+      lastWebhookEventType: eventType,
+      lastWebhookEntryId: latestEntryId,
+      lastWebhookEntryCount: entryCount,
+      lastWebhookIdempotencyKey: idempotencyKey
+    });
+
+    return this.enrichCaseWithCourtListener(caseId, { force: true });
+  }
+
+  async reupCourtListenerAlertsFromWebhook(alerts = []) {
+    if (!this.courtListener.hasDocketAlertAccess() || !this.config.courtListener?.autoReupAlerts) {
+      return { processed: 0, skipped: alerts.length, failed: 0 };
+    }
+
+    let processed = 0;
+    let skipped = 0;
+    let failed = 0;
+
+    for (const alert of alerts) {
+      const docketId = Number(alert?.docket || 0);
+      const caseRow = this.store.getCaseByCourtListenerDocketId(docketId);
+
+      if (!caseRow || !Number(alert?.id || 0)) {
+        skipped += 1;
+        continue;
+      }
+
+      try {
+        const updated = await this.courtListener.updateDocketAlert(alert.id, { alertType: 1 });
+        this.persistCourtListenerDocketAlertState(caseRow, updated || alert, {
+          syncedAt: new Date().toISOString(),
+          state: "active",
+          reuppedAt: new Date().toISOString()
+        });
+        processed += 1;
+      } catch (error) {
+        failed += 1;
+        console.error(`[courtlistener-alerts] re-up alert ${alert.id} failed: ${error.message}`);
+      }
+    }
+
+    return { processed, skipped, failed };
+  }
+
   async runCourtListenerRecapFetch(caseRow, { force = false } = {}) {
     if (!caseRow || !this.courtListener.hasRecapFetchAccess() || !hasCivilCaseDocket(caseRow)) {
       return { requested: false, reason: "not-applicable" };
@@ -4782,6 +5085,11 @@ export class CaseSyncService {
       last_docket_sync_at: timestamp,
       raw: mergedRaw
     });
+
+    if (this.courtListener.hasDocketAlertAccess()) {
+      const refreshedCase = this.store.getCase(caseRow.id) || caseRow;
+      await this.ensureCourtListenerDocketAlert(refreshedCase, { force: false }).catch(() => null);
+    }
 
     this.store.refreshCaseDocketSummary(caseRow.id);
     this.store.touchCaseDocketSync(caseRow.id);
