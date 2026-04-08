@@ -2312,7 +2312,7 @@ export class Store {
     const normalizedBatchSize = Math.max(1, Number(batchSize || 1000));
     const normalizedLimit = Math.max(0, Number(limit || 0));
     const rows = normalizedLimit > 0
-      ? this.db.prepare("SELECT * FROM cases ORDER BY id ASC LIMIT ?").all(normalizedLimit)
+      ? this.db.prepare("SELECT * FROM cases ORDER BY id DESC LIMIT ?").all(normalizedLimit)
       : this.db.prepare("SELECT * FROM cases ORDER BY id ASC").all();
 
     let updated = 0;
