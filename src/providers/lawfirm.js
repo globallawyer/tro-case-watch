@@ -697,6 +697,26 @@ function build61troHintUrls(source, { caseName = "", plaintiffs = [], firms = []
   return urls.slice(0, 12);
 }
 
+function limit61troDetailCandidates(links = [], limit = 12) {
+  const ordered = [];
+  const seen = new Set();
+
+  for (const item of links) {
+    const href = normalizePageUrl(item?.href || item);
+    if (!href || seen.has(href)) {
+      continue;
+    }
+
+    seen.add(href);
+    ordered.push(href);
+    if (ordered.length >= limit) {
+      break;
+    }
+  }
+
+  return ordered;
+}
+
 function parseSriplawNoticeRows(html, baseUrl) {
   const table = String(html || "").match(/<table id="tablepress-[^"]+"[\s\S]*?<\/table>/i)?.[0] || "";
   const rows = [];
@@ -1164,6 +1184,22 @@ export class LawFirmClient {
       const detailUrl = extract61troSearchResultLink(html, docketNumber, source.baseUrl);
       if (detailUrl) {
         return detailUrl;
+      }
+
+      const candidateLinks = limit61troDetailCandidates(extract61troDetailLinks(html, source.baseUrl));
+      for (const candidateUrl of candidateLinks) {
+        try {
+          const detailHtml = await this.fetchText(candidateUrl);
+          const item = parse61troCasePage(detailHtml, candidateUrl, source);
+          if (
+            item?.docketNumber &&
+            normalizeDocketLookupCoreKey(item.docketNumber) === normalizeDocketLookupCoreKey(docketNumber)
+          ) {
+            return candidateUrl;
+          }
+        } catch {
+          continue;
+        }
       }
 
       for (const nextPage of extract61troPaginationLinks(html, normalizedUrl)) {

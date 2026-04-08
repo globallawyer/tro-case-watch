@@ -28,8 +28,7 @@ test("61tro docket lookup falls back to tag pages and keeps richer timeline text
   const tagPageTwo = `
     <html>
       <body>
-        <h4><a href="/detail/8739.html">2026-cv-00011</a></h4>
-        <h5><a href="/detail/8739.html">XYZ Corporation v. The Partnerships Identified On Schedule A</a></h5>
+        <h4><a href="/detail/8739.html">XYZ Corporation v. The Partnerships Identified On Schedule A</a></h4>
       </body>
     </html>
   `;
