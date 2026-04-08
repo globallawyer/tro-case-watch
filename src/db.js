@@ -2316,35 +2316,47 @@ export class Store {
       : this.db.prepare("SELECT * FROM cases ORDER BY id ASC").all();
 
     let updated = 0;
+    let skipped = 0;
+    const skippedCaseIds = [];
     for (const chunk of chunkArray(rows, normalizedBatchSize)) {
       for (const row of chunk) {
-        const hydrated = hydrateCase(row);
-        const metadata = buildCaseListMetadata(hydrated, {
-          updatedAt: hydrated.updated_at
-        });
-        this.db
-          .prepare(`
-            UPDATE cases
-            SET is_watchlist = ?,
-                is_tro = ?,
-                is_schedule_a = ?,
-                is_seller_watch = ?,
-                priority_feed_row_count = ?,
-                priority_activity_at = ?,
-                search_text = ?
-            WHERE id = ?
-          `)
-          .run(
-            metadata.is_watchlist,
-            metadata.is_tro,
-            metadata.is_schedule_a,
-            metadata.is_seller_watch,
-            metadata.priority_feed_row_count,
-            metadata.priority_activity_at,
-            metadata.search_text,
-            hydrated.id
+        try {
+          const hydrated = hydrateCase(row);
+          const metadata = buildCaseListMetadata(hydrated, {
+            updatedAt: hydrated.updated_at
+          });
+          this.db
+            .prepare(`
+              UPDATE cases
+              SET is_watchlist = ?,
+                  is_tro = ?,
+                  is_schedule_a = ?,
+                  is_seller_watch = ?,
+                  priority_feed_row_count = ?,
+                  priority_activity_at = ?,
+                  search_text = ?
+              WHERE id = ?
+            `)
+            .run(
+              metadata.is_watchlist,
+              metadata.is_tro,
+              metadata.is_schedule_a,
+              metadata.is_seller_watch,
+              metadata.priority_feed_row_count,
+              metadata.priority_activity_at,
+              metadata.search_text,
+              hydrated.id
+            );
+          updated += 1;
+        } catch (error) {
+          skipped += 1;
+          if (skippedCaseIds.length < 25) {
+            skippedCaseIds.push(Number(row.id || 0) || null);
+          }
+          console.warn(
+            `[rebuild-case-fast-path] skipping case ${row.id}: ${error instanceof Error ? error.message : String(error)}`
           );
-        updated += 1;
+        }
       }
     }
 
@@ -2352,6 +2364,8 @@ export class Store {
     this.invalidateCaseViews();
     return {
       updatedCases: updated,
+      skippedCases: skipped,
+      skippedCaseIds,
       batchSize: normalizedBatchSize,
       rebuiltFts: Boolean(fts.rebuilt)
     };
