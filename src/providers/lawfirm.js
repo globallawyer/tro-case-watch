@@ -89,9 +89,45 @@ function parseDocketNumber(value) {
   return `${division}${match[2]}-cv-${match[3]}`;
 }
 
+function normalizeLawFirmCourtLookup(value) {
+  const raw = cleanText(value);
+  if (!raw) {
+    return "";
+  }
+
+  const noWhitespaceKey = raw.replace(/\s+/g, "");
+  const mappedChinese = TRO61_COURT_NAME_TO_META[noWhitespaceKey];
+  if (mappedChinese?.courtName) {
+    return normalizeLookupText(mappedChinese.courtName);
+  }
+
+  const normalized = normalizeLookupText(raw)
+    .replace(/^district court\s+/i, "")
+    .trim();
+
+  const directionalAbbrev = normalized.match(/\b([nsewcm]) d ([a-z]+(?: [a-z]+)*)\b/i);
+  if (directionalAbbrev) {
+    const direction = DISTRICT_DIRECTION_MAP[String(directionalAbbrev[1] || "").toUpperCase()];
+    const stateName = directionalAbbrev[2];
+    if (direction && stateName) {
+      return normalizeLookupText(`${direction} District of ${stateName}`);
+    }
+  }
+
+  const courtCodeMatch = normalized.match(/\b([a-z]{4,5})\b/i);
+  if (courtCodeMatch) {
+    const courtName = courtIdToName(courtCodeMatch[1]);
+    if (courtName) {
+      return normalizeLookupText(courtName);
+    }
+  }
+
+  return normalized;
+}
+
 function lawFirmMatchesCourtName(item = {}, courtName = "") {
-  const left = normalizeLookupText(item?.courtName || "");
-  const right = normalizeLookupText(courtName);
+  const left = normalizeLawFirmCourtLookup(item?.courtName || "");
+  const right = normalizeLawFirmCourtLookup(courtName);
   if (!right) {
     return true;
   }

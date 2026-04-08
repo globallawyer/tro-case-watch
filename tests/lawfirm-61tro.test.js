@@ -88,7 +88,7 @@ test("61tro docket lookup falls back to tag pages and keeps richer timeline text
   };
 
   const item = await client.lookup61troByDocket(source, "26-cv-00011", {
-    courtName: "Northern District of Illinois",
+    courtName: "District Court, N.D. Illinois",
     caseName: "XYZ Corporation v. The Partnerships Identified On Schedule A"
   });
 
