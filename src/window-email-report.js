@@ -273,6 +273,11 @@ async function main() {
   const timeZone = args.timeZone || config.reports?.dailyEmail?.timeZone || "Asia/Shanghai";
   const untilIso = args.untilIso || process.env.WINDOW_EMAIL_REPORT_UNTIL || null;
 
+  if (!config.reports?.windowEmail?.enabled && !args.force) {
+    console.log(JSON.stringify({ sent: false, reason: "disabled" }, null, 2));
+    return;
+  }
+
   if (untilIso && Date.now() > Date.parse(untilIso)) {
     console.log(JSON.stringify({ sent: false, reason: "campaign-ended", untilIso }, null, 2));
     return;

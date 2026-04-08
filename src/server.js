@@ -3198,6 +3198,25 @@ async function main() {
       process.exit(0);
     }
 
+    if (rawMode === "rebuild-case-fast-path") {
+      const batchSizeIndex = process.argv.indexOf("--batch-size");
+      const limitIndex = process.argv.indexOf("--limit");
+      const result = store.rebuildCaseFastPathColumns({
+        batchSize: batchSizeIndex !== -1 ? Math.max(Number(process.argv[batchSizeIndex + 1] || 1000), 1) : 1000,
+        limit: limitIndex !== -1 ? Math.max(Number(process.argv[limitIndex + 1] || 0), 0) : 0
+      });
+      console.log(`[sync] completed rebuild-case-fast-path ${JSON.stringify(result)}`);
+      process.exit(0);
+    }
+
+    if (rawMode === "cleanup-window-email") {
+      const result = store.cleanupWindowEmailArtifacts({
+        vacuum: process.argv.includes("--vacuum")
+      });
+      console.log(`[sync] completed cleanup-window-email ${JSON.stringify(result)}`);
+      process.exit(0);
+    }
+
     if (rawMode === "purge-non-watchlist") {
       const limitIndex = process.argv.indexOf("--limit");
       const startDateIndex = process.argv.indexOf("--start-date");

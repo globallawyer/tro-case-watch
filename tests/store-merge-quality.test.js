@@ -299,6 +299,110 @@ test("getCase keeps distinct same-day cross-source docket entries separate", () 
   }
 });
 
+test("rebuildCaseFastPathColumns restores case search and category flags from stored case rows", () => {
+  const { store, cleanup } = createTempStore();
+
+  try {
+    const savedCase = store.upsertCase({
+      source_case_key: "case:ilnd:25-cv-10191",
+      primary_source: "courtlistener",
+      source_case_id: "72099599",
+      court_id: "ilnd",
+      court_name: "Northern District of Illinois",
+      case_name: "Acme Corporation v. The Partnerships Identified on Schedule A",
+      docket_number: "1:25-cv-10191",
+      date_filed: "2025-11-02",
+      tags_marker: "|tro|schedule_a|seller_tro|",
+      plaintiffs: ["Acme Corporation"],
+      recent_activity_summary: "Temporary restraining order entered",
+      raw: {
+        priorityFeed: {
+          lawFirm: "Sriplaw"
+        }
+      }
+    });
+
+    store.db.exec(`
+      UPDATE cases
+      SET search_text = NULL,
+          priority_activity_at = NULL,
+          is_watchlist = NULL,
+          is_tro = NULL,
+          is_schedule_a = NULL,
+          is_seller_watch = NULL,
+          priority_feed_row_count = NULL
+    `);
+
+    const rebuild = store.rebuildCaseFastPathColumns();
+    const payload = store.listCases({
+      startDate: "2025-01-01",
+      category: "seller_watch",
+      page: 1,
+      pageSize: 25,
+      search: "sriplaw",
+      court: ""
+    });
+    const row = store.db.prepare(`
+      SELECT search_text, priority_activity_at, is_watchlist, is_tro, is_schedule_a, is_seller_watch
+      FROM cases
+      WHERE id = ?
+    `).get(savedCase.id);
+
+    assert.equal(rebuild.updatedCases, 1);
+    assert.equal(typeof rebuild.rebuiltFts, "boolean");
+    assert.equal(payload.total, 1);
+    assert.equal(payload.items[0].id, savedCase.id);
+    assert.match(String(row.search_text || ""), /sriplaw/);
+    assert.equal(row.is_watchlist, 1);
+    assert.equal(row.is_tro, 1);
+    assert.equal(row.is_schedule_a, 1);
+    assert.equal(row.is_seller_watch, 1);
+    assert.ok(row.priority_activity_at);
+  } finally {
+    cleanup();
+  }
+});
+
+test("cleanupWindowEmailArtifacts deletes legacy 3-hour report checkpoints and sync runs", () => {
+  const { store, cleanup } = createTempStore();
+
+  try {
+    store.saveCheckpoint("window-email-report:Asia/Shanghai:3:foo:test@example.com", { sent: true });
+    store.db.prepare(`
+      INSERT INTO sync_runs (
+        provider,
+        mode,
+        status,
+        started_at,
+        finished_at,
+        stats_json,
+        error_text
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      "window-email",
+      "report-3h",
+      "succeeded",
+      new Date().toISOString(),
+      new Date().toISOString(),
+      "{}",
+      null
+    );
+
+    const result = store.cleanupWindowEmailArtifacts();
+    const remainingCheckpoint = store.getCheckpoint("window-email-report:Asia/Shanghai:3:foo:test@example.com");
+    const remainingRuns = Number(
+      store.db.prepare(`SELECT COUNT(*) AS n FROM sync_runs WHERE provider = 'window-email'`).get()?.n || 0
+    );
+
+    assert.equal(result.checkpointsDeleted, 1);
+    assert.equal(result.syncRunsDeleted, 1);
+    assert.equal(remainingCheckpoint, null);
+    assert.equal(remainingRuns, 0);
+  } finally {
+    cleanup();
+  }
+});
+
 test("reapStaleSyncRuns skips SQLITE_BUSY rows without crashing the app", () => {
   const { store, cleanup } = createTempStore();
 

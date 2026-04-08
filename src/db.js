@@ -52,6 +52,25 @@ function toTimestamp(value) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function getTableColumns(db, tableName) {
+  return new Set(
+    db
+      .prepare(`PRAGMA table_info(${tableName})`)
+      .all()
+      .map((row) => String(row?.name || "").trim())
+      .filter(Boolean)
+  );
+}
+
+function ensureTableColumns(db, tableName, columnDefinitions = {}) {
+  const existing = getTableColumns(db, tableName);
+  for (const [columnName, definition] of Object.entries(columnDefinitions)) {
+    if (!existing.has(columnName)) {
+      db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${definition}`);
+    }
+  }
+}
+
 function isSqliteBusyError(error) {
   const message = String(error?.message || "").toLowerCase();
   return (
@@ -430,6 +449,22 @@ function getCasePriorityActivityAt(caseLike = {}) {
 }
 
 const CASE_PRIORITY_ACTIVITY_SQL = `MAX(COALESCE(updated_at, ''), COALESCE(latest_docket_filed_at, ''), COALESCE(date_filed, ''))`;
+const CASE_SEARCH_TEXT_SQL = `lower(trim(
+  COALESCE(case_name, '') || ' ' ||
+  COALESCE(case_name_zh, '') || ' ' ||
+  COALESCE(docket_number, '') || ' ' ||
+  lower(replace(replace(replace(replace(COALESCE(docket_number, ''), ':', ' '), '-', ' '), '.', ' '), '/', ' ')) || ' ' ||
+  COALESCE(court_name, '') || ' ' ||
+  COALESCE(recent_activity_summary, '') || ' ' ||
+  COALESCE(recent_activity_summary_zh, '') || ' ' ||
+  COALESCE(plaintiffs_json, '') || ' ' ||
+  COALESCE(defendants_json, '') || ' ' ||
+  COALESCE(source_urls_json, '') || ' ' ||
+  replace(COALESCE(tags_marker, ''), '|', ' ') || ' ' ||
+  COALESCE(json_extract(raw_json, '$.priorityFeed.lawFirm'), '') || ' ' ||
+  COALESCE(json_extract(raw_json, '$.firm[0]'), '') || ' ' ||
+  COALESCE(json_extract(raw_json, '$.party[0]'), '')
+))`;
 
 function chunkArray(values = [], size = 500) {
   const chunks = [];
@@ -605,6 +640,63 @@ function formatShanghaiDateKey(value) {
   return shanghaiDateFormatter.format(date);
 }
 
+function hasTagMarker(marker = "", tag = "") {
+  const normalizedTag = String(tag || "").trim();
+  if (!normalizedTag) {
+    return false;
+  }
+
+  return String(marker || "").includes(`|${normalizedTag}|`);
+}
+
+function deriveCategoryFlags(tagsMarker = "") {
+  const isTro = hasTagMarker(tagsMarker, "tro");
+  const isScheduleA = hasTagMarker(tagsMarker, "schedule_a");
+  const isSellerWatch = hasTagMarker(tagsMarker, "seller_tro");
+  return {
+    is_watchlist: isTro || isScheduleA || isSellerWatch ? 1 : 0,
+    is_tro: isTro ? 1 : 0,
+    is_schedule_a: isScheduleA ? 1 : 0,
+    is_seller_watch: isSellerWatch ? 1 : 0
+  };
+}
+
+function buildCaseSearchText(caseLike, insights = null) {
+  const derived = insights || deriveCaseInsights(caseLike);
+  return normalizeText([
+    caseLike.case_name,
+    caseLike.case_name_zh,
+    caseLike.docket_number,
+    normalizeDocket(caseLike.docket_number),
+    caseLike.court_name,
+    caseLike.recent_activity_summary,
+    caseLike.recent_activity_summary_zh,
+    derived?.brand_name,
+    derived?.plaintiff_name,
+    derived?.lead_law_firm,
+    ...(caseLike.plaintiffs || []),
+    ...(caseLike.defendants || []),
+    ...(caseLike.source_urls || [])
+  ].join(" | "));
+}
+
+function buildCaseListMetadata(caseLike, {
+  insights = null,
+  updatedAt = null
+} = {}) {
+  const derived = insights || deriveCaseInsights(caseLike);
+  const effectiveRow = {
+    ...caseLike,
+    updated_at: updatedAt || caseLike.updated_at || null
+  };
+  return {
+    ...deriveCategoryFlags(caseLike.tags_marker || buildTagsMarker(caseLike.tags || [])),
+    priority_feed_row_count: Math.max(0, Number(getPriorityFeedMetadataRowCount(caseLike) || 0)),
+    priority_activity_at: getCasePriorityActivityAt(effectiveRow) || null,
+    search_text: buildCaseSearchText(caseLike, derived)
+  };
+}
+
 function buildCaseView(row) {
   const hydrated = applyAuthoritativeDocketPreference(hydrateCase(row));
   const insights = deriveCaseInsights(hydrated);
@@ -614,19 +706,7 @@ function buildCaseView(row) {
     _created_date_shanghai: formatShanghaiDateKey(hydrated.created_at),
     _docket_raw: normalizeText(hydrated.docket_number),
     _docket_normalized: normalizeDocket(hydrated.docket_number),
-    _search_blob: normalizeText([
-      hydrated.case_name,
-      hydrated.case_name_zh,
-      hydrated.docket_number,
-      normalizeDocket(hydrated.docket_number),
-      hydrated.court_name,
-      hydrated.recent_activity_summary,
-      hydrated.recent_activity_summary_zh,
-      insights?.brand_name,
-      insights?.lead_law_firm,
-      ...(hydrated.plaintiffs || []),
-      ...(hydrated.defendants || [])
-    ].join(" | ")),
+    _search_blob: hydrated.search_text || buildCaseSearchText(hydrated, insights),
     _label_blob: normalizeText([
       hydrated.case_name,
       insights?.brand_name,
@@ -1097,6 +1177,23 @@ function buildDocketSearchNeedles(rawSearch) {
     exactNeedles,
     suffixNeedles
   };
+}
+
+function buildFtsMatchQuery(rawSearch) {
+  const tokens = [...new Set(
+    normalizeLookupText(rawSearch)
+      .split(/\s+/)
+      .map((item) => item.trim())
+      .filter(Boolean)
+      .filter((item) => item.length > 1)
+  )];
+  if (!tokens.length) {
+    return "";
+  }
+
+  return tokens
+    .map((token) => `"${token.replace(/"/g, "\"\"")}"*`)
+    .join(" AND ");
 }
 
 function hydrateCase(row) {
@@ -1863,7 +1960,10 @@ function compareEntriesForTimeline(left, right) {
 }
 
 function getPriorityFeedRowCount(caseLike = {}) {
-  return getPriorityFeedMetadataRowCount(caseLike);
+  return Math.max(
+    Number(caseLike?.priority_feed_row_count || 0),
+    Number(getPriorityFeedMetadataRowCount(caseLike) || 0)
+  );
 }
 
 function getPriorityFeedEntries(entries = []) {
@@ -2035,12 +2135,19 @@ export class Store {
         nature_of_suit TEXT,
         status TEXT,
         tags_marker TEXT,
+        is_watchlist INTEGER DEFAULT 0,
+        is_tro INTEGER DEFAULT 0,
+        is_schedule_a INTEGER DEFAULT 0,
+        is_seller_watch INTEGER DEFAULT 0,
+        priority_feed_row_count INTEGER DEFAULT 0,
+        priority_activity_at TEXT,
         docket_url TEXT,
         source_urls_json TEXT,
         plaintiffs_json TEXT,
         defendants_json TEXT,
         recent_activity_summary TEXT,
         recent_activity_summary_zh TEXT,
+        search_text TEXT,
         latest_docket_filed_at TEXT,
         latest_docket_number TEXT,
         docket_count INTEGER DEFAULT 0,
@@ -2113,6 +2220,164 @@ export class Store {
       CREATE INDEX IF NOT EXISTS idx_cases_date_filed ON cases(date_filed);
       CREATE INDEX IF NOT EXISTS idx_docket_entries_case_id ON docket_entries(case_id);
     `);
+    ensureTableColumns(this.db, "cases", {
+      is_watchlist: "INTEGER DEFAULT 0",
+      is_tro: "INTEGER DEFAULT 0",
+      is_schedule_a: "INTEGER DEFAULT 0",
+      is_seller_watch: "INTEGER DEFAULT 0",
+      priority_feed_row_count: "INTEGER DEFAULT 0",
+      priority_activity_at: "TEXT",
+      search_text: "TEXT"
+    });
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_cases_courtlistener_docket_id ON cases(courtlistener_docket_id);
+      CREATE INDEX IF NOT EXISTS idx_cases_watchlist_activity ON cases(is_watchlist, priority_activity_at DESC, updated_at DESC, id DESC);
+      CREATE INDEX IF NOT EXISTS idx_cases_tro_activity ON cases(is_tro, priority_activity_at DESC, updated_at DESC, id DESC);
+      CREATE INDEX IF NOT EXISTS idx_cases_schedule_a_activity ON cases(is_schedule_a, priority_activity_at DESC, updated_at DESC, id DESC);
+      CREATE INDEX IF NOT EXISTS idx_cases_seller_watch_activity ON cases(is_seller_watch, priority_activity_at DESC, updated_at DESC, id DESC);
+      CREATE INDEX IF NOT EXISTS idx_cases_court_activity ON cases(court_id, priority_activity_at DESC, updated_at DESC, id DESC);
+
+      CREATE VIRTUAL TABLE IF NOT EXISTS cases_search_fts
+      USING fts5(search_text, content='cases', content_rowid='id', tokenize='unicode61 remove_diacritics 2');
+
+      CREATE TRIGGER IF NOT EXISTS cases_search_fts_ai AFTER INSERT ON cases BEGIN
+        INSERT INTO cases_search_fts(rowid, search_text)
+        VALUES (new.id, COALESCE(new.search_text, ''));
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS cases_search_fts_ad AFTER DELETE ON cases BEGIN
+        INSERT INTO cases_search_fts(cases_search_fts, rowid, search_text)
+        VALUES ('delete', old.id, COALESCE(old.search_text, ''));
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS cases_search_fts_au AFTER UPDATE OF search_text ON cases BEGIN
+        INSERT INTO cases_search_fts(cases_search_fts, rowid, search_text)
+        VALUES ('delete', old.id, COALESCE(old.search_text, ''));
+        INSERT INTO cases_search_fts(rowid, search_text)
+        VALUES (new.id, COALESCE(new.search_text, ''));
+      END;
+    `);
+  }
+
+  backfillCaseFastPathColumns() {
+    this.db
+      .prepare(`
+        UPDATE cases
+        SET is_tro = CASE WHEN instr(COALESCE(tags_marker, ''), '|tro|') > 0 THEN 1 ELSE 0 END,
+            is_schedule_a = CASE WHEN instr(COALESCE(tags_marker, ''), '|schedule_a|') > 0 THEN 1 ELSE 0 END,
+            is_seller_watch = CASE WHEN instr(COALESCE(tags_marker, ''), '|seller_tro|') > 0 THEN 1 ELSE 0 END,
+            is_watchlist = CASE
+              WHEN instr(COALESCE(tags_marker, ''), '|tro|') > 0
+                OR instr(COALESCE(tags_marker, ''), '|schedule_a|') > 0
+                OR instr(COALESCE(tags_marker, ''), '|seller_tro|') > 0
+              THEN 1
+              ELSE 0
+            END,
+            priority_feed_row_count = COALESCE(CAST(json_extract(raw_json, '$.priorityFeed.rowCount') AS INTEGER), priority_feed_row_count, 0),
+            priority_activity_at = ${CASE_PRIORITY_ACTIVITY_SQL},
+            search_text = ${CASE_SEARCH_TEXT_SQL}
+        WHERE priority_activity_at IS NULL
+           OR search_text IS NULL
+           OR search_text = ''
+           OR is_watchlist IS NULL
+           OR is_tro IS NULL
+           OR is_schedule_a IS NULL
+           OR is_seller_watch IS NULL
+           OR priority_feed_row_count IS NULL
+      `)
+      .run();
+  }
+
+  rebuildCaseSearchFtsIfNeeded() {
+    const caseCount = Number(this.db.prepare("SELECT COUNT(*) AS n FROM cases").get()?.n || 0);
+    const ftsCount = Number(this.db.prepare("SELECT COUNT(*) AS n FROM cases_search_fts").get()?.n || 0);
+    if (caseCount === ftsCount) {
+      return {
+        caseCount,
+        rebuilt: false
+      };
+    }
+
+    this.db.exec(`INSERT INTO cases_search_fts(cases_search_fts) VALUES('rebuild');`);
+    return {
+      caseCount,
+      rebuilt: true
+    };
+  }
+
+  rebuildCaseFastPathColumns({
+    batchSize = 1000,
+    limit = 0
+  } = {}) {
+    const normalizedBatchSize = Math.max(1, Number(batchSize || 1000));
+    const normalizedLimit = Math.max(0, Number(limit || 0));
+    const rows = normalizedLimit > 0
+      ? this.db.prepare("SELECT * FROM cases ORDER BY id ASC LIMIT ?").all(normalizedLimit)
+      : this.db.prepare("SELECT * FROM cases ORDER BY id ASC").all();
+
+    let updated = 0;
+    for (const chunk of chunkArray(rows, normalizedBatchSize)) {
+      for (const row of chunk) {
+        const hydrated = hydrateCase(row);
+        const metadata = buildCaseListMetadata(hydrated, {
+          updatedAt: hydrated.updated_at
+        });
+        this.db
+          .prepare(`
+            UPDATE cases
+            SET is_watchlist = ?,
+                is_tro = ?,
+                is_schedule_a = ?,
+                is_seller_watch = ?,
+                priority_feed_row_count = ?,
+                priority_activity_at = ?,
+                search_text = ?
+            WHERE id = ?
+          `)
+          .run(
+            metadata.is_watchlist,
+            metadata.is_tro,
+            metadata.is_schedule_a,
+            metadata.is_seller_watch,
+            metadata.priority_feed_row_count,
+            metadata.priority_activity_at,
+            metadata.search_text,
+            hydrated.id
+          );
+        updated += 1;
+      }
+    }
+
+    const fts = this.rebuildCaseSearchFtsIfNeeded();
+    this.invalidateCaseViews();
+    return {
+      updatedCases: updated,
+      batchSize: normalizedBatchSize,
+      rebuiltFts: Boolean(fts.rebuilt)
+    };
+  }
+
+  cleanupWindowEmailArtifacts({ vacuum = false } = {}) {
+    const checkpointsDeleted = Number(
+      this.db
+        .prepare(`DELETE FROM checkpoints WHERE checkpoint_key LIKE 'window-email-report:%'`)
+        .run()?.changes || 0
+    );
+    const syncRunsDeleted = Number(
+      this.db
+        .prepare(`DELETE FROM sync_runs WHERE provider = 'window-email'`)
+        .run()?.changes || 0
+    );
+
+    if (vacuum && (checkpointsDeleted > 0 || syncRunsDeleted > 0)) {
+      this.db.exec("VACUUM;");
+    }
+
+    return {
+      checkpointsDeleted,
+      syncRunsDeleted,
+      vacuumed: Boolean(vacuum && (checkpointsDeleted > 0 || syncRunsDeleted > 0))
+    };
   }
 
   invalidateCaseViews() {
@@ -2199,7 +2464,7 @@ export class Store {
         SELECT *
         FROM cases
         WHERE courtlistener_docket_id = ?
-        ORDER BY ${CASE_PRIORITY_ACTIVITY_SQL} DESC, updated_at DESC
+        ORDER BY COALESCE(priority_activity_at, ${CASE_PRIORITY_ACTIVITY_SQL}) DESC, updated_at DESC
         LIMIT 1
       `)
       .get(normalized);
@@ -2232,8 +2497,8 @@ export class Store {
       .prepare(`
         SELECT *
         FROM cases
-        WHERE date(date_filed) >= date(?)
-        ORDER BY ${CASE_PRIORITY_ACTIVITY_SQL} DESC, updated_at DESC
+        WHERE COALESCE(date_filed, '') >= ?
+        ORDER BY COALESCE(priority_activity_at, ${CASE_PRIORITY_ACTIVITY_SQL}) DESC, updated_at DESC
       `)
       .all(cacheKey)
       .map(buildCaseView);
@@ -2253,8 +2518,8 @@ export class Store {
       .prepare(`
         SELECT *
         FROM cases
-        WHERE date(date_filed) >= date(?)
-        ORDER BY ${CASE_PRIORITY_ACTIVITY_SQL} DESC, updated_at DESC
+        WHERE COALESCE(date_filed, '') >= ?
+        ORDER BY COALESCE(priority_activity_at, ${CASE_PRIORITY_ACTIVITY_SQL}) DESC, updated_at DESC
       `)
       .all(String(startDate || "2025-01-01"))
       .map(buildCaseView);
@@ -2495,6 +2760,11 @@ export class Store {
       return null;
     }
 
+    const storedMetadata = buildCaseListMetadata(candidate, {
+      insights: retention.insights,
+      updatedAt: timestamp
+    });
+
     this.db
       .prepare(`
         INSERT INTO cases (
@@ -2514,12 +2784,19 @@ export class Store {
           nature_of_suit,
           status,
           tags_marker,
+          is_watchlist,
+          is_tro,
+          is_schedule_a,
+          is_seller_watch,
+          priority_feed_row_count,
+          priority_activity_at,
           docket_url,
           source_urls_json,
           plaintiffs_json,
           defendants_json,
           recent_activity_summary,
           recent_activity_summary_zh,
+          search_text,
           latest_docket_filed_at,
           latest_docket_number,
           docket_count,
@@ -2531,7 +2808,7 @@ export class Store {
           created_at,
           updated_at
         ) VALUES (
-          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
         )
         ON CONFLICT(source_case_key) DO UPDATE SET
           primary_source = excluded.primary_source,
@@ -2549,6 +2826,12 @@ export class Store {
           nature_of_suit = COALESCE(excluded.nature_of_suit, cases.nature_of_suit),
           status = COALESCE(excluded.status, cases.status),
           tags_marker = excluded.tags_marker,
+          is_watchlist = excluded.is_watchlist,
+          is_tro = excluded.is_tro,
+          is_schedule_a = excluded.is_schedule_a,
+          is_seller_watch = excluded.is_seller_watch,
+          priority_feed_row_count = excluded.priority_feed_row_count,
+          priority_activity_at = excluded.priority_activity_at,
           docket_url = COALESCE(excluded.docket_url, cases.docket_url),
           source_urls_json = excluded.source_urls_json,
           plaintiffs_json = excluded.plaintiffs_json,
@@ -2558,6 +2841,7 @@ export class Store {
             WHEN excluded.recent_activity_summary IS NOT NULL AND excluded.recent_activity_summary <> cases.recent_activity_summary THEN NULL
             ELSE cases.recent_activity_summary_zh
           END,
+          search_text = excluded.search_text,
           latest_docket_filed_at = COALESCE(excluded.latest_docket_filed_at, cases.latest_docket_filed_at),
           latest_docket_number = COALESCE(excluded.latest_docket_number, cases.latest_docket_number),
           docket_count = CASE
@@ -2588,12 +2872,19 @@ export class Store {
         candidate.nature_of_suit ?? null,
         candidate.status ?? null,
         mergedTags,
+        storedMetadata.is_watchlist,
+        storedMetadata.is_tro,
+        storedMetadata.is_schedule_a,
+        storedMetadata.is_seller_watch,
+        storedMetadata.priority_feed_row_count,
+        storedMetadata.priority_activity_at,
         candidate.docket_url ?? null,
         toJson(mergedUrls, "[]"),
         toJson(mergedPlaintiffs, "[]"),
         toJson(mergedDefendants, "[]"),
         candidate.recent_activity_summary ?? null,
         candidate.recent_activity_summary_zh ?? null,
+        storedMetadata.search_text,
         candidate.latest_docket_filed_at ?? null,
         candidate.latest_docket_number ?? null,
         candidate.docket_count ?? 0,
@@ -2608,8 +2899,8 @@ export class Store {
 
     if (record.docket_count_exact === true) {
       this.db
-        .prepare("UPDATE cases SET docket_count = ?, updated_at = ? WHERE source_case_key = ?")
-        .run(record.docket_count ?? 0, timestamp, record.source_case_key);
+        .prepare("UPDATE cases SET docket_count = ?, updated_at = ?, priority_activity_at = ? WHERE source_case_key = ?")
+        .run(record.docket_count ?? 0, timestamp, timestamp, record.source_case_key);
     }
 
     this.invalidateCaseViews();
@@ -2632,13 +2923,40 @@ export class Store {
     values.push(nowIso(), nowIso(), caseId);
 
     this.db.prepare(`UPDATE cases SET ${sets.join(", ")} WHERE id = ?`).run(...values);
+    const row = hydrateCase(this.db.prepare("SELECT * FROM cases WHERE id = ?").get(caseId));
+    if (row) {
+      const metadata = buildCaseListMetadata(row, { updatedAt: row.updated_at });
+      this.db
+        .prepare(`
+          UPDATE cases
+          SET is_watchlist = ?,
+              is_tro = ?,
+              is_schedule_a = ?,
+              is_seller_watch = ?,
+              priority_feed_row_count = ?,
+              priority_activity_at = ?,
+              search_text = ?
+          WHERE id = ?
+        `)
+        .run(
+          metadata.is_watchlist,
+          metadata.is_tro,
+          metadata.is_schedule_a,
+          metadata.is_seller_watch,
+          metadata.priority_feed_row_count,
+          metadata.priority_activity_at,
+          metadata.search_text,
+          caseId
+        );
+    }
     this.invalidateCaseViews();
   }
 
   touchCaseDocketSync(caseId) {
+    const timestamp = nowIso();
     this.db
-      .prepare("UPDATE cases SET last_docket_sync_at = ?, updated_at = ? WHERE id = ?")
-      .run(nowIso(), nowIso(), caseId);
+      .prepare("UPDATE cases SET last_docket_sync_at = ?, updated_at = ?, priority_activity_at = ? WHERE id = ?")
+      .run(timestamp, timestamp, timestamp, caseId);
     this.invalidateCaseViews();
   }
 
@@ -2912,12 +3230,18 @@ export class Store {
         }
 
         const timestamp = nowIso();
+        const nextPriorityActivityAt = getCasePriorityActivityAt({
+          ...caseRow,
+          updated_at: touchUpdatedAt || hasChanged ? timestamp : caseRow.updated_at,
+          latest_docket_filed_at: nextLatestFiledAt ?? null
+        });
         this.db
           .prepare(`
             UPDATE cases
             SET latest_docket_filed_at = ?,
                 latest_docket_number = ?,
                 docket_count = ?,
+                priority_activity_at = ?,
                 updated_at = CASE
                   WHEN ? = 1 THEN ?
                   ELSE updated_at
@@ -2928,6 +3252,7 @@ export class Store {
             nextLatestFiledAt ?? null,
             nextLatestNumber ?? null,
             nextDocketCount,
+            nextPriorityActivityAt ?? null,
             touchUpdatedAt || hasChanged ? 1 : 0,
             timestamp,
             Number(caseRow.id)
@@ -3290,9 +3615,9 @@ export class Store {
       .prepare(`
         SELECT *
         FROM cases
-        WHERE date(date_filed) >= date(?)
+        WHERE COALESCE(date_filed, '') >= ?
           AND (${clauses.join(" OR ")})
-        ORDER BY ${CASE_PRIORITY_ACTIVITY_SQL} DESC, updated_at DESC
+        ORDER BY COALESCE(priority_activity_at, ${CASE_PRIORITY_ACTIVITY_SQL}) DESC, updated_at DESC
         LIMIT 250
       `)
       .all(...params)
@@ -3301,7 +3626,7 @@ export class Store {
     return collapseDuplicateCases(rows);
   }
 
-  getFastPathTextSearchCases(startDate, rawSearch, { category = "all", selectedCourt = "", limit = 400 } = {}) {
+  getSlowPathTextSearchCases(startDate, rawSearch, { category = "all", selectedCourt = "", limit = 400 } = {}) {
     const rawNeedle = String(rawSearch || "").trim().toLowerCase();
     const searchNeedle = normalizeText(rawSearch);
     const docketNeedle = normalizeDocket(rawSearch);
@@ -3310,7 +3635,7 @@ export class Store {
       return [];
     }
 
-    const whereClauses = [`date(date_filed) >= date(?)`];
+    const whereClauses = [`COALESCE(date_filed, '') >= ?`];
     const params = [startDate];
     const categoryClause = this.buildCategoryWhereClause(category);
     if (categoryClause !== "1 = 1") {
@@ -3343,7 +3668,7 @@ export class Store {
         SELECT *
         FROM cases
         WHERE ${whereClauses.join("\n          AND ")}
-        ORDER BY ${CASE_PRIORITY_ACTIVITY_SQL} DESC, updated_at DESC
+        ORDER BY COALESCE(priority_activity_at, ${CASE_PRIORITY_ACTIVITY_SQL}) DESC, updated_at DESC
         LIMIT ?
       `)
       .all(...params, Math.max(limit, 120))
@@ -3352,21 +3677,72 @@ export class Store {
     return collapseDuplicateCases(rows);
   }
 
-  buildCategoryWhereClause(category) {
+  getFastPathTextSearchCases(startDate, rawSearch, { category = "all", selectedCourt = "", limit = 400 } = {}) {
+    const matchQuery = buildFtsMatchQuery(rawSearch);
+    if (!matchQuery) {
+      return this.getSlowPathTextSearchCases(startDate, rawSearch, {
+        category,
+        selectedCourt,
+        limit
+      });
+    }
+
+    try {
+      const whereClauses = [`COALESCE(c.date_filed, '') >= ?`];
+      const params = [matchQuery, startDate];
+      const categoryClause = this.buildCategoryWhereClause(category, "c.");
+      if (categoryClause !== "1 = 1") {
+        whereClauses.push(`(${categoryClause})`);
+      }
+      if (selectedCourt) {
+        whereClauses.push(`c.court_id = ?`);
+        params.push(selectedCourt);
+      }
+
+      const rows = this.db
+        .prepare(`
+          SELECT c.*
+          FROM cases_search_fts
+          JOIN cases c ON c.id = cases_search_fts.rowid
+          WHERE cases_search_fts MATCH ?
+            AND ${whereClauses.join("\n            AND ")}
+          ORDER BY bm25(cases_search_fts), COALESCE(c.priority_activity_at, ${CASE_PRIORITY_ACTIVITY_SQL.replaceAll("updated_at", "c.updated_at").replaceAll("latest_docket_filed_at", "c.latest_docket_filed_at").replaceAll("date_filed", "c.date_filed")}) DESC, c.updated_at DESC
+          LIMIT ?
+        `)
+        .all(...params, Math.max(limit, 120))
+        .map(buildCaseView);
+
+      if (rows.length) {
+        return collapseDuplicateCases(rows);
+      }
+    } catch {
+      // fall through to the legacy slow scan for compatibility if FTS is unavailable or rebuilding.
+    }
+
+    return this.getSlowPathTextSearchCases(startDate, rawSearch, {
+      category,
+      selectedCourt,
+      limit
+    });
+  }
+
+  buildCategoryWhereClause(category, columnPrefix = "") {
+    const column = (name) => `${columnPrefix}${name}`;
+    const legacyFallback = (clause) => `(COALESCE(${column("search_text")}, '') = '' AND ${clause})`;
     if (category === "watchlist") {
-      return "(tags_marker LIKE '%|tro|%' OR tags_marker LIKE '%|schedule_a|%' OR tags_marker LIKE '%|seller_tro|%')";
+      return `(${column("is_watchlist")} = 1 OR ${legacyFallback(`(${column("tags_marker")} LIKE '%|tro|%' OR ${column("tags_marker")} LIKE '%|schedule_a|%' OR ${column("tags_marker")} LIKE '%|seller_tro|%')`)})`;
     }
 
     if (category === "tro") {
-      return "tags_marker LIKE '%|tro|%'";
+      return `(${column("is_tro")} = 1 OR ${legacyFallback(`${column("tags_marker")} LIKE '%|tro|%'`)})`;
     }
 
     if (category === "schedule_a") {
-      return "tags_marker LIKE '%|schedule_a|%'";
+      return `(${column("is_schedule_a")} = 1 OR ${legacyFallback(`${column("tags_marker")} LIKE '%|schedule_a|%'`)})`;
     }
 
     if (category === "seller_watch") {
-      return "tags_marker LIKE '%|seller_tro|%'";
+      return `(${column("is_seller_watch")} = 1 OR ${legacyFallback(`${column("tags_marker")} LIKE '%|seller_tro|%'`)})`;
     }
 
     return "1 = 1";
@@ -3374,7 +3750,7 @@ export class Store {
 
   listCasesBySql({ startDate, pageSize, page, category, selectedCourt }) {
     const categoryClause = this.buildCategoryWhereClause(category);
-    const baseWhere = [`date(date_filed) >= date(?)`, `(${categoryClause})`];
+    const baseWhere = [`COALESCE(date_filed, '') >= ?`, `(${categoryClause})`];
     const baseParams = [startDate];
 
     if (selectedCourt) {
@@ -3393,7 +3769,7 @@ export class Store {
         FROM cases
         WHERE ${whereSql}
         ORDER BY
-          CASE WHEN latest_docket_filed_at IS NOT NULL THEN 0 ELSE 1 END ASC,
+          COALESCE(priority_activity_at, ${CASE_PRIORITY_ACTIVITY_SQL}) DESC,
           latest_docket_filed_at DESC,
           updated_at DESC,
           date_filed DESC,
@@ -3408,7 +3784,7 @@ export class Store {
       .prepare(`
         SELECT court_id, court_name, COUNT(*) AS total
         FROM cases
-        WHERE date(date_filed) >= date(?)
+        WHERE COALESCE(date_filed, '') >= ?
           AND (${categoryClause})
         GROUP BY court_id, court_name
         ORDER BY total DESC, court_name ASC

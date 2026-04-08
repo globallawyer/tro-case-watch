@@ -171,6 +171,9 @@ export const config = {
     from: env("SMTP_FROM", "")
   },
   reports: {
+    windowEmail: {
+      enabled: envBool("WINDOW_EMAIL_REPORT_ENABLED", false)
+    },
     dailyEmail: {
       enabled: envBool("DAILY_EMAIL_REPORT_ENABLED", false),
       to: env("DAILY_EMAIL_REPORT_TO", "599214243@qq.com"),
