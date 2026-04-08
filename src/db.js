@@ -1180,10 +1180,7 @@ function dedupeEntries(entries) {
       continue;
     }
 
-    const existing = deduped[matchedIndex];
-    if (compareEntriesForCanonicalRow(entry, existing) < 0) {
-      deduped[matchedIndex] = entry;
-    }
+    deduped[matchedIndex] = mergeDisplayEntries(deduped[matchedIndex], entry);
   }
 
   return deduped.filter(Boolean).sort(compareEntriesForTimeline);
@@ -1422,6 +1419,25 @@ function entrySourcesDiffer(left, right) {
     String(left?.source || "") !== String(right?.source || "");
 }
 
+function isCrossSourceDocketDedupSource(source = "") {
+  const normalized = String(source || "").trim().toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+
+  return (
+    normalized === "courtlistener" ||
+    normalized === "courtfeed" ||
+    normalized === "61tro" ||
+    normalized === "gbc" ||
+    normalized === "sriplaw" ||
+    normalized === "pacermonitor" ||
+    normalized === "docketalarm" ||
+    normalized === "unicourt" ||
+    isPriorityFeedPrimarySource(normalized)
+  );
+}
+
 function areSemanticallyDuplicateEntries(left, right, familyCounts = new Map()) {
   if (!left || !right) {
     return false;
@@ -1446,13 +1462,16 @@ function areSemanticallyDuplicateEntries(left, right, familyCounts = new Map()) 
   }
 
   const crossSource = entrySourcesDiffer(left, right);
-  const semanticEligible = crossSource && (
-    isPriorityFeedPrimarySource(left?.primary_source) ||
-    isPriorityFeedPrimarySource(right?.primary_source)
-  );
+  const semanticEligible = crossSource &&
+    isCrossSourceDocketDedupSource(left?.primary_source) &&
+    isCrossSourceDocketDedupSource(right?.primary_source);
   if (!semanticEligible) {
     return false;
   }
+
+  const priorityFeedEligible =
+    isPriorityFeedPrimarySource(left?.primary_source) ||
+    isPriorityFeedPrimarySource(right?.primary_source);
 
   if (leftDescription === rightDescription) {
     return true;
@@ -1476,6 +1495,10 @@ function areSemanticallyDuplicateEntries(left, right, familyCounts = new Map()) 
     return true;
   }
 
+  if (sharedRefs.length && fuzzySharedTokenCount >= 2) {
+    return true;
+  }
+
   if (sameFamily &&
       isStrongDescriptionPrefixMatch(left.description, right.description) &&
       sharedTokens.length >= 2) {
@@ -1483,13 +1506,21 @@ function areSemanticallyDuplicateEntries(left, right, familyCounts = new Map()) 
   }
 
   if (isStrongDescriptionPrefixMatch(left.description, right.description) &&
-      fuzzySharedTokenCount >= 2) {
+      fuzzySharedTokenCount >= 2 &&
+      sharedTokens.length >= 2) {
+    return true;
+  }
+
+  if (sameFamily &&
+      sharedTokens.length >= 3 &&
+      fuzzySharedTokenCount >= 3) {
     return true;
   }
 
   if (sameFamily &&
       familyCounts.get(leftFamily) === 2 &&
-      semanticEligible) {
+      priorityFeedEligible &&
+      fuzzySharedTokenCount >= 2) {
     return true;
   }
 
@@ -1597,6 +1628,39 @@ function entrySourceRank(entry) {
   return 0;
 }
 
+function entryAuthorityRank(source = "") {
+  const normalized = String(source || "").trim().toLowerCase();
+  if (!normalized) {
+    return 0;
+  }
+
+  if (normalized === "courtfeed") {
+    return 6;
+  }
+
+  if (normalized === "courtlistener") {
+    return 5;
+  }
+
+  if (normalized === "docketalarm" || normalized === "pacermonitor") {
+    return 4;
+  }
+
+  if (normalized === "unicourt") {
+    return 3;
+  }
+
+  if (normalized === "61tro" || normalized === "gbc" || normalized === "sriplaw") {
+    return 2;
+  }
+
+  if (isPriorityFeedPrimarySource(normalized)) {
+    return 1;
+  }
+
+  return 0;
+}
+
 function entryContentRank(entry) {
   const type = normalizeText(entry.document_type);
 
@@ -1671,6 +1735,60 @@ function pickPreferredNumericValue(existingValue, incomingValue) {
   }
 
   return Math.max(...numbers);
+}
+
+function pickPreferredDisplayPrimarySource(existingValue, incomingValue) {
+  const left = String(existingValue || "").trim();
+  const right = String(incomingValue || "").trim();
+  if (!left) {
+    return right || null;
+  }
+  if (!right) {
+    return left || null;
+  }
+
+  const leftRank = entryAuthorityRank(left);
+  const rightRank = entryAuthorityRank(right);
+  if (rightRank !== leftRank) {
+    return rightRank > leftRank ? right : left;
+  }
+
+  return right.length > left.length ? right : left;
+}
+
+function mergeDisplayEntries(existing = null, incoming = null) {
+  if (!existing) {
+    return incoming;
+  }
+  if (!incoming) {
+    return existing;
+  }
+
+  const canonical = compareEntriesForCanonicalRow(existing, incoming) <= 0 ? existing : incoming;
+  const mergedSources = mergeArraysNormalized(
+    Array.isArray(existing?.raw?.merged_sources) ? existing.raw.merged_sources : [],
+    Array.isArray(incoming?.raw?.merged_sources) ? incoming.raw.merged_sources : [],
+    [existing?.primary_source, incoming?.primary_source].filter(Boolean)
+  );
+
+  return {
+    ...canonical,
+    primary_source: pickPreferredDisplayPrimarySource(existing?.primary_source, incoming?.primary_source),
+    source_entry_id: preferLongerNormalizedValue(existing?.source_entry_id, incoming?.source_entry_id) || null,
+    document_type: pickPreferredEntryType(existing?.document_type, incoming?.document_type),
+    entry_number: pickPreferredEntryNumber(existing?.entry_number, incoming?.entry_number),
+    document_number: pickPreferredEntryNumber(existing?.document_number, incoming?.document_number),
+    filed_at: laterIso(existing?.filed_at, incoming?.filed_at) || existing?.filed_at || incoming?.filed_at || null,
+    description: pickPreferredEntryDescription(existing?.description, incoming?.description),
+    description_zh: preferLongerNormalizedValue(existing?.description_zh, incoming?.description_zh) || null,
+    absolute_url: pickPreferredEntryUrl(existing?.absolute_url, incoming?.absolute_url),
+    is_available: pickPreferredNumericValue(existing?.is_available, incoming?.is_available),
+    page_count: pickPreferredNumericValue(existing?.page_count, incoming?.page_count),
+    pacer_doc_id: preferLongerNormalizedValue(existing?.pacer_doc_id, incoming?.pacer_doc_id) || null,
+    raw: mergeNestedObjects(existing?.raw || {}, incoming?.raw || {}, {
+      merged_sources: mergedSources
+    })
+  };
 }
 
 function buildMergedDocketEntryRecord(existing = null, record = {}, timestamp = nowIso()) {

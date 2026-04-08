@@ -208,6 +208,97 @@ test("dedupeStoredDocketEntries removes historical duplicates and recomputes cas
   }
 });
 
+test("getCase collapses equivalent cross-source docket entries into one richer timeline item", () => {
+  const { store, cleanup } = createTempStore();
+
+  try {
+    const savedCase = store.upsertCase({
+      source_case_key: "case:ilnd:26-cv-00011",
+      primary_source: "courtlistener",
+      source_case_id: "72099599",
+      courtlistener_docket_id: 72099599,
+      court_id: "ilnd",
+      court_name: "Northern District of Illinois",
+      case_name: "Bose Corporation v. The Partnerships Identified on Schedule A",
+      docket_number: "1:26-cv-00011",
+      date_filed: "2026-01-02"
+    });
+
+    store.upsertDocketEntry({
+      case_id: savedCase.id,
+      source_entry_key: "courtlistener:140",
+      primary_source: "courtlistener",
+      source_entry_id: "2208776613",
+      filed_at: "2026-04-02",
+      entry_number: "62",
+      document_number: "62",
+      description: "MOTION by Defendants Fableter, SunEaseleetwo, SunnyBrewonthree, asdgh, hsdakldh, muyuanbaihuotwo for extension of time",
+      absolute_url: "https://www.courtlistener.com/docket/72099599/62/"
+    });
+
+    store.upsertDocketEntry({
+      case_id: savedCase.id,
+      source_entry_key: "61tro:motion-extend-time",
+      primary_source: "61tro",
+      source_entry_id: "61tro-motion-extend-time",
+      filed_at: "2026-04-02",
+      description: "MOTION by Defendants Fableter, SunEaseleetwo, SunnyBrewonthree, asdgh, hsdakldh, muyuanbaihuotwo for extension of time 翻译 附件： 1:(Text of Proposed Order)",
+      absolute_url: "https://61tro.com/view/id/ilnd-1%3A2026-cv-00011.html"
+    });
+
+    const detail = store.getCase(savedCase.id);
+
+    assert.equal(detail.entries.length, 1);
+    assert.match(detail.entries[0].description, /Text of Proposed Order/);
+    assert.equal(detail.entries[0].primary_source, "courtlistener");
+    assert.deepEqual(detail.entries[0].raw?.merged_sources, ["courtlistener", "61tro"]);
+  } finally {
+    cleanup();
+  }
+});
+
+test("getCase keeps distinct same-day cross-source docket entries separate", () => {
+  const { store, cleanup } = createTempStore();
+
+  try {
+    const savedCase = store.upsertCase({
+      source_case_key: "case:ilnd:26-cv-00011",
+      primary_source: "courtlistener",
+      source_case_id: "72099599",
+      courtlistener_docket_id: 72099599,
+      court_id: "ilnd",
+      court_name: "Northern District of Illinois",
+      case_name: "Bose Corporation v. The Partnerships Identified on Schedule A",
+      docket_number: "1:26-cv-00011",
+      date_filed: "2026-01-02"
+    });
+
+    store.upsertDocketEntry({
+      case_id: savedCase.id,
+      source_entry_key: "courtlistener:minute-dismiss-52",
+      primary_source: "courtlistener",
+      source_entry_id: "cl-minute-52",
+      filed_at: "2026-03-26",
+      description: "MINUTE entry before the Honorable Mary M. Rowland: Plaintiff's response to Defendant's motion [52] to dismiss is due by 4/23/26; reply due by 5/14/26."
+    });
+
+    store.upsertDocketEntry({
+      case_id: savedCase.id,
+      source_entry_key: "61tro:minute-extension-54",
+      primary_source: "61tro",
+      source_entry_id: "61tro-minute-54",
+      filed_at: "2026-03-26",
+      description: "MINUTE entry before the Honorable Mary M. Rowland: The Court grants Defendant JusiOriginal's unopposed motion for extension of time [54]. Defendant JusiOriginal to answer or otherwise plead by 4/9/26."
+    });
+
+    const detail = store.getCase(savedCase.id);
+
+    assert.equal(detail.entries.length, 2);
+  } finally {
+    cleanup();
+  }
+});
+
 test("reapStaleSyncRuns skips SQLITE_BUSY rows without crashing the app", () => {
   const { store, cleanup } = createTempStore();
 
