@@ -380,25 +380,87 @@ function clean61troValue(value) {
     .trim();
 }
 
+function normalize61troTagKey(value) {
+  return normalizeLookupText(value)
+    .replace(/\b(?:corp(?:oration)?|co(?:mpany)?|inc(?:orporated)?|llc|ltd|limited)\b/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function extract61troLookupLeader(value) {
+  const text = cleanText(value);
+  if (!text) {
+    return "";
+  }
+
+  const split = text.split(/\s+(?:v\.?|vs\.?|versus)\s+/i);
+  return cleanText(split[0] || text);
+}
+
+function build61troLookupHints({ caseName = "", plaintiffs = [], firms = [] } = {}) {
+  const hints = [];
+  const seen = new Set();
+
+  const pushHint = (value) => {
+    const cleaned = cleanText(value);
+    const key = normalize61troTagKey(cleaned);
+    if (!cleaned || !key || seen.has(key)) {
+      return;
+    }
+
+    if (/^the partnerships\b/i.test(cleaned) || /^the entities\b/i.test(cleaned)) {
+      return;
+    }
+
+    seen.add(key);
+    hints.push(cleaned);
+  };
+
+  pushHint(extract61troLookupLeader(caseName));
+
+  for (const plaintiff of asArray(plaintiffs)) {
+    if (typeof plaintiff === "string") {
+      pushHint(plaintiff);
+      continue;
+    }
+
+    pushHint(plaintiff?.name || plaintiff?.party_name || plaintiff?.display_name || "");
+  }
+
+  for (const firm of asArray(firms)) {
+    pushHint(firm);
+  }
+
+  return hints;
+}
+
 function extract61troTextValue(html, label) {
   const match = String(html || "").match(new RegExp(`${label}[：:]([\\s\\S]*?)<\\/span>`, "i"));
   return cleanText(match?.[1] || "");
 }
 
-function extract61troRecentLinks(html, baseUrl) {
+function extract61troDetailLinks(html, baseUrl) {
   const links = [];
   const seen = new Set();
 
-  for (const match of String(html || "").matchAll(/href=['"]([^'"]*(?:\/detail\/\d+\.html|\/view\/id\/[^'"]+\.html))['"]/gi)) {
-    const normalized = absoluteUrl(match[1], baseUrl);
-    if (!normalized || seen.has(normalized)) {
+  for (const match of String(html || "").matchAll(/<a[^>]+href=['"]([^'"]*(?:\/detail\/\d+\.html|\/view\/id\/[^'"]+\.html))['"][^>]*>([\s\S]*?)<\/a>/gi)) {
+    const href = absoluteUrl(match[1], baseUrl);
+    if (!href || seen.has(href)) {
       continue;
     }
-    seen.add(normalized);
-    links.push(normalized);
+
+    seen.add(href);
+    links.push({
+      href,
+      title: cleanText(match[2])
+    });
   }
 
   return links;
+}
+
+function extract61troRecentLinks(html, baseUrl) {
+  return extract61troDetailLinks(html, baseUrl).map((item) => item.href);
 }
 
 function build61troSearchTerms(docketNumber) {
@@ -422,16 +484,7 @@ function build61troSearchTerms(docketNumber) {
 
 function extract61troSearchResultLink(html, docketNumber, baseUrl) {
   const targetKey = normalizeDocketLookupCoreKey(docketNumber);
-  const links = [];
-
-  for (const match of String(html || "").matchAll(/<h4>\s*<a href="([^"]+)">([\s\S]*?)<\/a>\s*<\/h4>/gi)) {
-    const href = absoluteUrl(match[1], baseUrl);
-    const title = cleanText(match[2]);
-    if (!href) {
-      continue;
-    }
-    links.push({ href, title });
-  }
+  const links = extract61troDetailLinks(html, baseUrl);
 
   const exact = links.find(
     (item) => normalizeDocketLookupCoreKey(item.title) === targetKey && /\/view\/id\//i.test(item.href)
@@ -474,14 +527,19 @@ function parse61troEntries(html) {
   for (const match of String(html || "").matchAll(/<div class="layui-timeline-item">([\s\S]*?)<\/div>\s*<\/div>/gi)) {
     const block = match[1];
     const filedAt = parseUsDate(String(block).match(/layui-timeline-title">([\s\S]*?)<\/h3>/i)?.[1] || "");
-    const description = clean61troValue(String(block).match(/<p[^>]*class="[^"]*\bv-text\b[^"]*"[^>]*>([\s\S]*?)<\/p>/i)?.[1] || "");
+    const lines = [...String(block).matchAll(/<p[^>]*>([\s\S]*?)<\/p>/gi)]
+      .map((item) => clean61troValue(item[1]))
+      .filter(Boolean);
+    const description = lines.length > 1
+      ? `${lines[0]}\n${lines.slice(1).join("\n")}`
+      : (lines[0] || "");
     if (!filedAt && !description) {
       continue;
     }
 
     index += 1;
     entries.push({
-      sourceEntryId: `${filedAt || "unknown"}:${index}`,
+      sourceEntryId: `${filedAt || "unknown"}:${normalizeLookupText(description || String(index))}`,
       entryNumber: null,
       documentNumber: null,
       documentType: "Docket Entry",
@@ -546,6 +604,97 @@ function parse61troCasePage(html, url, source) {
       rowCount: entries.length
     }
   };
+}
+
+function extract61troPaginationLinks(html, pageUrl) {
+  const current = absoluteUrl(pageUrl, pageUrl);
+  if (!current) {
+    return [];
+  }
+
+  let currentUrl;
+  try {
+    currentUrl = new URL(current);
+  } catch {
+    return [];
+  }
+
+  const pagination = [];
+  const seen = new Set();
+  for (const link of extractSameDomainLinks(html, currentUrl.origin)) {
+    try {
+      const url = new URL(link);
+      if (url.pathname !== currentUrl.pathname || !url.searchParams.get("page")) {
+        continue;
+      }
+
+      const normalized = normalizePageUrl(url.toString());
+      if (!normalized || seen.has(normalized)) {
+        continue;
+      }
+
+      seen.add(normalized);
+      pagination.push(normalized);
+    } catch {
+      continue;
+    }
+  }
+
+  return pagination.sort((left, right) => {
+    const leftPage = Number.parseInt(new URL(left).searchParams.get("page") || "0", 10);
+    const rightPage = Number.parseInt(new URL(right).searchParams.get("page") || "0", 10);
+    return leftPage - rightPage;
+  });
+}
+
+function build61troHintUrls(source, { caseName = "", plaintiffs = [], firms = [] } = {}, sitemapUrls = []) {
+  const hints = build61troLookupHints({ caseName, plaintiffs, firms });
+  if (!hints.length) {
+    return [];
+  }
+
+  const normalizedSitemapUrls = [...new Set(asArray(sitemapUrls).map((item) => normalizePageUrl(item)).filter(Boolean))];
+  const sitemapSet = new Set(normalizedSitemapUrls);
+  const tagIndex = new Map();
+
+  for (const url of normalizedSitemapUrls) {
+    const match = String(url).match(/\/tag\/([^/?#]+)\.html/i);
+    if (!match) {
+      continue;
+    }
+
+    const decoded = decodeURIComponent(match[1]);
+    const key = normalize61troTagKey(decoded);
+    if (!key) {
+      continue;
+    }
+
+    const bucket = tagIndex.get(key) || [];
+    bucket.push(url);
+    tagIndex.set(key, bucket);
+  }
+
+  const urls = [];
+  const pushUrl = (value) => {
+    const normalized = normalizePageUrl(value);
+    if (!normalized || urls.includes(normalized)) {
+      return;
+    }
+    urls.push(normalized);
+  };
+
+  for (const hint of hints) {
+    const explicitTagUrl = normalizePageUrl(`${source.baseUrl}/tag/${encodeURIComponent(hint)}.html`);
+    if (explicitTagUrl) {
+      pushUrl(explicitTagUrl);
+    }
+
+    for (const candidate of tagIndex.get(normalize61troTagKey(hint)) || []) {
+      pushUrl(candidate);
+    }
+  }
+
+  return urls.slice(0, 12);
 }
 
 function parseSriplawNoticeRows(html, baseUrl) {
@@ -801,6 +950,7 @@ export class LawFirmClient {
     const selectedIds = new Set((config.sources || []).map((item) => String(item || "").trim().toLowerCase()).filter(Boolean));
     this.sources = DEFAULT_LAW_FIRM_SOURCES.filter((source) => !selectedIds.size || selectedIds.has(source.id));
     this.lastRequestAt = 0;
+    this.sitemapCache = new Map();
   }
 
   getStatus() {
@@ -945,7 +1095,7 @@ export class LawFirmClient {
     };
   }
 
-  async lookupByDocket(docketNumber, { sourceIds = [], courtName = "" } = {}) {
+  async lookupByDocket(docketNumber, { sourceIds = [], courtName = "", caseName = "", plaintiffs = [], firms = [] } = {}) {
     if (!this.enabled) {
       return null;
     }
@@ -960,7 +1110,12 @@ export class LawFirmClient {
         continue;
       }
 
-      const item = await this.lookup61troByDocket(source, docketNumber, { courtName });
+      const item = await this.lookup61troByDocket(source, docketNumber, {
+        courtName,
+        caseName,
+        plaintiffs,
+        firms
+      });
       if (item && lawFirmMatchesCourtName(item, courtName)) {
         return {
           source,
@@ -973,16 +1128,106 @@ export class LawFirmClient {
     return null;
   }
 
-  async lookup61troByDocket(source, docketNumber, { courtName = "" } = {}) {
+  async fetch61troSitemapUrls(source) {
+    const cacheKey = `${source.id}:${source.baseUrl}`;
+    if (!this.sitemapCache.has(cacheKey)) {
+      this.sitemapCache.set(
+        cacheKey,
+        this.fetchText(`${source.baseUrl}/sitemap.txt`)
+          .then((text) => String(text || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean))
+          .catch(() => [])
+      );
+    }
+
+    return this.sitemapCache.get(cacheKey);
+  }
+
+  async resolve61troDetailUrlFromIndex(source, pageUrl, docketNumber) {
+    const queue = [pageUrl];
+    const visited = new Set();
+
+    while (queue.length && visited.size < 15) {
+      const currentUrl = queue.shift();
+      const normalizedUrl = normalizePageUrl(currentUrl);
+      if (!normalizedUrl || visited.has(normalizedUrl)) {
+        continue;
+      }
+
+      visited.add(normalizedUrl);
+      let html = "";
+      try {
+        html = await this.fetchText(normalizedUrl);
+      } catch {
+        continue;
+      }
+
+      const detailUrl = extract61troSearchResultLink(html, docketNumber, source.baseUrl);
+      if (detailUrl) {
+        return detailUrl;
+      }
+
+      for (const nextPage of extract61troPaginationLinks(html, normalizedUrl)) {
+        if (!visited.has(nextPage)) {
+          queue.push(nextPage);
+        }
+      }
+    }
+
+    return null;
+  }
+
+  async lookup61troByDocket(source, docketNumber, { courtName = "", caseName = "", plaintiffs = [], firms = [] } = {}) {
     for (const term of build61troSearchTerms(docketNumber)) {
       const searchUrl = `${source.baseUrl}/search.html?sn=${encodeURIComponent(term)}`;
-      const html = await this.fetchText(searchUrl);
+      let html = "";
+      try {
+        html = await this.fetchText(searchUrl);
+      } catch {
+        continue;
+      }
+
       const detailUrl = extract61troSearchResultLink(html, docketNumber, source.baseUrl);
       if (!detailUrl) {
         continue;
       }
 
-      const pageHtml = await this.fetchText(detailUrl);
+      let pageHtml = "";
+      try {
+        pageHtml = await this.fetchText(detailUrl);
+      } catch {
+        continue;
+      }
+
+      const item = parse61troCasePage(pageHtml, detailUrl, source);
+      if (
+        item?.docketNumber &&
+        normalizeDocketLookupCoreKey(item.docketNumber) === normalizeDocketLookupCoreKey(docketNumber) &&
+        lawFirmMatchesCourtName(item, courtName)
+      ) {
+        return item;
+      }
+    }
+
+    const sitemapUrls = await this.fetch61troSitemapUrls(source);
+    const hintUrls = build61troHintUrls(source, {
+      caseName,
+      plaintiffs,
+      firms
+    }, sitemapUrls);
+
+    for (const hintUrl of hintUrls) {
+      const detailUrl = await this.resolve61troDetailUrlFromIndex(source, hintUrl, docketNumber);
+      if (!detailUrl) {
+        continue;
+      }
+
+      let pageHtml = "";
+      try {
+        pageHtml = await this.fetchText(detailUrl);
+      } catch {
+        continue;
+      }
+
       const item = parse61troCasePage(pageHtml, detailUrl, source);
       if (
         item?.docketNumber &&

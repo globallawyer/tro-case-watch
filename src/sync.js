@@ -1228,7 +1228,8 @@ export class CaseSyncService {
       const supplementalMatch = include61tro
         ? await this.lawFirms.lookupByDocket(rawTerm, {
             sourceIds: ["61tro"],
-            courtName
+            courtName,
+            caseName
           }).catch(() => null)
         : null;
       if (supplementalMatch?.item) {
@@ -1240,10 +1241,12 @@ export class CaseSyncService {
           },
           caseIndex
         );
-        imported += Number(supplementalIngest.casesUpserted || 0);
+        imported += Number(supplementalIngest.docketEntriesUpserted || supplementalIngest.casesUpserted || 0);
         matched += 1;
         sourceResults["61tro"].matched = 1;
-        sourceResults["61tro"].imported = Number(supplementalIngest.casesUpserted || 0);
+        sourceResults["61tro"].imported = Number(
+          supplementalIngest.docketEntriesUpserted || supplementalIngest.casesUpserted || 0
+        );
       }
     }
 
@@ -3044,7 +3047,10 @@ export class CaseSyncService {
 
       const sourceResult = await this.lawFirms.lookupByDocket(docketNumber, {
         sourceIds: normalizedSourceIds,
-        courtName: caseRow.court_name || ""
+        courtName: caseRow.court_name || "",
+        caseName: caseRow.case_name || "",
+        plaintiffs: caseRow.plaintiffs || [],
+        firms: caseRow.raw?.firm || []
       }).catch(() => null);
       if (!sourceResult?.item) {
         return { enriched: false, reason: "not-found" };

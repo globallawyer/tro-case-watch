@@ -1248,6 +1248,10 @@ function entrySourceRank(entry) {
     return 3;
   }
 
+  if (entry.primary_source === "61tro") {
+    return 2;
+  }
+
   if (isPriorityFeedPrimarySource(entry.primary_source)) {
     return 2;
   }
