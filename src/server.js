@@ -83,6 +83,7 @@ const publicRateLimitBuckets = new Map();
 const publicBehaviorBuckets = new Map();
 const publicChallengeBuckets = new Map();
 const pendingLookupImports = new Map();
+const pendingCourtListenerWebhookFollowUps = new Map();
 let lastTroDailyUpdatesRefreshQueuedAt = 0;
 const browserGuardCookieName = "__tt_guard";
 const publicApiTokenMetaName = "tt-public-api-token";
@@ -241,6 +242,47 @@ function queueLookupImport(term, { courtName = "", caseName = "" } = {}) {
   setTimeout(() => {
     pendingLookupImports.delete(dedupeKey);
   }, 90 * 1000);
+  return true;
+}
+
+function queueCourtListenerWebhookFollowUp(caseId, {
+  delayMs = 60 * 1000,
+  attempt = 1
+} = {}) {
+  const normalizedCaseId = Number(caseId || 0);
+  if (!Number.isFinite(normalizedCaseId) || normalizedCaseId <= 0) {
+    return false;
+  }
+
+  const normalizedDelayMs = Math.max(15 * 1000, Number(delayMs || 0));
+  const existing = pendingCourtListenerWebhookFollowUps.get(normalizedCaseId);
+  if (existing && existing.runAt <= Date.now() + normalizedDelayMs) {
+    return false;
+  }
+
+  if (existing?.timer) {
+    clearTimeout(existing.timer);
+  }
+
+  const runAt = Date.now() + normalizedDelayMs;
+  const timer = setTimeout(() => {
+    pendingCourtListenerWebhookFollowUps.delete(normalizedCaseId);
+    console.warn(
+      `[webhook] retrying courtlistener follow-up for case ${normalizedCaseId} after ${Math.round(normalizedDelayMs / 1000)}s (attempt ${attempt})`
+    );
+    spawnDetachedTask([
+      "--enrich-case-id",
+      String(normalizedCaseId),
+      "--providers",
+      "courtlistener"
+    ]);
+  }, normalizedDelayMs);
+
+  pendingCourtListenerWebhookFollowUps.set(normalizedCaseId, {
+    runAt,
+    attempt,
+    timer
+  });
   return true;
 }
 
@@ -626,6 +668,21 @@ async function handleCourtListenerWebhook(request, response, pathname) {
         entryCount: results.length
       }).catch((error) => {
         console.error(`[webhook] follow-up refresh failed for case ${caseId}:`, error);
+        if (Number(error?.status || 0) === 429) {
+          const retryAfterMs = Math.max(
+            Number(error?.retryAfterMs || 0),
+            60 * 1000
+          );
+          const scheduled = queueCourtListenerWebhookFollowUp(caseId, {
+            delayMs: retryAfterMs,
+            attempt: 2
+          });
+          if (scheduled) {
+            console.warn(
+              `[webhook] queued delayed courtlistener follow-up for case ${caseId} in ${Math.round(retryAfterMs / 1000)}s`
+            );
+          }
+        }
       });
     }
 

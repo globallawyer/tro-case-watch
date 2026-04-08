@@ -253,6 +253,7 @@ export class CourtListenerClient {
         error.status = response.status;
         error.body = text;
         error.requiresAuth = requiresAuth;
+        error.retryAfterMs = retryDelayMs(response.headers.get("retry-after"), attempt);
         throw error;
       }
 
