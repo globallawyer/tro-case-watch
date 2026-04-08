@@ -52,6 +52,14 @@ function toTimestamp(value) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function isSqliteBusyError(error) {
+  const message = String(error?.message || "").toLowerCase();
+  return (
+    error?.code === "ERR_SQLITE_ERROR" &&
+    (Number(error?.errcode || 0) === 5 || message.includes("database is locked") || message.includes("database table is locked"))
+  );
+}
+
 function syncRunHeartbeatKey(id) {
   return `sync-run-heartbeat:${Number(id || 0)}`;
 }
@@ -1889,6 +1897,7 @@ export class Store {
       PRAGMA journal_mode = WAL;
       PRAGMA synchronous = NORMAL;
       PRAGMA foreign_keys = ON;
+      PRAGMA busy_timeout = 5000;
 
       CREATE TABLE IF NOT EXISTS cases (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -5115,7 +5124,15 @@ export class Store {
     const reaped = [];
 
     for (const row of rows) {
-      const heartbeat = this.getCheckpoint(syncRunHeartbeatKey(row.id));
+      let heartbeat = null;
+      try {
+        heartbeat = this.getCheckpoint(syncRunHeartbeatKey(row.id));
+      } catch (error) {
+        if (isSqliteBusyError(error)) {
+          continue;
+        }
+        throw error;
+      }
       const startedAtMs = toTimestamp(row.started_at);
       const heartbeatAtMs = toTimestamp(heartbeat?.heartbeatAt || row.started_at);
       const reasons = [];
@@ -5141,8 +5158,15 @@ export class Store {
       }
 
       const errorText = `${reasonPrefix}: ${reasons.join("; ")}`;
-      this.finishSyncRun(row.id, "failed", row.stats || {}, errorText);
-      this.clearSyncRunHeartbeat(row.id);
+      try {
+        this.finishSyncRun(row.id, "failed", row.stats || {}, errorText);
+        this.clearSyncRunHeartbeat(row.id);
+      } catch (error) {
+        if (isSqliteBusyError(error)) {
+          continue;
+        }
+        throw error;
+      }
       reaped.push({
         ...row,
         error_text: errorText

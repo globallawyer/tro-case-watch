@@ -207,3 +207,39 @@ test("dedupeStoredDocketEntries removes historical duplicates and recomputes cas
     cleanup();
   }
 });
+
+test("reapStaleSyncRuns skips SQLITE_BUSY rows without crashing the app", () => {
+  const { store, cleanup } = createTempStore();
+
+  try {
+    const runId = store.claimSyncRun("system", "recent");
+    assert.ok(runId);
+
+    const staleStartedAt = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+    store.db.prepare("UPDATE sync_runs SET started_at = ? WHERE id = ?").run(staleStartedAt, runId);
+
+    const originalFinishSyncRun = store.finishSyncRun.bind(store);
+    store.finishSyncRun = () => {
+      const error = new Error("database is locked");
+      error.code = "ERR_SQLITE_ERROR";
+      error.errcode = 5;
+      throw error;
+    };
+
+    const reaped = store.reapStaleSyncRuns("system", {
+      mode: "recent",
+      heartbeatTimeoutMs: 1,
+      maxRuntimeMs: 1,
+      reasonPrefix: "recent watchdog auto-cleared stale run"
+    });
+
+    const savedRun = store.getSyncRun(runId);
+
+    assert.deepEqual(reaped, []);
+    assert.equal(savedRun?.status, "running");
+
+    store.finishSyncRun = originalFinishSyncRun;
+  } finally {
+    cleanup();
+  }
+});

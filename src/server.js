@@ -128,9 +128,18 @@ const publicSiteOrigins = new Set([
   "https://tro-case-watch-production.up.railway.app",
   "http://localhost:4127"
 ]);
+const courtListenerWebhookPrefix = "/api/webhook/courtlistener/";
 
 function clearPublicResponseCache() {
   publicResponseCache.clear();
+}
+
+function isSqliteBusyError(error) {
+  const message = String(error?.message || "").toLowerCase();
+  return (
+    error?.code === "ERR_SQLITE_ERROR" &&
+    (Number(error?.errcode || 0) === 5 || message.includes("database is locked") || message.includes("database table is locked"))
+  );
 }
 
 function spawnDetachedTask(args = []) {
@@ -155,12 +164,21 @@ function reapAndRecoverStaleSyncRuns() {
   }
 
   const heartbeatTimeoutMs = Math.max(Number(config.sync?.runHeartbeatTimeoutMs || 0), 30 * 1000);
-  const recentReaped = store.reapStaleSyncRuns("system", {
-    mode: "recent",
-    heartbeatTimeoutMs,
-    maxRuntimeMs: Math.max(getSyncModeMaxRuntimeMs("recent"), 60 * 1000),
-    reasonPrefix: "recent watchdog auto-cleared stale run"
-  });
+  let recentReaped = [];
+  try {
+    recentReaped = store.reapStaleSyncRuns("system", {
+      mode: "recent",
+      heartbeatTimeoutMs,
+      maxRuntimeMs: Math.max(getSyncModeMaxRuntimeMs("recent"), 60 * 1000),
+      reasonPrefix: "recent watchdog auto-cleared stale run"
+    });
+  } catch (error) {
+    if (isSqliteBusyError(error)) {
+      console.warn(`[watchdog] skipped recent reap: ${error.message}`);
+    } else {
+      console.error("[watchdog] recent reap failed", error);
+    }
+  }
   if (recentReaped.length) {
     console.warn(`[watchdog] reaped stale recent runs ${recentReaped.map((row) => `#${row.id}`).join(", ")}`);
     if (config.sync.enableScheduler) {
@@ -168,12 +186,21 @@ function reapAndRecoverStaleSyncRuns() {
     }
   }
 
-  const backfillReaped = store.reapStaleSyncRuns("system", {
-    mode: "backfill",
-    heartbeatTimeoutMs,
-    maxRuntimeMs: Math.max(getSyncModeMaxRuntimeMs("backfill"), 60 * 1000),
-    reasonPrefix: "backfill watchdog auto-cleared stale run"
-  });
+  let backfillReaped = [];
+  try {
+    backfillReaped = store.reapStaleSyncRuns("system", {
+      mode: "backfill",
+      heartbeatTimeoutMs,
+      maxRuntimeMs: Math.max(getSyncModeMaxRuntimeMs("backfill"), 60 * 1000),
+      reasonPrefix: "backfill watchdog auto-cleared stale run"
+    });
+  } catch (error) {
+    if (isSqliteBusyError(error)) {
+      console.warn(`[watchdog] skipped backfill reap: ${error.message}`);
+    } else {
+      console.error("[watchdog] backfill reap failed", error);
+    }
+  }
   if (backfillReaped.length) {
     console.warn(`[watchdog] reaped stale backfill runs ${backfillReaped.map((row) => `#${row.id}`).join(", ")}`);
     if (config.sync.enableBackfillScheduler && syncService.getBackfillStatus().pending) {
@@ -495,6 +522,105 @@ async function readRequestBody(request) {
 
   const text = Buffer.concat(chunks).toString("utf-8");
   return text ? JSON.parse(text) : {};
+}
+
+function extractCourtListenerWebhookDocketId(entry = {}) {
+  if (entry?.docket) {
+    const match = String(entry.docket).match(/dockets\/(\d+)/);
+    if (match?.[1]) {
+      return String(match[1]);
+    }
+  }
+
+  if (entry?.docket_id) {
+    return String(entry.docket_id);
+  }
+
+  return null;
+}
+
+async function handleCourtListenerWebhook(request, response, pathname) {
+  const webhookSecret = String(config.courtListener?.webhookSecret || "").trim();
+  if (!webhookSecret) {
+    return sendJson(response, 503, { error: "Webhook not configured" });
+  }
+
+  const urlSecret = pathname.slice(courtListenerWebhookPrefix.length);
+  if (!urlSecret || urlSecret !== webhookSecret) {
+    return sendJson(response, 403, { error: "Invalid webhook secret" });
+  }
+
+  try {
+    const body = await readRequestBody(request);
+    const results = Array.isArray(body?.payload?.results)
+      ? body.payload.results
+      : Array.isArray(body?.results)
+        ? body.results
+        : [];
+    const webhookMeta = body?.webhook || {};
+    const idempotencyKey = request.headers["idempotency-key"] || null;
+    console.log(
+      `[webhook] CL: type=${webhookMeta.event_type || "unknown"}, results=${results.length}, key=${idempotencyKey || "none"}`
+    );
+
+    let processed = 0;
+    let skipped = 0;
+    const timestamp = new Date().toISOString();
+    const findCaseByCLId = store.db.prepare(
+      "SELECT id, case_name, docket_number FROM cases WHERE courtlistener_docket_id = ? LIMIT 1"
+    );
+
+    for (const entry of results) {
+      try {
+        const docketId = extractCourtListenerWebhookDocketId(entry);
+        if (!docketId) {
+          skipped += 1;
+          continue;
+        }
+
+        const caseRow = findCaseByCLId.get(docketId);
+        if (!caseRow) {
+          skipped += 1;
+          continue;
+        }
+
+        const entryId = entry.id ?? null;
+        const entryNumber = entry.entry_number ?? entry.document_number ?? null;
+        const entryKey = `courtlistener:docket-entry:${entryId ?? `${docketId}:${entryNumber ?? Date.now()}`}`;
+        store.upsertDocketEntry({
+          case_id: caseRow.id,
+          source_entry_key: entryKey,
+          primary_source: "courtlistener",
+          source_entry_id: entryId != null ? String(entryId) : null,
+          document_type: null,
+          entry_number: entryNumber != null ? String(entryNumber) : null,
+          document_number: entry.document_number != null ? String(entry.document_number) : null,
+          filed_at: entry.date_filed || entry.entry_date_filed || null,
+          description: entry.description || null,
+          absolute_url: entry.absolute_url ? courtListener.absoluteUrl(entry.absolute_url) : null,
+          is_available: entry.recap_documents?.some((item) => item.is_available) ? 1 : 0,
+          page_count: entry.page_count ?? null,
+          pacer_doc_id: entry.pacer_doc_id != null ? String(entry.pacer_doc_id) : null,
+          raw_json: JSON.stringify(entry),
+          last_synced_at: timestamp
+        });
+        processed += 1;
+      } catch (error) {
+        console.error("[webhook] entry error:", error);
+        skipped += 1;
+      }
+    }
+
+    if (processed > 0) {
+      clearPublicResponseCache();
+    }
+
+    console.log(`[webhook] Done: processed=${processed}, skipped=${skipped}`);
+    return sendJson(response, 200, { received: true, processed, skipped, idempotencyKey });
+  } catch (error) {
+    console.error("[webhook] Error:", error);
+    return sendJson(response, 500, { error: "Webhook processing error" });
+  }
 }
 
 function authorize(request) {
@@ -2207,6 +2333,10 @@ async function handleApi(request, response, pathname, searchParams) {
     response.writeHead(204, buildApiHeaders(request.headers.origin || ""));
     response.end();
     return;
+  }
+
+  if (request.method === "POST" && pathname.startsWith(courtListenerWebhookPrefix)) {
+    return handleCourtListenerWebhook(request, response, pathname);
   }
 
   if (enforceTemporaryPublicBlock(request, response, pathname)) {

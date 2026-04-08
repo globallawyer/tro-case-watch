@@ -238,7 +238,8 @@ export const config = {
     recapFetchMaxPollMs: envInt("COURTLISTENER_RECAP_FETCH_MAX_POLL_MS", 12000),
     recapFetchShowPartiesAndCounsel: envBool("COURTLISTENER_RECAP_FETCH_SHOW_PARTIES_AND_COUNSEL", true),
     docketMaxCasesPerRun: envInt("COURTLISTENER_DOCKET_MAX_CASES_PER_RUN", 8),
-    docketBackfillMaxCasesPerRun: envInt("COURTLISTENER_DOCKET_BACKFILL_MAX_CASES_PER_RUN", 40)
+    docketBackfillMaxCasesPerRun: envInt("COURTLISTENER_DOCKET_BACKFILL_MAX_CASES_PER_RUN", 40),
+    webhookSecret: env("COURTLISTENER_WEBHOOK_SECRET", "")
   },
   priorityFeed: {
     enabled: envAnyBool(["PRIORITY_FEED_ENABLED", buildLegacyPriorityFeedEnvKey("ENABLED")], true),
