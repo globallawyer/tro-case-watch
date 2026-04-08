@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { deriveCaseInsights, normalizeDocket, normalizeText } from "./insights.js";
+import { deriveCaseInsights, docketLooksLike, normalizeDocket, normalizeText } from "./insights.js";
 import { buildTagsMarker } from "./queries.js";
 import {
   PRIORITY_FEED_ENTRY_SOURCE,
@@ -479,6 +479,38 @@ function normalizeCourtLookupText(value) {
   );
 }
 
+function isPlainObject(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function mergeNestedObjects(...objects) {
+  const merged = {};
+
+  for (const object of objects) {
+    if (!isPlainObject(object)) {
+      continue;
+    }
+
+    for (const [key, value] of Object.entries(object)) {
+      if (Array.isArray(value) && Array.isArray(merged[key])) {
+        merged[key] = mergeArraysNormalized(merged[key], value);
+        continue;
+      }
+
+      if (isPlainObject(value) && isPlainObject(merged[key])) {
+        merged[key] = mergeNestedObjects(merged[key], value);
+        continue;
+      }
+
+      if (value !== undefined) {
+        merged[key] = value;
+      }
+    }
+  }
+
+  return merged;
+}
+
 function buildCanonicalCourtKey(caseLike) {
   return normalizeCourtLookupText(caseLike?.court_name) || normalizeLookupText(caseLike?.court_id);
 }
@@ -615,6 +647,250 @@ function caseSourceRank(caseLike = {}) {
   }
 }
 
+const CASE_NAME_STOP_WORDS = new Set([
+  "a",
+  "an",
+  "and",
+  "associations",
+  "company",
+  "corporation",
+  "corp",
+  "defendant",
+  "defendants",
+  "identified",
+  "inc",
+  "incorporated",
+  "liability",
+  "limited",
+  "llc",
+  "listed",
+  "on",
+  "partnerships",
+  "schedule",
+  "the",
+  "unincorporated",
+  "v",
+  "vs"
+]);
+
+function preferLongerNormalizedValue(existingValue, incomingValue, normalize = normalizeLookupText) {
+  const left = String(existingValue || "").trim();
+  const right = String(incomingValue || "").trim();
+
+  if (!left) {
+    return right || null;
+  }
+
+  if (!right) {
+    return left || null;
+  }
+
+  if (normalize(left) === normalize(right)) {
+    return right.length > left.length ? right : left;
+  }
+
+  return right.length > left.length ? right : left;
+}
+
+function docketNumberQualityScore(value) {
+  const text = String(value || "").trim();
+  if (!text || !docketLooksLike(text)) {
+    return -1;
+  }
+
+  let score = text.length;
+  if (/\b\d+:\d{2}-cv-\d{3,6}\b/i.test(text)) {
+    score += 40;
+  }
+  if (/\b20\d{2}-cv-\d{3,6}\b/i.test(text)) {
+    score -= 4;
+  }
+
+  return score;
+}
+
+function pickPreferredDocketNumber(existingValue, incomingValue) {
+  const left = String(existingValue || "").trim();
+  const right = String(incomingValue || "").trim();
+  if (!left) {
+    return right || null;
+  }
+
+  if (!right) {
+    return left || null;
+  }
+
+  const leftNormalized = normalizeDocket(left);
+  const rightNormalized = normalizeDocket(right);
+  if (leftNormalized && rightNormalized && leftNormalized === rightNormalized) {
+    const leftScore = docketNumberQualityScore(left);
+    const rightScore = docketNumberQualityScore(right);
+    if (rightScore !== leftScore) {
+      return rightScore > leftScore ? right : left;
+    }
+    return right.length > left.length ? right : left;
+  }
+
+  return docketNumberQualityScore(right) > docketNumberQualityScore(left) ? right : left;
+}
+
+function courtNameQualityScore(value) {
+  const text = String(value || "").trim();
+  if (!text) {
+    return -1;
+  }
+
+  let score = text.length;
+  if (/\b(?:northern|southern|eastern|western|central|middle)\b/i.test(text)) {
+    score += 12;
+  }
+  if (/\bdistrict of\b/i.test(text)) {
+    score += 10;
+  }
+  if (/\b[a-z]\.?\s*d\.\b/i.test(text) || /\b[a-z]\.?\s*d\.?\s+[a-z]/i.test(text)) {
+    score -= 8;
+  }
+  return score;
+}
+
+function pickPreferredCourtName(existingValue, incomingValue) {
+  const left = String(existingValue || "").trim();
+  const right = String(incomingValue || "").trim();
+  if (!left) {
+    return right || null;
+  }
+
+  if (!right) {
+    return left || null;
+  }
+
+  const leftNormalized = normalizeCourtLookupText(left);
+  const rightNormalized = normalizeCourtLookupText(right);
+  if (
+    leftNormalized &&
+    rightNormalized &&
+    (leftNormalized === rightNormalized || leftNormalized.includes(rightNormalized) || rightNormalized.includes(leftNormalized))
+  ) {
+    const leftScore = courtNameQualityScore(left);
+    const rightScore = courtNameQualityScore(right);
+    if (rightScore !== leftScore) {
+      return rightScore > leftScore ? right : left;
+    }
+    return right.length > left.length ? right : left;
+  }
+
+  return courtNameQualityScore(right) > courtNameQualityScore(left) ? right : left;
+}
+
+function buildPartyNeedles(values = []) {
+  const needles = new Set();
+
+  for (const value of values) {
+    const normalized = normalizeLookupText(value);
+    if (!normalized) {
+      continue;
+    }
+
+    needles.add(normalized);
+    for (const token of normalized.split(" ").filter((item) => item.length >= 3 && !CASE_NAME_STOP_WORDS.has(item))) {
+      needles.add(token);
+    }
+  }
+
+  return [...needles.values()];
+}
+
+function countNeedleHits(text, needles = []) {
+  const haystack = normalizeLookupText(text);
+  if (!haystack) {
+    return 0;
+  }
+
+  let hits = 0;
+  for (const needle of needles) {
+    if (needle && haystack.includes(needle)) {
+      hits += needle.includes(" ") ? 3 : 1;
+    }
+  }
+
+  return hits;
+}
+
+function caseNameQualityScore(value, { plaintiffs = [], defendants = [], primarySource = "" } = {}) {
+  const text = String(value || "").trim();
+  if (!text) {
+    return -1;
+  }
+
+  let score = Math.min(text.length, 220);
+  if (/\b(v\.|vs\.)\b/i.test(text)) {
+    score += 18;
+  }
+
+  score += countNeedleHits(text, buildPartyNeedles(plaintiffs)) * 14;
+  score += countNeedleHits(text, buildPartyNeedles(defendants)) * 8;
+  score += caseSourceRank({ primary_source: primarySource }) * 2;
+
+  return score;
+}
+
+function pickPreferredCaseName(
+  existingValue,
+  incomingValue,
+  {
+    plaintiffs = [],
+    defendants = [],
+    existingSource = "",
+    incomingSource = ""
+  } = {}
+) {
+  const left = String(existingValue || "").trim();
+  const right = String(incomingValue || "").trim();
+  if (!left) {
+    return right || null;
+  }
+
+  if (!right) {
+    return left || null;
+  }
+
+  const leftNormalized = normalizeLookupText(left);
+  const rightNormalized = normalizeLookupText(right);
+  if (leftNormalized && rightNormalized && leftNormalized === rightNormalized) {
+    return right.length > left.length ? right : left;
+  }
+
+  const leftScore = caseNameQualityScore(left, {
+    plaintiffs,
+    defendants,
+    primarySource: existingSource
+  });
+  const rightScore = caseNameQualityScore(right, {
+    plaintiffs,
+    defendants,
+    primarySource: incomingSource
+  });
+
+  if (rightScore !== leftScore) {
+    return rightScore > leftScore ? right : left;
+  }
+
+  return right.length > left.length ? right : left;
+}
+
+function pickPreferredPrimarySource(existingValue, incomingValue) {
+  const left = String(existingValue || "").trim();
+  const right = String(incomingValue || "").trim();
+  if (!left) {
+    return right || null;
+  }
+  if (!right) {
+    return left || null;
+  }
+
+  return caseSourceRank({ primary_source: right }) > caseSourceRank({ primary_source: left }) ? right : left;
+}
+
 function compareCaseRowsForCanonicalChoice(left, right) {
   const leftPriorityFeed = getPriorityFeedRowCount(left) > 0 ? 1 : 0;
   const rightPriorityFeed = getPriorityFeedRowCount(right) > 0 ? 1 : 0;
@@ -695,28 +971,7 @@ function mergeArraysNormalized(...lists) {
 }
 
 function mergeCaseRaw(group) {
-  const merged = {};
-  for (const item of group) {
-    const raw = item?.raw || {};
-    for (const [key, value] of Object.entries(raw)) {
-      if (
-        value &&
-        typeof value === "object" &&
-        !Array.isArray(value) &&
-        merged[key] &&
-        typeof merged[key] === "object" &&
-        !Array.isArray(merged[key])
-      ) {
-        merged[key] = {
-          ...merged[key],
-          ...value
-        };
-      } else if (value !== undefined) {
-        merged[key] = value;
-      }
-    }
-  }
-  return merged;
+  return mergeNestedObjects(...group.map((item) => item?.raw || {}));
 }
 
 function mergeDuplicateCaseGroup(group) {
@@ -726,18 +981,43 @@ function mergeDuplicateCaseGroup(group) {
 
   const ordered = [...group].sort(compareCaseRowsForCanonicalChoice);
   const canonical = ordered[0];
+  const mergedSourceUrls = mergeArraysNormalized(...ordered.map((item) => item.source_urls));
+  const mergedPlaintiffs = mergeArraysNormalized(...ordered.map((item) => item.plaintiffs));
+  const mergedDefendants = mergeArraysNormalized(...ordered.map((item) => item.defendants));
+  const preferredCaseName = ordered.reduce(
+    (best, item) => pickPreferredCaseName(best, item.case_name, {
+      plaintiffs: mergedPlaintiffs,
+      defendants: mergedDefendants,
+      existingSource: canonical.primary_source,
+      incomingSource: item.primary_source
+    }),
+    canonical.case_name || null
+  );
+  const preferredCourtName = ordered.reduce(
+    (best, item) => pickPreferredCourtName(best, item.court_name),
+    canonical.court_name || null
+  );
+  const preferredDocketNumber = ordered.reduce(
+    (best, item) => pickPreferredDocketNumber(best, item.docket_number),
+    canonical.docket_number || null
+  );
+  const preferredPrimarySource = ordered.reduce(
+    (best, item) => pickPreferredPrimarySource(best, item.primary_source),
+    canonical.primary_source || null
+  );
   const merged = {
     ...canonical,
     courtlistener_docket_id:
       canonical.courtlistener_docket_id || ordered.find((item) => item.courtlistener_docket_id)?.courtlistener_docket_id || null,
     pacer_case_id: canonical.pacer_case_id || ordered.find((item) => item.pacer_case_id)?.pacer_case_id || null,
     court_id: canonical.court_id || ordered.find((item) => item.court_id)?.court_id || null,
-    court_name: canonical.court_name || ordered.find((item) => item.court_name)?.court_name || null,
-    case_name: canonical.case_name || ordered.find((item) => item.case_name)?.case_name || null,
-    primary_source: canonical.primary_source,
-    source_urls: mergeArraysNormalized(...ordered.map((item) => item.source_urls)),
-    plaintiffs: mergeArraysNormalized(...ordered.map((item) => item.plaintiffs)),
-    defendants: mergeArraysNormalized(...ordered.map((item) => item.defendants)),
+    court_name: preferredCourtName,
+    case_name: preferredCaseName,
+    docket_number: preferredDocketNumber,
+    primary_source: preferredPrimarySource,
+    source_urls: mergedSourceUrls,
+    plaintiffs: mergedPlaintiffs,
+    defendants: mergedDefendants,
     entries: dedupeEntries(ordered.flatMap((item) => item.entries || [])),
     raw: mergeCaseRaw(ordered),
     latest_docket_filed_at: ordered.reduce(
@@ -1221,6 +1501,48 @@ function normalizedEntryOrderKey(entry) {
   return normalized;
 }
 
+function normalizeEntryUrlKey(value) {
+  const raw = String(value || "").trim();
+  if (!raw) {
+    return "";
+  }
+
+  try {
+    const url = new URL(raw);
+    url.hash = "";
+    return url.toString().toLowerCase();
+  } catch {
+    return raw.toLowerCase();
+  }
+}
+
+function buildStoredEntryDeduplicationKey(entry) {
+  const caseId = Number(entry?.case_id || 0);
+  const primarySource = String(entry?.primary_source || "").trim().toLowerCase();
+  if (!caseId || !primarySource) {
+    return "";
+  }
+
+  const sourceEntryId = normalizeLookupText(entry?.source_entry_id);
+  if (sourceEntryId) {
+    return `${caseId}|${primarySource}|id:${sourceEntryId}`;
+  }
+
+  const absoluteUrl = normalizeEntryUrlKey(entry?.absolute_url);
+  if (absoluteUrl) {
+    return `${caseId}|${primarySource}|url:${absoluteUrl}`;
+  }
+
+  const orderKey = normalizedEntryOrderKey(entry);
+  const filedAt = String(entry?.filed_at || "").trim();
+  const description = normalizeEntryDescription(entry?.description).slice(0, 320);
+  if (!orderKey && !filedAt && !description) {
+    return "";
+  }
+
+  return `${caseId}|${primarySource}|fallback:${orderKey}|${filedAt}|${description}`;
+}
+
 function parseEntryOrderValue(entry) {
   const candidates = [entry.document_number, entry.entry_number];
 
@@ -1283,6 +1605,88 @@ function entryContentRank(entry) {
   }
 
   return 0;
+}
+
+function pickPreferredEntryDescription(existingValue, incomingValue) {
+  return preferLongerNormalizedValue(existingValue, incomingValue, normalizeEntryDescription);
+}
+
+function pickPreferredEntryType(existingValue, incomingValue) {
+  const left = String(existingValue || "").trim();
+  const right = String(incomingValue || "").trim();
+  if (!left) {
+    return right || null;
+  }
+  if (!right) {
+    return left || null;
+  }
+
+  const leftScore = entryContentRank({ document_type: left });
+  const rightScore = entryContentRank({ document_type: right });
+  if (rightScore !== leftScore) {
+    return rightScore > leftScore ? right : left;
+  }
+
+  return right.length > left.length ? right : left;
+}
+
+function pickPreferredEntryNumber(existingValue, incomingValue) {
+  const left = normalizeOrderText(existingValue);
+  const right = normalizeOrderText(incomingValue);
+  if (!left) {
+    return right || incomingValue || null;
+  }
+  if (!right) {
+    return left || existingValue || null;
+  }
+  return right.length > left.length ? incomingValue : existingValue;
+}
+
+function pickPreferredEntryUrl(existingValue, incomingValue) {
+  const left = normalizeEntryUrlKey(existingValue);
+  const right = normalizeEntryUrlKey(incomingValue);
+  if (!left) {
+    return incomingValue || null;
+  }
+  if (!right) {
+    return existingValue || null;
+  }
+  return String(incomingValue || "").length > String(existingValue || "").length ? incomingValue : existingValue;
+}
+
+function pickPreferredNumericValue(existingValue, incomingValue) {
+  const numbers = [existingValue, incomingValue]
+    .map((value) => Number(value))
+    .filter((value) => Number.isFinite(value));
+  if (!numbers.length) {
+    return null;
+  }
+
+  return Math.max(...numbers);
+}
+
+function buildMergedDocketEntryRecord(existing = null, record = {}, timestamp = nowIso()) {
+  const mergedRaw = mergeNestedObjects(existing?.raw || {}, record.raw || {});
+  return {
+    case_id: Number(record.case_id || existing?.case_id || 0),
+    source_entry_key: record.source_entry_key || existing?.source_entry_key,
+    primary_source: record.primary_source || existing?.primary_source || null,
+    source_entry_id: preferLongerNormalizedValue(existing?.source_entry_id, record.source_entry_id) || null,
+    document_type: pickPreferredEntryType(existing?.document_type, record.document_type),
+    entry_number: pickPreferredEntryNumber(existing?.entry_number, record.entry_number),
+    document_number: pickPreferredEntryNumber(existing?.document_number, record.document_number),
+    filed_at: laterIso(existing?.filed_at, record.filed_at) || existing?.filed_at || record.filed_at || null,
+    description: pickPreferredEntryDescription(existing?.description, record.description),
+    description_zh: existing?.description_zh || record.description_zh || null,
+    absolute_url: pickPreferredEntryUrl(existing?.absolute_url, record.absolute_url),
+    is_available: pickPreferredNumericValue(existing?.is_available, record.is_available),
+    page_count: pickPreferredNumericValue(existing?.page_count, record.page_count),
+    pacer_doc_id: preferLongerNormalizedValue(existing?.pacer_doc_id, record.pacer_doc_id) || null,
+    raw: mergedRaw,
+    last_synced_at: laterIso(existing?.last_synced_at, record.last_synced_at) || timestamp,
+    created_at: existing?.created_at || timestamp,
+    updated_at: timestamp
+  };
 }
 
 function compareEntriesForCanonicalRow(left, right) {
@@ -1410,6 +1814,25 @@ function applyAuthoritativeDocketPreference(caseLike, entries = null) {
   }
 
   return preferred;
+}
+
+function getLawFirmMetadataEntryCount(caseLike = {}) {
+  const sites = caseLike?.raw?.law_firm_sites;
+  if (!isPlainObject(sites)) {
+    return 0;
+  }
+
+  return Object.values(sites).reduce((maxCount, site) => {
+    const count = Number(site?.entryCount || 0);
+    return Number.isFinite(count) ? Math.max(maxCount, count) : maxCount;
+  }, 0);
+}
+
+function getKnownExternalEntryCount(caseLike = {}) {
+  return Math.max(
+    getPriorityFeedRowCount(caseLike),
+    getLawFirmMetadataEntryCount(caseLike)
+  );
 }
 
 function compareCaseActivityDesc(left, right) {
@@ -1865,8 +2288,32 @@ export class Store {
     const mergedDefendants = this.mergeJsonArrays(existing?.defendants, record.defendants);
     const timestamp = nowIso();
     const candidate = {
-      ...existing,
-      ...record,
+      ...(existing || {}),
+      ...(record || {}),
+      primary_source: pickPreferredPrimarySource(existing?.primary_source, record.primary_source),
+      source_case_id:
+        preferLongerNormalizedValue(existing?.source_case_id, record.source_case_id) ||
+        existing?.source_case_id ||
+        record.source_case_id ||
+        null,
+      courtlistener_docket_id: record.courtlistener_docket_id ?? existing?.courtlistener_docket_id ?? null,
+      pacer_case_id: record.pacer_case_id ?? existing?.pacer_case_id ?? null,
+      court_id: record.court_id || existing?.court_id || null,
+      court_name: pickPreferredCourtName(existing?.court_name, record.court_name),
+      case_name: pickPreferredCaseName(existing?.case_name, record.case_name, {
+        plaintiffs: mergedPlaintiffs,
+        defendants: mergedDefendants,
+        existingSource: existing?.primary_source,
+        incomingSource: record.primary_source
+      }),
+      case_name_zh: preferLongerNormalizedValue(existing?.case_name_zh, record.case_name_zh, normalizeText),
+      docket_number: pickPreferredDocketNumber(existing?.docket_number, record.docket_number),
+      docket_url: record.docket_url || existing?.docket_url || null,
+      date_filed: record.date_filed || existing?.date_filed || null,
+      date_terminated: record.date_terminated || existing?.date_terminated || null,
+      cause: record.cause || existing?.cause || null,
+      nature_of_suit: record.nature_of_suit || existing?.nature_of_suit || null,
+      status: record.status || existing?.status || null,
       tags_marker: mergedTags,
       tags: mergedTags
         .split("|")
@@ -1875,17 +2322,21 @@ export class Store {
       source_urls: mergedUrls,
       plaintiffs: mergedPlaintiffs,
       defendants: mergedDefendants,
-      recent_activity_summary: record.recent_activity_summary ?? existing?.recent_activity_summary ?? null,
-      recent_activity_summary_zh: record.recent_activity_summary_zh ?? existing?.recent_activity_summary_zh ?? null,
+      recent_activity_summary: pickPreferredEntryDescription(existing?.recent_activity_summary, record.recent_activity_summary),
+      recent_activity_summary_zh: preferLongerNormalizedValue(
+        existing?.recent_activity_summary_zh,
+        record.recent_activity_summary_zh,
+        normalizeText
+      ),
       latest_docket_filed_at: laterIso(record.latest_docket_filed_at, existing?.latest_docket_filed_at),
       latest_docket_number: higherOrderValue(record.latest_docket_number, existing?.latest_docket_number),
       docket_count: Math.max(Number(record.docket_count ?? 0), Number(existing?.docket_count ?? 0)),
       last_seen_at: laterIso(record.last_seen_at, existing?.last_seen_at),
       last_synced_at: laterIso(record.last_synced_at, existing?.last_synced_at),
       last_docket_sync_at: laterIso(record.last_docket_sync_at, existing?.last_docket_sync_at),
+      last_translation_at: laterIso(record.last_translation_at, existing?.last_translation_at),
       raw: {
-        ...(existing?.raw || {}),
-        ...(record.raw || {})
+        ...mergeNestedObjects(existing?.raw || {}, record.raw || {})
       }
     };
     const retention = getCaseRetentionDecision(candidate);
@@ -1944,6 +2395,7 @@ export class Store {
           court_id = COALESCE(excluded.court_id, cases.court_id),
           court_name = COALESCE(excluded.court_name, cases.court_name),
           case_name = COALESCE(excluded.case_name, cases.case_name),
+          case_name_zh = COALESCE(excluded.case_name_zh, cases.case_name_zh),
           docket_number = COALESCE(excluded.docket_number, cases.docket_number),
           date_filed = COALESCE(excluded.date_filed, cases.date_filed),
           date_terminated = COALESCE(excluded.date_terminated, cases.date_terminated),
@@ -1969,27 +2421,28 @@ export class Store {
           last_seen_at = excluded.last_seen_at,
           last_synced_at = excluded.last_synced_at,
           last_docket_sync_at = COALESCE(excluded.last_docket_sync_at, cases.last_docket_sync_at),
+          last_translation_at = COALESCE(excluded.last_translation_at, cases.last_translation_at),
           raw_json = excluded.raw_json,
           updated_at = excluded.updated_at
       `)
       .run(
         record.source_case_key,
-        record.primary_source,
-        record.source_case_id,
-        record.courtlistener_docket_id ?? null,
-        record.pacer_case_id ?? null,
-        record.court_id ?? null,
-        record.court_name ?? null,
-        record.case_name ?? null,
-        record.case_name_zh ?? null,
-        record.docket_number ?? null,
-        record.date_filed ?? null,
-        record.date_terminated ?? null,
-        record.cause ?? null,
-        record.nature_of_suit ?? null,
-        record.status ?? null,
+        candidate.primary_source,
+        candidate.source_case_id,
+        candidate.courtlistener_docket_id ?? null,
+        candidate.pacer_case_id ?? null,
+        candidate.court_id ?? null,
+        candidate.court_name ?? null,
+        candidate.case_name ?? null,
+        candidate.case_name_zh ?? null,
+        candidate.docket_number ?? null,
+        candidate.date_filed ?? null,
+        candidate.date_terminated ?? null,
+        candidate.cause ?? null,
+        candidate.nature_of_suit ?? null,
+        candidate.status ?? null,
         mergedTags,
-        record.docket_url ?? null,
+        candidate.docket_url ?? null,
         toJson(mergedUrls, "[]"),
         toJson(mergedPlaintiffs, "[]"),
         toJson(mergedDefendants, "[]"),
@@ -2001,8 +2454,8 @@ export class Store {
         candidate.last_seen_at ?? timestamp,
         candidate.last_synced_at ?? timestamp,
         candidate.last_docket_sync_at ?? null,
-        record.last_translation_at ?? null,
-        toJson(record.raw, "{}"),
+        candidate.last_translation_at ?? null,
+        toJson(candidate.raw, "{}"),
         existing?.created_at ?? timestamp,
         timestamp
       );
@@ -2264,7 +2717,7 @@ export class Store {
     return Number(coverage?.priority_entries || 0) > 0;
   }
 
-  refreshCaseDocketSummaries(caseIds = [], { touchUpdatedAt = true } = {}) {
+  refreshCaseDocketSummaries(caseIds = [], { touchUpdatedAt = true, exactDocketCount = false } = {}) {
     const ids = [...new Set(
       caseIds
         .map((value) => Number(value))
@@ -2294,11 +2747,15 @@ export class Store {
           caseRow.latest_docket_number,
           coverage.lastNumber ? String(coverage.lastNumber) : null
         );
-        const nextDocketCount = Math.max(
-          Number(caseRow.docket_count || 0),
+        const knownExternalEntryCount = getKnownExternalEntryCount(caseRow);
+        const computedDocketCount = Math.max(
           Number(coverage.totalEntries || 0),
-          Number(coverage.lastNumber || 0)
+          Number(coverage.lastNumber || 0),
+          Number(knownExternalEntryCount || 0)
         );
+        const nextDocketCount = exactDocketCount
+          ? computedDocketCount
+          : Math.max(Number(caseRow.docket_count || 0), computedDocketCount);
         const hasChanged =
           String(nextLatestFiledAt || "") !== String(caseRow.latest_docket_filed_at || "") ||
           String(nextLatestNumber || "") !== String(caseRow.latest_docket_number || "") ||
@@ -2343,13 +2800,13 @@ export class Store {
     };
   }
 
-  refreshCaseDocketSummary(caseId, { touchUpdatedAt = true } = {}) {
+  refreshCaseDocketSummary(caseId, { touchUpdatedAt = true, exactDocketCount = false } = {}) {
     const normalizedCaseId = Number(caseId || 0);
     if (!Number.isFinite(normalizedCaseId) || normalizedCaseId <= 0) {
       return null;
     }
 
-    this.refreshCaseDocketSummaries([normalizedCaseId], { touchUpdatedAt });
+    this.refreshCaseDocketSummaries([normalizedCaseId], { touchUpdatedAt, exactDocketCount });
     return hydrateCase(this.db.prepare("SELECT * FROM cases WHERE id = ?").get(normalizedCaseId));
   }
 
@@ -2370,7 +2827,7 @@ export class Store {
     let refreshed = 0;
     for (let index = 0; index < ids.length; index += normalizedBatchSize) {
       const chunk = ids.slice(index, index + normalizedBatchSize);
-      const result = this.refreshCaseDocketSummaries(chunk, { touchUpdatedAt });
+        const result = this.refreshCaseDocketSummaries(chunk, { touchUpdatedAt });
       refreshed += Number(result.refreshed || 0);
     }
 
@@ -2382,83 +2839,274 @@ export class Store {
     };
   }
 
-  upsertDocketEntry(record) {
-    const existing = this.db
-      .prepare("SELECT id, description FROM docket_entries WHERE source_entry_key = ?")
-      .get(record.source_entry_key);
+  findEquivalentDocketEntryCandidates(record) {
+    const normalizedCaseId = Number(record?.case_id || 0);
+    const primarySource = String(record?.primary_source || "").trim();
+    if (!normalizedCaseId || !primarySource) {
+      return [];
+    }
 
-    const timestamp = nowIso();
+    const rowsById = new Map();
+    const pushRows = (rows = []) => {
+      for (const row of rows) {
+        const hydrated = hydrateEntry(row);
+        if (hydrated?.id) {
+          rowsById.set(Number(hydrated.id), hydrated);
+        }
+      }
+    };
 
-    this.db
-      .prepare(`
-        INSERT INTO docket_entries (
-          case_id,
-          source_entry_key,
-          primary_source,
-          source_entry_id,
-          document_type,
-          entry_number,
-          document_number,
-          filed_at,
-          description,
-          description_zh,
-          absolute_url,
-          is_available,
-          page_count,
-          pacer_doc_id,
-          raw_json,
-          last_synced_at,
-          created_at,
-          updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(source_entry_key) DO UPDATE SET
-          case_id = excluded.case_id,
-          primary_source = excluded.primary_source,
-          source_entry_id = COALESCE(excluded.source_entry_id, docket_entries.source_entry_id),
-          document_type = COALESCE(excluded.document_type, docket_entries.document_type),
-          entry_number = COALESCE(excluded.entry_number, docket_entries.entry_number),
-          document_number = COALESCE(excluded.document_number, docket_entries.document_number),
-          filed_at = COALESCE(excluded.filed_at, docket_entries.filed_at),
-          description = COALESCE(excluded.description, docket_entries.description),
-          description_zh = CASE
-            WHEN excluded.description IS NOT NULL AND excluded.description <> docket_entries.description THEN NULL
-            ELSE docket_entries.description_zh
-          END,
-          absolute_url = COALESCE(excluded.absolute_url, docket_entries.absolute_url),
-          is_available = COALESCE(excluded.is_available, docket_entries.is_available),
-          page_count = COALESCE(excluded.page_count, docket_entries.page_count),
-          pacer_doc_id = COALESCE(excluded.pacer_doc_id, docket_entries.pacer_doc_id),
-          raw_json = excluded.raw_json,
-          last_synced_at = excluded.last_synced_at,
-          updated_at = excluded.updated_at
-      `)
-      .run(
-        record.case_id,
-        record.source_entry_key,
-        record.primary_source,
-        record.source_entry_id ?? null,
-        record.document_type ?? null,
-        record.entry_number ?? null,
-        record.document_number ?? null,
-        record.filed_at ?? null,
-        record.description ?? null,
-        record.description_zh ?? null,
-        record.absolute_url ?? null,
-        record.is_available ?? null,
-        record.page_count ?? null,
-        record.pacer_doc_id ?? null,
-        toJson(record.raw, "{}"),
-        record.last_synced_at ?? timestamp,
-        existing ? existing.created_at ?? timestamp : timestamp,
-        timestamp
+    const sourceEntryId = String(record?.source_entry_id || "").trim();
+    if (sourceEntryId) {
+      pushRows(
+        this.db
+          .prepare(`
+            SELECT *
+            FROM docket_entries
+            WHERE case_id = ?
+              AND primary_source = ?
+              AND source_entry_id = ?
+          `)
+          .all(normalizedCaseId, primarySource, sourceEntryId)
       );
+    }
 
-    const savedEntry = hydrateEntry(
+    if (!rowsById.size && record?.filed_at) {
+      pushRows(
+        this.db
+          .prepare(`
+            SELECT *
+            FROM docket_entries
+            WHERE case_id = ?
+              AND primary_source = ?
+              AND filed_at = ?
+          `)
+          .all(normalizedCaseId, primarySource, record.filed_at)
+      );
+    }
+
+    const targetKey = buildStoredEntryDeduplicationKey(record);
+    return [...rowsById.values()]
+      .filter((row) => !targetKey || buildStoredEntryDeduplicationKey(row) === targetKey)
+      .sort(compareEntriesForCanonicalRow);
+  }
+
+  async dedupeStoredDocketEntries({
+    startDate = "2025-01-01",
+    caseId = 0,
+    limit = 0,
+    primarySource = null
+  } = {}) {
+    const normalizedCaseId = Number(caseId || 0);
+    const normalizedLimit = Math.max(0, Number(limit || 0));
+    const clauses = [];
+    const params = [];
+
+    if (normalizedCaseId > 0) {
+      clauses.push("de.case_id = ?");
+      params.push(normalizedCaseId);
+    } else if (startDate) {
+      clauses.push("date(c.date_filed) >= date(?)");
+      params.push(String(startDate));
+    }
+
+    if (primarySource) {
+      clauses.push("de.primary_source = ?");
+      params.push(String(primarySource));
+    }
+
+    const whereClause = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+    const rows = this.db
+      .prepare(`
+        SELECT de.*
+        FROM docket_entries de
+        JOIN cases c ON c.id = de.case_id
+        ${whereClause}
+        ORDER BY de.case_id ASC, de.primary_source ASC, de.id ASC
+      `)
+      .all(...params)
+      .map((row) => hydrateEntry(row));
+
+    const grouped = new Map();
+    for (const row of rows) {
+      const key = buildStoredEntryDeduplicationKey(row);
+      if (!key) {
+        continue;
+      }
+
+      if (!grouped.has(key)) {
+        grouped.set(key, []);
+      }
+      grouped.get(key).push(row);
+    }
+
+    const duplicateGroups = [...grouped.values()].filter((group) => group.length > 1);
+    const selectedGroups = normalizedLimit > 0 ? duplicateGroups.slice(0, normalizedLimit) : duplicateGroups;
+    let groupsProcessed = 0;
+    let entriesDeleted = 0;
+    const affectedCaseIds = new Set();
+
+    await this.batchMutations(async () => {
+      for (const group of selectedGroups) {
+        const ordered = [...group].sort(compareEntriesForCanonicalRow);
+        const duplicateIds = ordered
+          .slice(1)
+          .map((row) => Number(row.id))
+          .filter((value) => Number.isFinite(value) && value > 0);
+
+        if (!duplicateIds.length) {
+          continue;
+        }
+
+        const placeholders = duplicateIds.map(() => "?").join(", ");
+        this.db.prepare(`DELETE FROM docket_entries WHERE id IN (${placeholders})`).run(...duplicateIds);
+        groupsProcessed += 1;
+        entriesDeleted += duplicateIds.length;
+        affectedCaseIds.add(Number(ordered[0].case_id));
+      }
+
+      if (affectedCaseIds.size) {
+        this.refreshCaseDocketSummaries([...affectedCaseIds], {
+          touchUpdatedAt: false,
+          exactDocketCount: true
+        });
+      }
+    });
+
+    return {
+      groupsProcessed,
+      entriesDeleted,
+      affectedCases: affectedCaseIds.size
+    };
+  }
+
+  upsertDocketEntry(record) {
+    const timestamp = nowIso();
+    const exactExisting = hydrateEntry(
       this.db.prepare("SELECT * FROM docket_entries WHERE source_entry_key = ?").get(record.source_entry_key)
     );
+    const candidatesById = new Map();
+    for (const row of [exactExisting, ...this.findEquivalentDocketEntryCandidates(record)].filter(Boolean)) {
+      candidatesById.set(Number(row.id), row);
+    }
 
-    if (Number(record.case_id)) {
-      this.refreshCaseDocketSummary(Number(record.case_id));
+    const candidates = [...candidatesById.values()].sort(compareEntriesForCanonicalRow);
+    const existing = candidates[0] || null;
+    const duplicateIds = candidates
+      .slice(1)
+      .map((row) => Number(row.id))
+      .filter((value) => Number.isFinite(value) && value > 0);
+    const mergedRecord = buildMergedDocketEntryRecord(existing, record, timestamp);
+
+    if (duplicateIds.length) {
+      const placeholders = duplicateIds.map(() => "?").join(", ");
+      this.db.prepare(`DELETE FROM docket_entries WHERE id IN (${placeholders})`).run(...duplicateIds);
+    }
+
+    if (existing?.id) {
+      this.db
+        .prepare(`
+          UPDATE docket_entries
+          SET case_id = ?,
+              source_entry_key = ?,
+              primary_source = ?,
+              source_entry_id = ?,
+              document_type = ?,
+              entry_number = ?,
+              document_number = ?,
+              filed_at = ?,
+              description = ?,
+              description_zh = ?,
+              absolute_url = ?,
+              is_available = ?,
+              page_count = ?,
+              pacer_doc_id = ?,
+              raw_json = ?,
+              last_synced_at = ?,
+              updated_at = ?
+          WHERE id = ?
+        `)
+        .run(
+          mergedRecord.case_id,
+          mergedRecord.source_entry_key,
+          mergedRecord.primary_source,
+          mergedRecord.source_entry_id ?? null,
+          mergedRecord.document_type ?? null,
+          mergedRecord.entry_number ?? null,
+          mergedRecord.document_number ?? null,
+          mergedRecord.filed_at ?? null,
+          mergedRecord.description ?? null,
+          mergedRecord.description_zh ?? null,
+          mergedRecord.absolute_url ?? null,
+          mergedRecord.is_available ?? null,
+          mergedRecord.page_count ?? null,
+          mergedRecord.pacer_doc_id ?? null,
+          toJson(mergedRecord.raw, "{}"),
+          mergedRecord.last_synced_at ?? timestamp,
+          timestamp,
+          Number(existing.id)
+        );
+    } else {
+      this.db
+        .prepare(`
+          INSERT INTO docket_entries (
+            case_id,
+            source_entry_key,
+            primary_source,
+            source_entry_id,
+            document_type,
+            entry_number,
+            document_number,
+            filed_at,
+            description,
+            description_zh,
+            absolute_url,
+            is_available,
+            page_count,
+            pacer_doc_id,
+            raw_json,
+            last_synced_at,
+            created_at,
+            updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `)
+        .run(
+          mergedRecord.case_id,
+          mergedRecord.source_entry_key,
+          mergedRecord.primary_source,
+          mergedRecord.source_entry_id ?? null,
+          mergedRecord.document_type ?? null,
+          mergedRecord.entry_number ?? null,
+          mergedRecord.document_number ?? null,
+          mergedRecord.filed_at ?? null,
+          mergedRecord.description ?? null,
+          mergedRecord.description_zh ?? null,
+          mergedRecord.absolute_url ?? null,
+          mergedRecord.is_available ?? null,
+          mergedRecord.page_count ?? null,
+          mergedRecord.pacer_doc_id ?? null,
+          toJson(mergedRecord.raw, "{}"),
+          mergedRecord.last_synced_at ?? timestamp,
+          mergedRecord.created_at ?? timestamp,
+          timestamp
+        );
+    }
+
+    const savedEntry = hydrateEntry(
+      existing?.id
+        ? this.db.prepare("SELECT * FROM docket_entries WHERE id = ?").get(Number(existing.id))
+        : this.db.prepare("SELECT * FROM docket_entries WHERE source_entry_key = ?").get(mergedRecord.source_entry_key)
+    );
+
+    const affectedCaseIds = new Set(
+      [Number(record.case_id), Number(existing?.case_id)]
+        .filter((value) => Number.isFinite(value) && value > 0)
+    );
+    if (affectedCaseIds.size) {
+      this.refreshCaseDocketSummaries([...affectedCaseIds], {
+        touchUpdatedAt: true,
+        exactDocketCount: duplicateIds.length > 0
+      });
     }
 
     this.invalidateCaseViews();

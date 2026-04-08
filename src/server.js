@@ -2955,6 +2955,21 @@ async function main() {
       process.exit(0);
     }
 
+    if (rawMode === "dedupe-docket-entries") {
+      const limitIndex = process.argv.indexOf("--limit");
+      const caseIdIndex = process.argv.indexOf("--case-id");
+      const sourceIndex = process.argv.indexOf("--source");
+      const startDateIndex = process.argv.indexOf("--start-date");
+      const result = await store.dedupeStoredDocketEntries({
+        limit: limitIndex !== -1 ? Math.max(Number(process.argv[limitIndex + 1] || 0), 0) : 0,
+        caseId: caseIdIndex !== -1 ? Math.max(Number(process.argv[caseIdIndex + 1] || 0), 0) : 0,
+        primarySource: sourceIndex !== -1 ? String(process.argv[sourceIndex + 1] || "").trim() || null : null,
+        startDate: startDateIndex !== -1 ? String(process.argv[startDateIndex + 1] || "").trim() || config.sync.startDate : config.sync.startDate
+      });
+      console.log(`[sync] completed dedupe-docket-entries ${JSON.stringify(result)}`);
+      process.exit(0);
+    }
+
     if (rawMode === "purge-non-watchlist") {
       const limitIndex = process.argv.indexOf("--limit");
       const startDateIndex = process.argv.indexOf("--start-date");

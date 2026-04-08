@@ -599,6 +599,44 @@ function buildCourtDocketKey(courtId, docketNumber) {
   return `${normalizedCourt}|${normalizedDocket}`;
 }
 
+function buildLawFirmEntryIdentity(entry = {}) {
+  const sourceEntryId = normalizeLookupText(entry.sourceEntryId);
+  if (sourceEntryId) {
+    return `id:${sourceEntryId}`;
+  }
+
+  const absoluteUrl = String(entry.absoluteUrl || "").trim().toLowerCase();
+  if (absoluteUrl) {
+    return `url:${absoluteUrl}`;
+  }
+
+  const fallbackDigest = crypto
+    .createHash("sha1")
+    .update(
+      [
+        String(entry.filedAt || "").trim(),
+        String(entry.entryNumber || "").trim(),
+        String(entry.documentNumber || "").trim(),
+        normalizeLookupText(entry.description),
+        String(entry.documentType || "").trim()
+      ].join("|")
+    )
+    .digest("hex")
+    .slice(0, 20);
+
+  return `fallback:${fallbackDigest}`;
+}
+
+function buildLawFirmEntryKey(item, savedCase, entry) {
+  const caseIdentity =
+    buildCourtDocketKey(item.courtId || savedCase?.court_id, item.docketNumber || savedCase?.docket_number) ||
+    buildCourtDocketKey(item.courtName || savedCase?.court_name, item.docketNumber || savedCase?.docket_number) ||
+    `${normalizeLookupText(item.sourceCaseId || item.caseUrl || savedCase?.source_case_key || "")}|${normalizeDocket(item.docketNumber || savedCase?.docket_number) || "unknown"}` ||
+    `case:${Number(savedCase?.id || 0) || "unknown"}`;
+
+  return `${item.sourceId}:${caseIdentity}:${buildLawFirmEntryIdentity(entry)}`;
+}
+
 function deriveParties(result) {
   const parties = uniqueByNormalized(asArray(result.party));
   const caseName = String(valueOf(result.caseName, result.case_name_full) || "").trim();
@@ -2212,24 +2250,9 @@ export class CaseSyncService {
       let itemDocketEntriesUpserted = 0;
 
       for (const entry of asArray(item.entries)) {
-        const entryDigest = crypto
-          .createHash("sha1")
-          .update(
-            [
-              item.caseUrl,
-              entry.sourceEntryId,
-              entry.entryNumber,
-              entry.documentNumber,
-              entry.absoluteUrl,
-              entry.description
-            ].join("|")
-          )
-          .digest("hex")
-          .slice(0, 16);
-
         const savedEntry = this.store.upsertDocketEntry({
           case_id: savedCase.id,
-          source_entry_key: `${item.sourceId}:${savedCase.id}:${entryDigest}`,
+          source_entry_key: buildLawFirmEntryKey(item, savedCase, entry),
           primary_source: item.sourceId,
           source_entry_id: entry.sourceEntryId || null,
           document_type: entry.documentType || "Docket Entry",
