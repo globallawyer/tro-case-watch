@@ -3284,6 +3284,11 @@ async function main() {
     console.log(`TRO Case Watch listening on http://localhost:${config.server.port}`);
   });
 
+  if (!config.sync.internalSchedulersEnabled) {
+    console.log("[scheduler] internal background schedulers disabled; use cron or explicit sync commands");
+    return;
+  }
+
   if (config.sync.bootstrapSync) {
     setTimeout(() => {
       spawnDetachedTask(["--sync-only", "recent"]);

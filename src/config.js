@@ -205,6 +205,7 @@ export const config = {
     }
   },
   sync: {
+    internalSchedulersEnabled: envBool("ENABLE_INTERNAL_SCHEDULERS", false),
     enableScheduler: envBool("ENABLE_SCHEDULER", true),
     enableBackfillScheduler: envBool("ENABLE_BACKFILL_SCHEDULER", true),
     watchdogEnabled: envBool("SYNC_WATCHDOG_ENABLED", true),
