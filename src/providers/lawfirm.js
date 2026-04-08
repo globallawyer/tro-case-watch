@@ -753,6 +753,27 @@ function limit61troDetailCandidates(links = [], limit = 12) {
   return ordered;
 }
 
+async function findMatching61troItemFromDetailCandidates(client, source, links, docketNumber, { courtName = "" } = {}) {
+  const candidates = limit61troDetailCandidates(links);
+  for (const candidateUrl of candidates) {
+    try {
+      const detailHtml = await client.fetchText(candidateUrl);
+      const item = parse61troCasePage(detailHtml, candidateUrl, source);
+      if (
+        item?.docketNumber &&
+        normalizeDocketLookupCoreKey(item.docketNumber) === normalizeDocketLookupCoreKey(docketNumber) &&
+        lawFirmMatchesCourtName(item, courtName)
+      ) {
+        return item;
+      }
+    } catch {
+      continue;
+    }
+  }
+
+  return null;
+}
+
 function parseSriplawNoticeRows(html, baseUrl) {
   const table = String(html || "").match(/<table id="tablepress-[^"]+"[\s\S]*?<\/table>/i)?.[0] || "";
   const rows = [];
@@ -1222,20 +1243,14 @@ export class LawFirmClient {
         return detailUrl;
       }
 
-      const candidateLinks = limit61troDetailCandidates(extract61troDetailLinks(html, source.baseUrl));
-      for (const candidateUrl of candidateLinks) {
-        try {
-          const detailHtml = await this.fetchText(candidateUrl);
-          const item = parse61troCasePage(detailHtml, candidateUrl, source);
-          if (
-            item?.docketNumber &&
-            normalizeDocketLookupCoreKey(item.docketNumber) === normalizeDocketLookupCoreKey(docketNumber)
-          ) {
-            return candidateUrl;
-          }
-        } catch {
-          continue;
-        }
+      const matchedItem = await findMatching61troItemFromDetailCandidates(
+        this,
+        source,
+        extract61troDetailLinks(html, source.baseUrl),
+        docketNumber
+      );
+      if (matchedItem?.caseUrl) {
+        return matchedItem.caseUrl;
       }
 
       for (const nextPage of extract61troPaginationLinks(html, normalizedUrl)) {
@@ -1259,24 +1274,33 @@ export class LawFirmClient {
       }
 
       const detailUrl = extract61troSearchResultLink(html, docketNumber, source.baseUrl);
-      if (!detailUrl) {
-        continue;
+      if (detailUrl) {
+        let pageHtml = "";
+        try {
+          pageHtml = await this.fetchText(detailUrl);
+        } catch {
+          pageHtml = "";
+        }
+
+        const item = parse61troCasePage(pageHtml, detailUrl, source);
+        if (
+          item?.docketNumber &&
+          normalizeDocketLookupCoreKey(item.docketNumber) === normalizeDocketLookupCoreKey(docketNumber) &&
+          lawFirmMatchesCourtName(item, courtName)
+        ) {
+          return item;
+        }
       }
 
-      let pageHtml = "";
-      try {
-        pageHtml = await this.fetchText(detailUrl);
-      } catch {
-        continue;
-      }
-
-      const item = parse61troCasePage(pageHtml, detailUrl, source);
-      if (
-        item?.docketNumber &&
-        normalizeDocketLookupCoreKey(item.docketNumber) === normalizeDocketLookupCoreKey(docketNumber) &&
-        lawFirmMatchesCourtName(item, courtName)
-      ) {
-        return item;
+      const matchedItem = await findMatching61troItemFromDetailCandidates(
+        this,
+        source,
+        extract61troDetailLinks(html, source.baseUrl),
+        docketNumber,
+        { courtName }
+      );
+      if (matchedItem) {
+        return matchedItem;
       }
     }
 
