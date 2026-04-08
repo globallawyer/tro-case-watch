@@ -166,3 +166,69 @@ test("61tro docket lookup inspects search result detail pages when titles omit t
   assert.equal(item.entries.length, 1);
   assert.match(item.entries[0].description, /Order on Motion for Extension of Time/i);
 });
+
+test("61tro docket lookup can jump directly to a view page when search misses the right case", async () => {
+  const client = new LawFirmClient({
+    enabled: true,
+    sources: ["61tro"],
+    timeoutMs: 1000,
+    minIntervalMs: 0
+  });
+  const source = client.listSources().find((item) => item.id === "61tro");
+
+  const unrelatedSearchPage = `
+    <html>
+      <body>
+        <h4><a href="/view/id/gand-3%3A2026-cv-00011.html">gand-3:2026-cv-00011</a></h4>
+        <h5><a href="/view/id/gand-3%3A2026-cv-00011.html">Desty v. Georgia Division of Child Support Services</a></h5>
+      </body>
+    </html>
+  `;
+
+  const detailPage = `
+    <html>
+      <head>
+        <title>2026-cv-00011 - 案件详情 - 61TRO案件查询网</title>
+      </head>
+      <body>
+        最近更新：2026-04-04
+        <div class="post__title"><h2>2026-cv-00011</h2></div>
+        <div class="post__options"><h4>XYZ Corporation v. The Partnerships Identified On Schedule A</h4></div>
+        <span>法院：<a href="/fydetail/2.html">伊利诺伊州北区法院</a></span>
+        <div class="layui-timeline-item">
+          <div>
+            <h3 class="layui-timeline-title">04/03/2026</h3>
+            <p class="v-text">NOTICE of Voluntary Dismissal by Bose Corporation with prejudice as to certain Defendants 翻译</p>
+          </div>
+        </div>
+      </body>
+    </html>
+  `;
+
+  client.fetchText = async (url) => {
+    if (url === "https://61tro.com/view/id/ilnd-1%3A2026-cv-00011.html") {
+      return detailPage;
+    }
+    if (url.includes("/search.html?sn=")) {
+      return unrelatedSearchPage;
+    }
+    if (url === "https://61tro.com/sitemap.txt") {
+      return "https://61tro.com/tag/Bose%20Corporation.html";
+    }
+    if (url === "https://61tro.com/tag/Bose%20Corporation.html") {
+      return "<html><body></body></html>";
+    }
+    throw new Error(`Unexpected URL: ${url}`);
+  };
+
+  const item = await client.lookup61troByDocket(source, "1:26-cv-00011", {
+    courtName: "District Court, N.D. Illinois",
+    caseName: "Bose Corporation v. The Partnerships Identified on Schedule A"
+  });
+
+  assert.ok(item, "expected direct view URL fallback to resolve the 61tro case");
+  assert.equal(item.docketNumber, "26-cv-00011");
+  assert.equal(item.courtId, "ilnd");
+  assert.equal(item.entries.length, 1);
+  assert.match(item.entries[0].description, /Bose Corporation/i);
+});

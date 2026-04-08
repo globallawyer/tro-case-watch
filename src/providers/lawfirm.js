@@ -518,6 +518,65 @@ function build61troSearchTerms(docketNumber) {
   ].filter(Boolean))];
 }
 
+function resolve61troCourtId(value) {
+  const raw = cleanText(value);
+  if (!raw) {
+    return "";
+  }
+
+  const noWhitespaceKey = raw.replace(/\s+/g, "");
+  const mappedChinese = TRO61_COURT_NAME_TO_META[noWhitespaceKey];
+  if (mappedChinese?.courtId) {
+    return mappedChinese.courtId;
+  }
+
+  const normalized = normalizeLawFirmCourtLookup(raw);
+  if (!normalized) {
+    return "";
+  }
+
+  for (const [courtId, courtName] of Object.entries(COURT_ID_TO_NAME)) {
+    const normalizedName = normalizeLawFirmCourtLookup(courtName);
+    if (
+      normalizedName &&
+      (normalizedName === normalized || normalizedName.includes(normalized) || normalized.includes(normalizedName))
+    ) {
+      return courtId;
+    }
+  }
+
+  const codeMatch = raw.match(/\b([a-z]{4,5})\b/i);
+  if (codeMatch) {
+    const candidate = String(codeMatch[1] || "").toLowerCase();
+    if (COURT_ID_TO_NAME[candidate]) {
+      return candidate;
+    }
+  }
+
+  return "";
+}
+
+function build61troDirectViewCandidateUrls(source, docketNumber, { courtName = "" } = {}) {
+  const courtId = resolve61troCourtId(courtName);
+  const match = String(docketNumber || "").match(/\b(?:(\d+):)?(?:(20)?(\d{2}))-cv-(\d{3,6})\b/i);
+  if (!courtId || !match) {
+    return [];
+  }
+
+  const division = match[1] ? `${match[1]}:` : "";
+  const shortYear = match[3];
+  const fullYear = `20${shortYear}`;
+  const number = match[4];
+  const viewIds = [...new Set([
+    `${courtId}-${division}${fullYear}-cv-${number}`,
+    division ? `${courtId}-${division}${shortYear}-cv-${number}` : "",
+    `${courtId}-${fullYear}-cv-${number}`,
+    `${courtId}-${shortYear}-cv-${number}`
+  ].filter(Boolean))];
+
+  return viewIds.map((value) => `${source.baseUrl}/view/id/${encodeURIComponent(value)}.html`);
+}
+
 function extract61troSearchResultLink(html, docketNumber, baseUrl) {
   const targetKey = normalizeDocketLookupCoreKey(docketNumber);
   const links = extract61troDetailLinks(html, baseUrl);
@@ -1264,6 +1323,24 @@ export class LawFirmClient {
   }
 
   async lookup61troByDocket(source, docketNumber, { courtName = "", caseName = "", plaintiffs = [], firms = [] } = {}) {
+    for (const detailUrl of build61troDirectViewCandidateUrls(source, docketNumber, { courtName })) {
+      let pageHtml = "";
+      try {
+        pageHtml = await this.fetchText(detailUrl);
+      } catch {
+        continue;
+      }
+
+      const item = parse61troCasePage(pageHtml, detailUrl, source);
+      if (
+        item?.docketNumber &&
+        normalizeDocketLookupCoreKey(item.docketNumber) === normalizeDocketLookupCoreKey(docketNumber) &&
+        lawFirmMatchesCourtName(item, courtName)
+      ) {
+        return item;
+      }
+    }
+
     for (const term of build61troSearchTerms(docketNumber)) {
       const searchUrl = `${source.baseUrl}/search.html?sn=${encodeURIComponent(term)}`;
       let html = "";

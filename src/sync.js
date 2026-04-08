@@ -1537,7 +1537,10 @@ export class CaseSyncService {
         pacer_case_id: existingCase?.pacer_case_id ?? item.pacerCaseId ?? null,
         court_id: item.courtId || existingCase?.court_id || null,
         court_name: item.courtName || existingCase?.court_name || null,
-        case_name: item.caseName || existingCase?.case_name || null,
+        case_name:
+          item.sourceId === "61tro"
+            ? existingCase?.case_name || item.caseName || null
+            : item.caseName || existingCase?.case_name || null,
         docket_number: item.docketNumber || existingCase?.docket_number || null,
         date_filed: existingCase?.date_filed || item.dateFiled || null,
         date_terminated: existingCase?.date_terminated || null,
