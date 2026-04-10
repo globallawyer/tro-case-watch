@@ -370,6 +370,134 @@ test("restoreMissingFromBackup restores missing cases and docket entries by sour
   }
 });
 
+test("restoreMissingFromBackup can limit recovery to currently retained missing cases", async () => {
+  const backupDir = fs.mkdtempSync(path.join(os.tmpdir(), "tro-watch-retained-backup-"));
+  const liveDir = fs.mkdtempSync(path.join(os.tmpdir(), "tro-watch-retained-live-"));
+  const backupDbPath = path.join(backupDir, "backup.sqlite");
+  const liveDbPath = path.join(liveDir, "live.sqlite");
+  const backupStore = new Store(backupDbPath);
+  const liveStore = new Store(liveDbPath);
+  const timestamp = new Date().toISOString();
+
+  try {
+    const retainedCase = backupStore.upsertCase({
+      source_case_key: "case:ilnd:26-cv-00430",
+      primary_source: "courtlistener",
+      source_case_id: "73000430",
+      court_id: "ilnd",
+      court_name: "Northern District of Illinois",
+      case_name: "Example Brand LLC v. The Partnerships Identified on Schedule A",
+      docket_number: "1:26-cv-00430",
+      date_filed: "2026-02-12",
+      tags_marker: "|tro|schedule_a|seller_tro|",
+      is_watchlist: 1,
+      is_tro: 1,
+      is_schedule_a: 1,
+      is_seller_watch: 1
+    });
+    backupStore.upsertDocketEntry({
+      case_id: retainedCase.id,
+      source_entry_key: "courtlistener:430:1",
+      primary_source: "courtlistener",
+      source_entry_id: "430-entry-1",
+      filed_at: "2026-02-12",
+      description: "COMPLAINT filed"
+    });
+
+    backupStore.db.prepare(`
+      INSERT INTO cases (
+        source_case_key,
+        primary_source,
+        source_case_id,
+        court_id,
+        court_name,
+        case_name,
+        docket_number,
+        date_filed,
+        tags_marker,
+        is_watchlist,
+        is_tro,
+        is_schedule_a,
+        is_seller_watch,
+        priority_feed_row_count,
+        raw_json,
+        created_at,
+        updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      "case:nysd:26-cv-10191",
+      "courtlistener",
+      "7310191",
+      "nysd",
+      "Southern District of New York",
+      "Ordinary Contract Dispute LLC v. Example Inc.",
+      "1:26-cv-10191",
+      "2026-02-14",
+      "",
+      0,
+      0,
+      0,
+      0,
+      0,
+      "{}",
+      timestamp,
+      timestamp
+    );
+    const filteredCase = backupStore.db
+      .prepare("SELECT id FROM cases WHERE source_case_key = ? LIMIT 1")
+      .get("case:nysd:26-cv-10191");
+    backupStore.upsertDocketEntry({
+      case_id: filteredCase.id,
+      source_entry_key: "courtlistener:10191:1",
+      primary_source: "courtlistener",
+      source_entry_id: "10191-entry-1",
+      filed_at: "2026-02-14",
+      description: "COMPLAINT filed"
+    });
+
+    const dryRun = await liveStore.restoreMissingFromBackup({
+      sourceDbPath: backupDbPath,
+      dryRun: true,
+      retainedOnly: true
+    });
+    assert.equal(dryRun.missingCaseCount, 2);
+    assert.equal(dryRun.retainedOnly, true);
+    assert.equal(dryRun.retainedByCurrentRules, 1);
+    assert.equal(dryRun.selectedCaseCount, 1);
+    assert.equal(dryRun.missingEntryCount, 1);
+
+    const restored = await liveStore.restoreMissingFromBackup({
+      sourceDbPath: backupDbPath,
+      retainedOnly: true
+    });
+    assert.equal(restored.restoredCases, 1);
+    assert.equal(restored.restoredEntries, 1);
+
+    const retainedRestored = liveStore.db
+      .prepare("SELECT COUNT(*) AS n FROM cases WHERE source_case_key = ?")
+      .get("case:ilnd:26-cv-00430")?.n || 0;
+    const filteredRestored = liveStore.db
+      .prepare("SELECT COUNT(*) AS n FROM cases WHERE source_case_key = ?")
+      .get("case:nysd:26-cv-10191")?.n || 0;
+
+    assert.equal(retainedRestored, 1);
+    assert.equal(filteredRestored, 0);
+  } finally {
+    try {
+      backupStore.db.close();
+    } catch {
+      // ignore cleanup failures in tests
+    }
+    try {
+      liveStore.db.close();
+    } catch {
+      // ignore cleanup failures in tests
+    }
+    fs.rmSync(backupDir, { recursive: true, force: true });
+    fs.rmSync(liveDir, { recursive: true, force: true });
+  }
+});
+
 test("inspectMissingFromBackup summarizes reasons and flags for missing cases", () => {
   const backupDir = fs.mkdtempSync(path.join(os.tmpdir(), "tro-watch-inspect-backup-"));
   const liveDir = fs.mkdtempSync(path.join(os.tmpdir(), "tro-watch-inspect-live-"));
@@ -430,6 +558,123 @@ test("inspectMissingFromBackup summarizes reasons and flags for missing cases", 
     assert.equal(result.reasonCounts["general-civil"], 1);
     assert.equal(result.primarySourceCounts.courtlistener, 1);
     assert.equal(result.watchlistFlagCount, 0);
+  } finally {
+    try {
+      backupStore.db.close();
+    } catch {
+      // ignore cleanup failures in tests
+    }
+    try {
+      liveStore.db.close();
+    } catch {
+      // ignore cleanup failures in tests
+    }
+    fs.rmSync(backupDir, { recursive: true, force: true });
+    fs.rmSync(liveDir, { recursive: true, force: true });
+  }
+});
+
+test("inspectMissingFromBackup can focus on retained missing cases only", () => {
+  const backupDir = fs.mkdtempSync(path.join(os.tmpdir(), "tro-watch-inspect-retained-backup-"));
+  const liveDir = fs.mkdtempSync(path.join(os.tmpdir(), "tro-watch-inspect-retained-live-"));
+  const backupDbPath = path.join(backupDir, "backup.sqlite");
+  const liveDbPath = path.join(liveDir, "live.sqlite");
+  const backupStore = new Store(backupDbPath);
+  const liveStore = new Store(liveDbPath);
+  const timestamp = new Date().toISOString();
+
+  try {
+    backupStore.db.prepare(`
+      INSERT INTO cases (
+        source_case_key,
+        primary_source,
+        source_case_id,
+        court_id,
+        court_name,
+        case_name,
+        docket_number,
+        date_filed,
+        tags_marker,
+        is_watchlist,
+        is_tro,
+        is_schedule_a,
+        is_seller_watch,
+        priority_feed_row_count,
+        raw_json,
+        created_at,
+        updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      "case:ilnd:26-cv-00430",
+      "courtlistener",
+      "73000430",
+      "ilnd",
+      "Northern District of Illinois",
+      "Example Brand LLC v. The Partnerships Identified on Schedule A",
+      "1:26-cv-00430",
+      "2026-02-12",
+      "|tro|schedule_a|seller_tro|",
+      1,
+      1,
+      1,
+      1,
+      0,
+      "{}",
+      timestamp,
+      timestamp
+    );
+    backupStore.db.prepare(`
+      INSERT INTO cases (
+        source_case_key,
+        primary_source,
+        source_case_id,
+        court_id,
+        court_name,
+        case_name,
+        docket_number,
+        date_filed,
+        tags_marker,
+        is_watchlist,
+        is_tro,
+        is_schedule_a,
+        is_seller_watch,
+        priority_feed_row_count,
+        raw_json,
+        created_at,
+        updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      "case:nysd:26-cv-10191",
+      "courtlistener",
+      "7310191",
+      "nysd",
+      "Southern District of New York",
+      "Ordinary Contract Dispute LLC v. Example Inc.",
+      "1:26-cv-10191",
+      "2026-02-14",
+      "",
+      0,
+      0,
+      0,
+      0,
+      0,
+      "{}",
+      timestamp,
+      timestamp
+    );
+
+    const result = liveStore.inspectMissingFromBackup({
+      sourceDbPath: backupDbPath,
+      retainedOnly: true
+    });
+
+    assert.equal(result.missingCaseCount, 2);
+    assert.equal(result.inspectedCaseCount, 1);
+    assert.equal(result.retainedOnly, true);
+    assert.equal(result.retainedByCurrentRules, 1);
+    assert.equal(result.primarySourceCounts.courtlistener, 1);
+    assert.equal(result.reasonCounts["general-civil"] || 0, 0);
+    assert.equal(result.watchlistFlagCount, 1);
   } finally {
     try {
       backupStore.db.close();

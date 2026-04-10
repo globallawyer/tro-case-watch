@@ -2433,7 +2433,8 @@ export class Store {
   async restoreMissingFromBackup({
     sourceDbPath,
     dryRun = false,
-    limit = 0
+    limit = 0,
+    retainedOnly = false
   } = {}) {
     const resolvedSourceDbPath = path.resolve(String(sourceDbPath || "").trim());
     if (!resolvedSourceDbPath) {
@@ -2448,26 +2449,11 @@ export class Store {
 
     const alias = "restore_source";
     const attachSql = `ATTACH DATABASE ${sqliteStringLiteral(resolvedSourceDbPath)} AS ${alias};`;
-    const limitClause = Number(limit || 0) > 0 ? ` LIMIT ${Math.max(Number(limit || 0), 1)}` : "";
     let attached = false;
 
     try {
       this.db.exec(attachSql);
       attached = true;
-      this.db.exec(`
-        DROP TABLE IF EXISTS temp.restore_case_keys;
-        CREATE TEMP TABLE restore_case_keys (
-          source_case_key TEXT PRIMARY KEY
-        );
-
-        INSERT INTO restore_case_keys(source_case_key)
-        SELECT old_case.source_case_key
-        FROM ${alias}.cases old_case
-        LEFT JOIN cases live_case ON live_case.source_case_key = old_case.source_case_key
-        WHERE live_case.id IS NULL
-        ORDER BY old_case.id ASC${limitClause};
-      `);
-
       const missingCaseCount = Number(
         this.db
           .prepare(`
@@ -2478,6 +2464,47 @@ export class Store {
           `)
           .get()?.n || 0
       );
+      const missingRows = this.db
+        .prepare(`
+          SELECT old_case.*
+          FROM ${alias}.cases old_case
+          LEFT JOIN cases live_case ON live_case.source_case_key = old_case.source_case_key
+          WHERE live_case.id IS NULL
+          ORDER BY old_case.id ASC
+        `)
+        .all()
+        .map((row) => buildCaseView(row));
+
+      let retainedByCurrentRules = 0;
+      let selectedRows = missingRows;
+      if (retainedOnly) {
+        selectedRows = [];
+        for (const row of missingRows) {
+          const retention = getCaseRetentionDecision(row);
+          if (retention.retain) {
+            retainedByCurrentRules += 1;
+            selectedRows.push(row);
+          }
+        }
+      }
+      if (Number(limit || 0) > 0) {
+        selectedRows = selectedRows.slice(0, Math.max(Number(limit || 0), 1));
+      }
+
+      this.db.exec(`
+        DROP TABLE IF EXISTS temp.restore_case_keys;
+        CREATE TEMP TABLE restore_case_keys (
+          source_case_key TEXT PRIMARY KEY
+        );
+      `);
+      const insertRestoreCaseKey = this.db.prepare(`
+        INSERT OR IGNORE INTO temp.restore_case_keys(source_case_key)
+        VALUES (?)
+      `);
+      for (const key of selectedRows.map((row) => String(row.source_case_key || "").trim()).filter(Boolean)) {
+        insertRestoreCaseKey.run(key);
+      }
+
       const selectedCaseCount = Number(
         this.db.prepare(`SELECT COUNT(*) AS n FROM temp.restore_case_keys`).get()?.n || 0
       );
@@ -2493,27 +2520,13 @@ export class Store {
           `)
           .get()?.n || 0
       );
-      const sample = this.db
-        .prepare(`
-          SELECT
-            old_case.id,
-            old_case.docket_number,
-            old_case.case_name,
-            old_case.court_id,
-            old_case.date_filed
-          FROM ${alias}.cases old_case
-          JOIN temp.restore_case_keys restore_case ON restore_case.source_case_key = old_case.source_case_key
-          ORDER BY old_case.id ASC
-          LIMIT 25
-        `)
-        .all()
-        .map((row) => ({
-          id: Number(row.id || 0),
-          docket_number: row.docket_number || null,
-          case_name: row.case_name || null,
-          court_id: row.court_id || null,
-          date_filed: row.date_filed || null
-        }));
+      const sample = selectedRows.slice(0, 25).map((row) => ({
+        id: Number(row.id || 0),
+        docket_number: row.docket_number || null,
+        case_name: row.case_name || null,
+        court_id: row.court_id || null,
+        date_filed: row.date_filed || null
+      }));
 
       if (dryRun || selectedCaseCount === 0) {
         return {
@@ -2521,6 +2534,8 @@ export class Store {
           sourceDbPath: resolvedSourceDbPath,
           missingCaseCount,
           selectedCaseCount,
+          retainedOnly: Boolean(retainedOnly),
+          retainedByCurrentRules,
           missingEntryCount,
           restoredCases: 0,
           restoredEntries: 0,
@@ -2702,6 +2717,8 @@ export class Store {
         sourceDbPath: resolvedSourceDbPath,
         missingCaseCount,
         selectedCaseCount,
+        retainedOnly: Boolean(retainedOnly),
+        retainedByCurrentRules,
         missingEntryCount,
         restoredCases,
         restoredEntries,
@@ -2723,7 +2740,8 @@ export class Store {
 
   inspectMissingFromBackup({
     sourceDbPath,
-    limit = 0
+    limit = 0,
+    retainedOnly = false
   } = {}) {
     const resolvedSourceDbPath = path.resolve(String(sourceDbPath || "").trim());
     if (!resolvedSourceDbPath) {
@@ -2755,7 +2773,7 @@ export class Store {
           .get()?.n || 0
       );
 
-      const rows = this.db
+      let rows = this.db
         .prepare(`
           SELECT old_case.*
           FROM ${alias}.cases old_case
@@ -2773,6 +2791,9 @@ export class Store {
       let scheduleACount = 0;
       let sellerWatchCount = 0;
       let retainedByCurrentRules = 0;
+      if (retainedOnly) {
+        rows = rows.filter((row) => getCaseRetentionDecision(row).retain);
+      }
       const sample = [];
 
       for (const row of rows) {
@@ -2821,6 +2842,7 @@ export class Store {
         sourceDbPath: resolvedSourceDbPath,
         missingCaseCount,
         inspectedCaseCount: rows.length,
+        retainedOnly: Boolean(retainedOnly),
         retainedByCurrentRules,
         reasonCounts,
         primarySourceCounts,

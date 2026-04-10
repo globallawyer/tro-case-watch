@@ -3229,7 +3229,8 @@ async function main() {
       const result = await store.restoreMissingFromBackup({
         sourceDbPath: sourceDbIndex !== -1 ? String(process.argv[sourceDbIndex + 1] || "").trim() : "",
         dryRun: process.argv.includes("--dry-run"),
-        limit: limitIndex !== -1 ? Math.max(Number(process.argv[limitIndex + 1] || 0), 0) : 0
+        limit: limitIndex !== -1 ? Math.max(Number(process.argv[limitIndex + 1] || 0), 0) : 0,
+        retainedOnly: process.argv.includes("--retained-only")
       });
       console.log(`[sync] completed restore-missing-from-backup ${JSON.stringify(result)}`);
       process.exit(0);
@@ -3240,7 +3241,8 @@ async function main() {
       const limitIndex = process.argv.indexOf("--limit");
       const result = store.inspectMissingFromBackup({
         sourceDbPath: sourceDbIndex !== -1 ? String(process.argv[sourceDbIndex + 1] || "").trim() : "",
-        limit: limitIndex !== -1 ? Math.max(Number(process.argv[limitIndex + 1] || 0), 0) : 0
+        limit: limitIndex !== -1 ? Math.max(Number(process.argv[limitIndex + 1] || 0), 0) : 0,
+        retainedOnly: process.argv.includes("--retained-only")
       });
       console.log(`[sync] completed inspect-missing-from-backup ${JSON.stringify(result)}`);
       process.exit(0);
