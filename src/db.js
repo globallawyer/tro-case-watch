@@ -83,6 +83,8 @@ function sqliteStringLiteral(value) {
   return `'${String(value ?? "").replace(/'/g, "''")}'`;
 }
 
+const DASHBOARD_STATS_CACHE_TTL_MS = 30_000;
+
 function syncRunHeartbeatKey(id) {
   return `sync-run-heartbeat:${Number(id || 0)}`;
 }
@@ -2845,7 +2847,6 @@ export class Store {
     this.caseViewCache.clear();
     this.caseDetailCache.clear();
     this.listPayloadCache.clear();
-    this.dashboardStatsCache = null;
     this.caseIdentityCache = null;
   }
 
@@ -6226,7 +6227,7 @@ export class Store {
   }
 
   getDashboardStats() {
-    if (this.dashboardStatsCache && this.dashboardStatsCache.version === this.caseCacheVersion) {
+    if (this.dashboardStatsCache?.expiresAt > Date.now()) {
       return this.dashboardStatsCache.value;
     }
 
@@ -6237,23 +6238,29 @@ export class Store {
           COUNT(*) AS total_cases,
           SUM(
             CASE
-              WHEN tags_marker LIKE '%|tro|%'
-                OR tags_marker LIKE '%|schedule_a|%'
-                OR tags_marker LIKE '%|seller_tro|%'
+              WHEN COALESCE(is_watchlist, 0) = 1
+                OR (COALESCE(search_text, '') = '' AND (
+                  tags_marker LIKE '%|tro|%'
+                  OR tags_marker LIKE '%|schedule_a|%'
+                  OR tags_marker LIKE '%|seller_tro|%'
+                ))
               THEN 1
               ELSE 0
             END
           ) AS watchlist_cases,
-          SUM(CASE WHEN tags_marker LIKE '%|tro|%' THEN 1 ELSE 0 END) AS tro_cases,
-          SUM(CASE WHEN tags_marker LIKE '%|schedule_a|%' THEN 1 ELSE 0 END) AS schedule_a_cases,
-          SUM(CASE WHEN tags_marker LIKE '%|seller_tro|%' THEN 1 ELSE 0 END) AS seller_cases,
+          SUM(CASE WHEN COALESCE(is_tro, 0) = 1 OR (COALESCE(search_text, '') = '' AND tags_marker LIKE '%|tro|%') THEN 1 ELSE 0 END) AS tro_cases,
+          SUM(CASE WHEN COALESCE(is_schedule_a, 0) = 1 OR (COALESCE(search_text, '') = '' AND tags_marker LIKE '%|schedule_a|%') THEN 1 ELSE 0 END) AS schedule_a_cases,
+          SUM(CASE WHEN COALESCE(is_seller_watch, 0) = 1 OR (COALESCE(search_text, '') = '' AND tags_marker LIKE '%|seller_tro|%') THEN 1 ELSE 0 END) AS seller_cases,
           SUM(
             CASE
               WHEN created_at >= ? AND created_at < ?
                AND (
-                 tags_marker LIKE '%|tro|%'
-                 OR tags_marker LIKE '%|schedule_a|%'
-                 OR tags_marker LIKE '%|seller_tro|%'
+                 COALESCE(is_watchlist, 0) = 1
+                 OR (COALESCE(search_text, '') = '' AND (
+                   tags_marker LIKE '%|tro|%'
+                   OR tags_marker LIKE '%|schedule_a|%'
+                   OR tags_marker LIKE '%|seller_tro|%'
+                 ))
                )
               THEN 1
               ELSE 0
@@ -6302,7 +6309,7 @@ export class Store {
     };
 
     this.dashboardStatsCache = {
-      version: this.caseCacheVersion,
+      expiresAt: Date.now() + DASHBOARD_STATS_CACHE_TTL_MS,
       value
     };
 

@@ -2455,7 +2455,7 @@ async function handleApi(request, response, pathname, searchParams) {
 
   if (request.method === "GET" && pathname === "/api/cases") {
     const rawSearch = searchParams.get("search") || "";
-    const useCache = !String(rawSearch || "").trim();
+    const useCache = true;
     const cached = useCache ? getCachedPublicPayload(request, pathname) : null;
     if (cached) {
       return sendJson(response, 200, cached);
