@@ -110,6 +110,7 @@ export const config = {
   server: {
     port: envInt("PORT", 4127),
     adminToken: env("ADMIN_TOKEN", ""),
+    enablePurgeNonWatchlist: envBool("ENABLE_PURGE_NON_WATCHLIST", false),
     publicCasesMaxPageSize: envInt("PUBLIC_CASES_MAX_PAGE_SIZE", 15),
     publicHealthCacheTtlMs: envInt("PUBLIC_HEALTH_CACHE_TTL_MS", 10_000),
     publicStatusCacheTtlMs: envInt("PUBLIC_STATUS_CACHE_TTL_MS", 45_000),

@@ -695,11 +695,13 @@ async function handleCourtListenerWebhook(request, response, pathname) {
 }
 
 function authorize(request) {
-  if (!config.server.adminToken) {
-    return true;
+  const configuredToken = String(config.server.adminToken || "").trim();
+  if (configuredToken) {
+    return request.headers["x-admin-token"] === configuredToken;
   }
 
-  return request.headers["x-admin-token"] === config.server.adminToken;
+  const remoteAddress = String(request.socket?.remoteAddress || "").trim();
+  return remoteAddress === "127.0.0.1" || remoteAddress === "::1" || remoteAddress === "::ffff:127.0.0.1";
 }
 
 function getClientIp(request) {
@@ -2732,6 +2734,10 @@ async function handleApi(request, response, pathname, searchParams) {
       return sendJson(response, 401, { error: "Unauthorized" });
     }
 
+    if (!config.server.enablePurgeNonWatchlist) {
+      return sendJson(response, 403, { error: "purge-non-watchlist disabled" });
+    }
+
     const body = await readRequestBody(request);
     const limit = Math.max(Number(body.limit || 0), 0);
     const dryRun = body.dryRun === undefined ? true : Boolean(body.dryRun);
@@ -3218,6 +3224,9 @@ async function main() {
     }
 
     if (rawMode === "purge-non-watchlist") {
+      if (!config.server.enablePurgeNonWatchlist) {
+        throw new Error("purge-non-watchlist disabled");
+      }
       const limitIndex = process.argv.indexOf("--limit");
       const startDateIndex = process.argv.indexOf("--start-date");
       const limit = limitIndex !== -1 ? Math.max(Number(process.argv[limitIndex + 1] || 0), 0) : 0;
