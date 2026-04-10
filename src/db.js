@@ -2719,6 +2719,122 @@ export class Store {
     }
   }
 
+  inspectMissingFromBackup({
+    sourceDbPath,
+    limit = 0
+  } = {}) {
+    const resolvedSourceDbPath = path.resolve(String(sourceDbPath || "").trim());
+    if (!resolvedSourceDbPath) {
+      throw new Error("sourceDbPath is required");
+    }
+    if (!fs.existsSync(resolvedSourceDbPath)) {
+      throw new Error(`backup database not found: ${resolvedSourceDbPath}`);
+    }
+    if (resolvedSourceDbPath === this.dbPath) {
+      throw new Error("backup database must differ from the live database");
+    }
+
+    const alias = "inspect_source";
+    const attachSql = `ATTACH DATABASE ${sqliteStringLiteral(resolvedSourceDbPath)} AS ${alias};`;
+    const limitClause = Number(limit || 0) > 0 ? ` LIMIT ${Math.max(Number(limit || 0), 1)}` : "";
+    let attached = false;
+
+    try {
+      this.db.exec(attachSql);
+      attached = true;
+      const missingCaseCount = Number(
+        this.db
+          .prepare(`
+            SELECT COUNT(*) AS n
+            FROM ${alias}.cases old_case
+            LEFT JOIN cases live_case ON live_case.source_case_key = old_case.source_case_key
+            WHERE live_case.id IS NULL
+          `)
+          .get()?.n || 0
+      );
+
+      const rows = this.db
+        .prepare(`
+          SELECT old_case.*
+          FROM ${alias}.cases old_case
+          LEFT JOIN cases live_case ON live_case.source_case_key = old_case.source_case_key
+          WHERE live_case.id IS NULL
+          ORDER BY old_case.id ASC${limitClause}
+        `)
+        .all()
+        .map((row) => buildCaseView(row));
+
+      const reasonCounts = {};
+      const primarySourceCounts = {};
+      let watchlistFlagCount = 0;
+      let troFlagCount = 0;
+      let scheduleACount = 0;
+      let sellerWatchCount = 0;
+      let retainedByCurrentRules = 0;
+      const sample = [];
+
+      for (const row of rows) {
+        const retention = getCaseRetentionDecision(row);
+        const primarySource = String(row.primary_source || "").trim() || "unknown";
+        primarySourceCounts[primarySource] = (primarySourceCounts[primarySource] || 0) + 1;
+
+        if (row.is_watchlist) {
+          watchlistFlagCount += 1;
+        }
+        if (row.is_tro) {
+          troFlagCount += 1;
+        }
+        if (row.is_schedule_a) {
+          scheduleACount += 1;
+        }
+        if (row.is_seller_watch) {
+          sellerWatchCount += 1;
+        }
+
+        if (retention.retain) {
+          retainedByCurrentRules += 1;
+        } else {
+          for (const reason of retention.reasons) {
+            reasonCounts[reason] = (reasonCounts[reason] || 0) + 1;
+          }
+        }
+
+        if (sample.length < 25) {
+          sample.push({
+            id: row.id,
+            docket_number: row.docket_number,
+            case_name: row.case_name,
+            court_id: row.court_id,
+            primary_source: row.primary_source,
+            is_watchlist: row.is_watchlist,
+            is_tro: row.is_tro,
+            is_schedule_a: row.is_schedule_a,
+            is_seller_watch: row.is_seller_watch,
+            reasons: retention.reasons
+          });
+        }
+      }
+
+      return {
+        sourceDbPath: resolvedSourceDbPath,
+        missingCaseCount,
+        inspectedCaseCount: rows.length,
+        retainedByCurrentRules,
+        reasonCounts,
+        primarySourceCounts,
+        watchlistFlagCount,
+        troFlagCount,
+        scheduleACount,
+        sellerWatchCount,
+        sample
+      };
+    } finally {
+      if (attached) {
+        this.db.exec(`DETACH DATABASE ${alias};`);
+      }
+    }
+  }
+
   invalidateCaseViews() {
     if (this.deferInvalidationDepth > 0) {
       this.pendingInvalidation = true;

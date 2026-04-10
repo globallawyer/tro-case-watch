@@ -370,6 +370,82 @@ test("restoreMissingFromBackup restores missing cases and docket entries by sour
   }
 });
 
+test("inspectMissingFromBackup summarizes reasons and flags for missing cases", () => {
+  const backupDir = fs.mkdtempSync(path.join(os.tmpdir(), "tro-watch-inspect-backup-"));
+  const liveDir = fs.mkdtempSync(path.join(os.tmpdir(), "tro-watch-inspect-live-"));
+  const backupDbPath = path.join(backupDir, "backup.sqlite");
+  const liveDbPath = path.join(liveDir, "live.sqlite");
+  const backupStore = new Store(backupDbPath);
+  const liveStore = new Store(liveDbPath);
+  const timestamp = new Date().toISOString();
+
+  try {
+    backupStore.db.prepare(`
+      INSERT INTO cases (
+        source_case_key,
+        primary_source,
+        source_case_id,
+        court_id,
+        court_name,
+        case_name,
+        docket_number,
+        date_filed,
+        tags_marker,
+        is_watchlist,
+        is_tro,
+        is_schedule_a,
+        is_seller_watch,
+        priority_feed_row_count,
+        raw_json,
+        created_at,
+        updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      "case:nysd:26-cv-10191",
+      "courtlistener",
+      "7310191",
+      "nysd",
+      "Southern District of New York",
+      "Ordinary Contract Dispute LLC v. Example Inc.",
+      "1:26-cv-10191",
+      "2026-02-14",
+      "",
+      0,
+      0,
+      0,
+      0,
+      0,
+      "{}",
+      timestamp,
+      timestamp
+    );
+
+    const result = liveStore.inspectMissingFromBackup({
+      sourceDbPath: backupDbPath
+    });
+
+    assert.equal(result.missingCaseCount, 1);
+    assert.equal(result.inspectedCaseCount, 1);
+    assert.equal(result.retainedByCurrentRules, 0);
+    assert.equal(result.reasonCounts["general-civil"], 1);
+    assert.equal(result.primarySourceCounts.courtlistener, 1);
+    assert.equal(result.watchlistFlagCount, 0);
+  } finally {
+    try {
+      backupStore.db.close();
+    } catch {
+      // ignore cleanup failures in tests
+    }
+    try {
+      liveStore.db.close();
+    } catch {
+      // ignore cleanup failures in tests
+    }
+    fs.rmSync(backupDir, { recursive: true, force: true });
+    fs.rmSync(liveDir, { recursive: true, force: true });
+  }
+});
+
 test("getCase keeps distinct same-day cross-source docket entries separate", () => {
   const { store, cleanup } = createTempStore();
 
