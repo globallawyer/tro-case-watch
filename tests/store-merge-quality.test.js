@@ -257,6 +257,119 @@ test("getCase collapses equivalent cross-source docket entries into one richer t
   }
 });
 
+test("restoreMissingFromBackup restores missing cases and docket entries by source keys", async () => {
+  const backupDir = fs.mkdtempSync(path.join(os.tmpdir(), "tro-watch-backup-"));
+  const liveDir = fs.mkdtempSync(path.join(os.tmpdir(), "tro-watch-live-"));
+  const backupDbPath = path.join(backupDir, "backup.sqlite");
+  const liveDbPath = path.join(liveDir, "live.sqlite");
+  const backupStore = new Store(backupDbPath);
+  const liveStore = new Store(liveDbPath);
+
+  try {
+    const existingCase = backupStore.upsertCase({
+      source_case_key: "case:ilnd:26-cv-00011",
+      primary_source: "courtlistener",
+      source_case_id: "72099599",
+      court_id: "ilnd",
+      court_name: "Northern District of Illinois",
+      case_name: "Bose Corporation v. The Partnerships Identified on Schedule A",
+      docket_number: "1:26-cv-00011",
+      date_filed: "2026-01-02"
+    });
+    backupStore.upsertDocketEntry({
+      case_id: existingCase.id,
+      source_entry_key: "courtlistener:62",
+      primary_source: "courtlistener",
+      source_entry_id: "2208776613",
+      filed_at: "2026-04-02",
+      description: "MOTION by Defendants for extension of time"
+    });
+
+    const missingCase = backupStore.upsertCase({
+      source_case_key: "case:ilnd:26-cv-00430",
+      primary_source: "courtlistener",
+      source_case_id: "73000430",
+      court_id: "ilnd",
+      court_name: "Northern District of Illinois",
+      case_name: "Example Brand LLC v. Schedule A Defendants",
+      docket_number: "1:26-cv-00430",
+      date_filed: "2026-02-12"
+    });
+    backupStore.upsertDocketEntry({
+      case_id: missingCase.id,
+      source_entry_key: "courtlistener:430:1",
+      primary_source: "courtlistener",
+      source_entry_id: "430-entry-1",
+      filed_at: "2026-02-12",
+      description: "COMPLAINT filed"
+    });
+    backupStore.upsertDocketEntry({
+      case_id: missingCase.id,
+      source_entry_key: "courtlistener:430:2",
+      primary_source: "courtlistener",
+      source_entry_id: "430-entry-2",
+      filed_at: "2026-02-13",
+      description: "MOTION for temporary restraining order"
+    });
+
+    liveStore.upsertCase({
+      source_case_key: existingCase.source_case_key,
+      primary_source: existingCase.primary_source,
+      source_case_id: existingCase.source_case_id,
+      court_id: existingCase.court_id,
+      court_name: existingCase.court_name,
+      case_name: existingCase.case_name,
+      docket_number: existingCase.docket_number,
+      date_filed: existingCase.date_filed
+    });
+    liveStore.upsertDocketEntry({
+      case_id: 1,
+      source_entry_key: "courtlistener:62",
+      primary_source: "courtlistener",
+      source_entry_id: "2208776613",
+      filed_at: "2026-04-02",
+      description: "MOTION by Defendants for extension of time"
+    });
+
+    const dryRun = await liveStore.restoreMissingFromBackup({
+      sourceDbPath: backupDbPath,
+      dryRun: true
+    });
+    assert.equal(dryRun.missingCaseCount, 1);
+    assert.equal(dryRun.selectedCaseCount, 1);
+    assert.equal(dryRun.missingEntryCount, 2);
+
+    const restored = await liveStore.restoreMissingFromBackup({
+      sourceDbPath: backupDbPath
+    });
+    assert.equal(restored.restoredCases, 1);
+    assert.equal(restored.restoredEntries, 2);
+
+    const restoredCase = liveStore.db
+      .prepare("SELECT * FROM cases WHERE source_case_key = ? LIMIT 1")
+      .get("case:ilnd:26-cv-00430");
+    const restoredEntries = liveStore.db
+      .prepare("SELECT COUNT(*) AS n FROM docket_entries WHERE case_id = ?")
+      .get(restoredCase.id)?.n || 0;
+
+    assert.equal(restoredCase.docket_number, "1:26-cv-00430");
+    assert.equal(restoredEntries, 2);
+  } finally {
+    try {
+      backupStore.db.close();
+    } catch {
+      // ignore cleanup failures in tests
+    }
+    try {
+      liveStore.db.close();
+    } catch {
+      // ignore cleanup failures in tests
+    }
+    fs.rmSync(backupDir, { recursive: true, force: true });
+    fs.rmSync(liveDir, { recursive: true, force: true });
+  }
+});
+
 test("getCase keeps distinct same-day cross-source docket entries separate", () => {
   const { store, cleanup } = createTempStore();
 

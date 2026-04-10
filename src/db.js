@@ -79,6 +79,10 @@ function isSqliteBusyError(error) {
   );
 }
 
+function sqliteStringLiteral(value) {
+  return `'${String(value ?? "").replace(/'/g, "''")}'`;
+}
+
 function syncRunHeartbeatKey(id) {
   return `sync-run-heartbeat:${Number(id || 0)}`;
 }
@@ -2124,6 +2128,7 @@ function cloneListPayload(payload = {}) {
 export class Store {
   constructor(dbPath) {
     fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+    this.dbPath = path.resolve(dbPath);
     this.db = new DatabaseSync(dbPath);
     this.caseCacheVersion = 0;
     this.caseViewCache = new Map();
@@ -2421,6 +2426,297 @@ export class Store {
       syncRunsDeleted,
       vacuumed: Boolean(vacuum && (checkpointsDeleted > 0 || syncRunsDeleted > 0))
     };
+  }
+
+  async restoreMissingFromBackup({
+    sourceDbPath,
+    dryRun = false,
+    limit = 0
+  } = {}) {
+    const resolvedSourceDbPath = path.resolve(String(sourceDbPath || "").trim());
+    if (!resolvedSourceDbPath) {
+      throw new Error("sourceDbPath is required");
+    }
+    if (!fs.existsSync(resolvedSourceDbPath)) {
+      throw new Error(`backup database not found: ${resolvedSourceDbPath}`);
+    }
+    if (resolvedSourceDbPath === this.dbPath) {
+      throw new Error("backup database must differ from the live database");
+    }
+
+    const alias = "restore_source";
+    const attachSql = `ATTACH DATABASE ${sqliteStringLiteral(resolvedSourceDbPath)} AS ${alias};`;
+    const limitClause = Number(limit || 0) > 0 ? ` LIMIT ${Math.max(Number(limit || 0), 1)}` : "";
+    let attached = false;
+
+    try {
+      this.db.exec(attachSql);
+      attached = true;
+      this.db.exec(`
+        DROP TABLE IF EXISTS temp.restore_case_keys;
+        CREATE TEMP TABLE restore_case_keys (
+          source_case_key TEXT PRIMARY KEY
+        );
+
+        INSERT INTO restore_case_keys(source_case_key)
+        SELECT old_case.source_case_key
+        FROM ${alias}.cases old_case
+        LEFT JOIN cases live_case ON live_case.source_case_key = old_case.source_case_key
+        WHERE live_case.id IS NULL
+        ORDER BY old_case.id ASC${limitClause};
+      `);
+
+      const missingCaseCount = Number(
+        this.db
+          .prepare(`
+            SELECT COUNT(*) AS n
+            FROM ${alias}.cases old_case
+            LEFT JOIN cases live_case ON live_case.source_case_key = old_case.source_case_key
+            WHERE live_case.id IS NULL
+          `)
+          .get()?.n || 0
+      );
+      const selectedCaseCount = Number(
+        this.db.prepare(`SELECT COUNT(*) AS n FROM temp.restore_case_keys`).get()?.n || 0
+      );
+      const missingEntryCount = Number(
+        this.db
+          .prepare(`
+            SELECT COUNT(*) AS n
+            FROM ${alias}.docket_entries old_entry
+            JOIN ${alias}.cases old_case ON old_case.id = old_entry.case_id
+            JOIN temp.restore_case_keys restore_case ON restore_case.source_case_key = old_case.source_case_key
+            LEFT JOIN docket_entries live_entry ON live_entry.source_entry_key = old_entry.source_entry_key
+            WHERE live_entry.id IS NULL
+          `)
+          .get()?.n || 0
+      );
+      const sample = this.db
+        .prepare(`
+          SELECT
+            old_case.id,
+            old_case.docket_number,
+            old_case.case_name,
+            old_case.court_id,
+            old_case.date_filed
+          FROM ${alias}.cases old_case
+          JOIN temp.restore_case_keys restore_case ON restore_case.source_case_key = old_case.source_case_key
+          ORDER BY old_case.id ASC
+          LIMIT 25
+        `)
+        .all()
+        .map((row) => ({
+          id: Number(row.id || 0),
+          docket_number: row.docket_number || null,
+          case_name: row.case_name || null,
+          court_id: row.court_id || null,
+          date_filed: row.date_filed || null
+        }));
+
+      if (dryRun || selectedCaseCount === 0) {
+        return {
+          dryRun: true,
+          sourceDbPath: resolvedSourceDbPath,
+          missingCaseCount,
+          selectedCaseCount,
+          missingEntryCount,
+          restoredCases: 0,
+          restoredEntries: 0,
+          affectedCases: 0,
+          sample
+        };
+      }
+
+      const restoreCasesStatement = this.db.prepare(`
+        INSERT OR IGNORE INTO cases (
+          id,
+          source_case_key,
+          primary_source,
+          source_case_id,
+          courtlistener_docket_id,
+          pacer_case_id,
+          court_id,
+          court_name,
+          case_name,
+          case_name_zh,
+          docket_number,
+          date_filed,
+          date_terminated,
+          cause,
+          nature_of_suit,
+          status,
+          tags_marker,
+          is_watchlist,
+          is_tro,
+          is_schedule_a,
+          is_seller_watch,
+          priority_feed_row_count,
+          priority_activity_at,
+          docket_url,
+          source_urls_json,
+          plaintiffs_json,
+          defendants_json,
+          recent_activity_summary,
+          recent_activity_summary_zh,
+          search_text,
+          latest_docket_filed_at,
+          latest_docket_number,
+          docket_count,
+          last_seen_at,
+          last_synced_at,
+          last_docket_sync_at,
+          last_translation_at,
+          raw_json,
+          created_at,
+          updated_at
+        )
+        SELECT
+          old_case.id,
+          old_case.source_case_key,
+          old_case.primary_source,
+          old_case.source_case_id,
+          old_case.courtlistener_docket_id,
+          old_case.pacer_case_id,
+          old_case.court_id,
+          old_case.court_name,
+          old_case.case_name,
+          old_case.case_name_zh,
+          old_case.docket_number,
+          old_case.date_filed,
+          old_case.date_terminated,
+          old_case.cause,
+          old_case.nature_of_suit,
+          old_case.status,
+          old_case.tags_marker,
+          old_case.is_watchlist,
+          old_case.is_tro,
+          old_case.is_schedule_a,
+          old_case.is_seller_watch,
+          old_case.priority_feed_row_count,
+          old_case.priority_activity_at,
+          old_case.docket_url,
+          old_case.source_urls_json,
+          old_case.plaintiffs_json,
+          old_case.defendants_json,
+          old_case.recent_activity_summary,
+          old_case.recent_activity_summary_zh,
+          old_case.search_text,
+          old_case.latest_docket_filed_at,
+          old_case.latest_docket_number,
+          old_case.docket_count,
+          old_case.last_seen_at,
+          old_case.last_synced_at,
+          old_case.last_docket_sync_at,
+          old_case.last_translation_at,
+          old_case.raw_json,
+          old_case.created_at,
+          old_case.updated_at
+        FROM ${alias}.cases old_case
+        JOIN temp.restore_case_keys restore_case ON restore_case.source_case_key = old_case.source_case_key
+        LEFT JOIN cases live_case ON live_case.source_case_key = old_case.source_case_key
+        WHERE live_case.id IS NULL
+      `);
+      const restoreEntriesStatement = this.db.prepare(`
+        INSERT OR IGNORE INTO docket_entries (
+          case_id,
+          source_entry_key,
+          primary_source,
+          source_entry_id,
+          document_type,
+          entry_number,
+          document_number,
+          filed_at,
+          description,
+          description_zh,
+          absolute_url,
+          is_available,
+          page_count,
+          pacer_doc_id,
+          raw_json,
+          last_synced_at,
+          created_at,
+          updated_at
+        )
+        SELECT
+          live_case.id,
+          old_entry.source_entry_key,
+          old_entry.primary_source,
+          old_entry.source_entry_id,
+          old_entry.document_type,
+          old_entry.entry_number,
+          old_entry.document_number,
+          old_entry.filed_at,
+          old_entry.description,
+          old_entry.description_zh,
+          old_entry.absolute_url,
+          old_entry.is_available,
+          old_entry.page_count,
+          old_entry.pacer_doc_id,
+          old_entry.raw_json,
+          old_entry.last_synced_at,
+          old_entry.created_at,
+          old_entry.updated_at
+        FROM ${alias}.docket_entries old_entry
+        JOIN ${alias}.cases old_case ON old_case.id = old_entry.case_id
+        JOIN temp.restore_case_keys restore_case ON restore_case.source_case_key = old_case.source_case_key
+        JOIN cases live_case ON live_case.source_case_key = old_case.source_case_key
+        LEFT JOIN docket_entries live_entry ON live_entry.source_entry_key = old_entry.source_entry_key
+        WHERE live_entry.id IS NULL
+      `);
+
+      const safeFastPathUpdateStatement = this.db.prepare(`
+        UPDATE cases
+        SET ${CASE_FAST_PATH_SET_SQL}
+        WHERE id = ?
+      `);
+
+      let restoredCases = 0;
+      let restoredEntries = 0;
+      await this.batchMutations(async () => {
+        restoredCases = Number(restoreCasesStatement.run()?.changes || 0);
+        restoredEntries = Number(restoreEntriesStatement.run()?.changes || 0);
+      });
+
+      const affectedCaseIds = this.db
+        .prepare(`
+          SELECT live_case.id
+          FROM cases live_case
+          JOIN temp.restore_case_keys restore_case ON restore_case.source_case_key = live_case.source_case_key
+          ORDER BY live_case.id ASC
+        `)
+        .all()
+        .map((row) => Number(row.id || 0))
+        .filter(Boolean);
+
+      for (const caseId of affectedCaseIds) {
+        this.refreshCaseDocketSummary(caseId, { touchUpdatedAt: false });
+        safeFastPathUpdateStatement.run(caseId);
+      }
+      const fts = this.rebuildCaseSearchFtsIfNeeded();
+      this.invalidateCaseViews();
+
+      return {
+        dryRun: false,
+        sourceDbPath: resolvedSourceDbPath,
+        missingCaseCount,
+        selectedCaseCount,
+        missingEntryCount,
+        restoredCases,
+        restoredEntries,
+        affectedCases: affectedCaseIds.length,
+        rebuiltFts: Boolean(fts.rebuilt),
+        sample
+      };
+    } finally {
+      try {
+        this.db.exec("DROP TABLE IF EXISTS temp.restore_case_keys;");
+      } catch {
+        // ignore temp table cleanup failures
+      }
+      if (attached) {
+        this.db.exec(`DETACH DATABASE ${alias};`);
+      }
+    }
   }
 
   invalidateCaseViews() {

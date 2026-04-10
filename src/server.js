@@ -3223,6 +3223,18 @@ async function main() {
       process.exit(0);
     }
 
+    if (rawMode === "restore-missing-from-backup") {
+      const sourceDbIndex = process.argv.indexOf("--source-db");
+      const limitIndex = process.argv.indexOf("--limit");
+      const result = await store.restoreMissingFromBackup({
+        sourceDbPath: sourceDbIndex !== -1 ? String(process.argv[sourceDbIndex + 1] || "").trim() : "",
+        dryRun: process.argv.includes("--dry-run"),
+        limit: limitIndex !== -1 ? Math.max(Number(process.argv[limitIndex + 1] || 0), 0) : 0
+      });
+      console.log(`[sync] completed restore-missing-from-backup ${JSON.stringify(result)}`);
+      process.exit(0);
+    }
+
     if (rawMode === "purge-non-watchlist") {
       if (!config.server.enablePurgeNonWatchlist) {
         throw new Error("purge-non-watchlist disabled");
