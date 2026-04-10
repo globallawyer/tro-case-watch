@@ -83,7 +83,8 @@ function sqliteStringLiteral(value) {
   return `'${String(value ?? "").replace(/'/g, "''")}'`;
 }
 
-const DASHBOARD_STATS_CACHE_TTL_MS = 30_000;
+const DASHBOARD_STATS_CACHE_TTL_MS = 3 * 60_000;
+const RECENT_SYNC_CACHE_TTL_MS = 15_000;
 
 function syncRunHeartbeatKey(id) {
   return `sync-run-heartbeat:${Number(id || 0)}`;
@@ -2137,6 +2138,7 @@ export class Store {
     this.caseDetailCache = new Map();
     this.listPayloadCache = new Map();
     this.dashboardStatsCache = null;
+    this.recentSyncCache = null;
     this.caseIdentityCache = null;
     this.deferInvalidationDepth = 0;
     this.pendingInvalidation = false;
@@ -2248,6 +2250,9 @@ export class Store {
       CREATE INDEX IF NOT EXISTS idx_cases_docket_number ON cases(docket_number);
       CREATE INDEX IF NOT EXISTS idx_cases_date_filed ON cases(date_filed);
       CREATE INDEX IF NOT EXISTS idx_docket_entries_case_id ON docket_entries(case_id);
+      CREATE INDEX IF NOT EXISTS idx_sync_runs_started_at ON sync_runs(started_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_sync_runs_provider_status_started_at ON sync_runs(provider, status, started_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_sync_runs_provider_mode_status_started_at ON sync_runs(provider, mode, status, started_at DESC);
     `);
     ensureTableColumns(this.db, "cases", {
       is_watchlist: "INTEGER DEFAULT 0",
@@ -2418,15 +2423,43 @@ export class Store {
         .prepare(`DELETE FROM sync_runs WHERE provider = 'window-email'`)
         .run()?.changes || 0
     );
+    const reportCutoffIso = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+    const reportSyncRunsDeleted = Number(
+      this.db
+        .prepare(`
+          DELETE FROM sync_runs
+          WHERE provider IN ('daily-email', 'tro-daily-roundup')
+            AND mode = 'report'
+            AND started_at < ?
+        `)
+        .run(reportCutoffIso)?.changes || 0
+    );
+    const reportCheckpointsDeleted = Number(
+      this.db
+        .prepare(`
+          DELETE FROM checkpoints
+          WHERE (
+              checkpoint_key LIKE 'daily-email-report:%'
+              OR checkpoint_key LIKE 'tro-daily-roundup:%'
+            )
+            AND updated_at < ?
+        `)
+        .run(reportCutoffIso)?.changes || 0
+    );
 
-    if (vacuum && (checkpointsDeleted > 0 || syncRunsDeleted > 0)) {
+    if (vacuum && (checkpointsDeleted > 0 || syncRunsDeleted > 0 || reportSyncRunsDeleted > 0 || reportCheckpointsDeleted > 0)) {
       this.db.exec("VACUUM;");
     }
 
     return {
       checkpointsDeleted,
       syncRunsDeleted,
-      vacuumed: Boolean(vacuum && (checkpointsDeleted > 0 || syncRunsDeleted > 0))
+      reportSyncRunsDeleted,
+      reportCheckpointsDeleted,
+      reportRetentionDays: 30,
+      vacuumed: Boolean(
+        vacuum && (checkpointsDeleted > 0 || syncRunsDeleted > 0 || reportSyncRunsDeleted > 0 || reportCheckpointsDeleted > 0)
+      )
     };
   }
 
@@ -6050,7 +6083,7 @@ export class Store {
         .run(provider, mode, "running", nowIso());
 
       this.db.exec("COMMIT");
-      this.dashboardStatsCache = null;
+      this.recentSyncCache = null;
       return Number(result.lastInsertRowid);
     } catch (error) {
       try {
@@ -6068,7 +6101,7 @@ export class Store {
         WHERE id = ?
       `)
       .run(status, nowIso(), toJson(stats, "{}"), errorText, id);
-    this.dashboardStatsCache = null;
+    this.recentSyncCache = null;
   }
 
   getRecentSyncRuns(limit = 10) {
@@ -6084,6 +6117,35 @@ export class Store {
         ...row,
         stats: parseJson(row.stats_json, {})
       }));
+  }
+
+  getRecentSyncSummary() {
+    if (this.recentSyncCache?.expiresAt > Date.now()) {
+      return this.recentSyncCache.value;
+    }
+
+    const recentSync = this.db
+      .prepare(`
+        SELECT *
+        FROM sync_runs
+        ORDER BY started_at DESC
+        LIMIT 1
+      `)
+      .get();
+
+    const value = recentSync
+      ? {
+          ...recentSync,
+          stats: parseJson(recentSync.stats_json, {})
+        }
+      : null;
+
+    this.recentSyncCache = {
+      expiresAt: Date.now() + RECENT_SYNC_CACHE_TTL_MS,
+      value
+    };
+
+    return value;
   }
 
   getCheckpoint(key) {
@@ -6250,7 +6312,10 @@ export class Store {
 
   getDashboardStats() {
     if (this.dashboardStatsCache?.expiresAt > Date.now()) {
-      return this.dashboardStatsCache.value;
+      return {
+        ...this.dashboardStatsCache.value,
+        recentSync: this.getRecentSyncSummary()
+      };
     }
 
     const todayBounds = shanghaiDayBounds(new Date());
@@ -6289,7 +6354,7 @@ export class Store {
             END
           ) AS today_added_watchlist
         FROM cases
-        WHERE date(date_filed) >= date(?)
+        WHERE COALESCE(date_filed, '') >= ?
       `)
       .get(todayBounds.startIso, todayBounds.endIso, "2025-01-01");
     const totals = {
@@ -6310,24 +6375,10 @@ export class Store {
       `)
       .get();
 
-    const recentSync = this.db
-      .prepare(`
-        SELECT *
-        FROM sync_runs
-        ORDER BY started_at DESC
-        LIMIT 1
-      `)
-      .get();
-
     const value = {
       totals,
       latestCase,
-      recentSync: recentSync
-        ? {
-            ...recentSync,
-            stats: parseJson(recentSync.stats_json, {})
-          }
-        : null
+      recentSync: this.getRecentSyncSummary()
     };
 
     this.dashboardStatsCache = {

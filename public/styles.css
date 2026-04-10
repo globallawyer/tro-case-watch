@@ -21,9 +21,9 @@
   --radius-xl: 30px;
   --radius-lg: 22px;
   --radius-md: 16px;
-  --font-display: "Bricolage Grotesque", "Noto Sans SC", sans-serif;
-  --font-sans: "Noto Sans SC", sans-serif;
-  --font-serif: "Noto Serif SC", serif;
+  --font-display: "Avenir Next", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  --font-sans: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", sans-serif;
+  --font-serif: "Songti SC", "STSong", "Noto Serif CJK SC", serif;
 }
 
 *,

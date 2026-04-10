@@ -1274,15 +1274,16 @@ async function boot() {
     });
   }
 
-  const statusPromise = loadStatus().catch(console.error);
+  loadStatus().catch(console.error);
   await loadCases({
     autoSelectFirst: !routeCaseId,
     preserveSelection: Boolean(routeCaseId)
   });
   window.setTimeout(() => {
-    loadTroDailyUpdates().catch(() => {});
-  }, 900);
-  await Promise.allSettled([statusPromise]);
+    queueIdle(() => {
+      loadTroDailyUpdates().catch(() => {});
+    });
+  }, 2200);
 
   if (routeCaseId) {
     const summaryItem = currentCasesPayload?.items?.find((item) => item.id === routeCaseId) || null;

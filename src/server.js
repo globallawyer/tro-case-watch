@@ -131,8 +131,23 @@ const publicSiteOrigins = new Set([
 ]);
 const courtListenerWebhookPrefix = "/api/webhook/courtlistener/";
 
-function clearPublicResponseCache() {
-  publicResponseCache.clear();
+function clearPublicResponseCache(pathPrefixes = []) {
+  if (!Array.isArray(pathPrefixes) || !pathPrefixes.length) {
+    publicResponseCache.clear();
+    return;
+  }
+
+  for (const key of [...publicResponseCache.keys()]) {
+    const separatorIndex = key.indexOf("::");
+    const pathname = separatorIndex === -1 ? key : key.slice(0, separatorIndex);
+    if (pathPrefixes.some((prefix) => pathname === prefix || pathname.startsWith(prefix))) {
+      publicResponseCache.delete(key);
+    }
+  }
+}
+
+function clearPublicCaseCaches() {
+  clearPublicResponseCache(["/api/cases"]);
 }
 
 function isSqliteBusyError(error) {
@@ -652,7 +667,7 @@ async function handleCourtListenerWebhook(request, response, pathname) {
     }
 
     if (processed > 0) {
-      clearPublicResponseCache();
+      clearPublicCaseCaches();
     }
 
     const latestEntryId = [...results]
@@ -2023,7 +2038,7 @@ function queueCaseHydration(caseId, initialItem) {
     .catch(() => {})
     .finally(() => {
       backgroundCaseHydrations.delete(caseId);
-      clearPublicResponseCache();
+      clearPublicCaseCaches();
     });
 
   backgroundCaseHydrations.set(caseId, task);
@@ -2578,7 +2593,7 @@ async function handleApi(request, response, pathname, searchParams) {
     const mode = body.mode === "backfill" ? "backfill" : "recent";
 
     spawnDetachedTask(["--sync-only", mode]);
-    clearPublicResponseCache();
+    clearPublicCaseCaches();
 
     return sendJson(response, 202, {
       accepted: true,
@@ -2592,7 +2607,7 @@ async function handleApi(request, response, pathname, searchParams) {
     }
 
     spawnDetachedTask(["--sync-only", "catalog"]);
-    clearPublicResponseCache();
+    clearPublicCaseCaches();
 
     return sendJson(response, 202, {
       accepted: true,
@@ -2606,7 +2621,7 @@ async function handleApi(request, response, pathname, searchParams) {
     }
 
     spawnDetachedTask(["--sync-only", "pacermonitor"]);
-    clearPublicResponseCache();
+    clearPublicCaseCaches();
 
     return sendJson(response, 202, {
       accepted: true,
@@ -2620,7 +2635,7 @@ async function handleApi(request, response, pathname, searchParams) {
     }
 
     spawnDetachedTask(["--sync-only", "pacer"]);
-    clearPublicResponseCache();
+    clearPublicCaseCaches();
 
     return sendJson(response, 202, {
       accepted: true,
@@ -2634,7 +2649,7 @@ async function handleApi(request, response, pathname, searchParams) {
     }
 
     spawnDetachedTask(["--sync-only", "docketalarm"]);
-    clearPublicResponseCache();
+    clearPublicCaseCaches();
 
     return sendJson(response, 202, {
       accepted: true,
@@ -2648,7 +2663,7 @@ async function handleApi(request, response, pathname, searchParams) {
     }
 
     spawnDetachedTask(["--sync-only", "unicourt"]);
-    clearPublicResponseCache();
+    clearPublicCaseCaches();
 
     return sendJson(response, 202, {
       accepted: true,
@@ -2662,7 +2677,7 @@ async function handleApi(request, response, pathname, searchParams) {
     }
 
     spawnDetachedTask(["--sync-only", "courtlistener-docket"]);
-    clearPublicResponseCache();
+    clearPublicCaseCaches();
 
     return sendJson(response, 202, {
       accepted: true,
@@ -2676,7 +2691,7 @@ async function handleApi(request, response, pathname, searchParams) {
     }
 
     spawnDetachedTask(["--sync-only", "courtlistener-alerts"]);
-    clearPublicResponseCache();
+    clearPublicCaseCaches();
 
     return sendJson(response, 202, {
       accepted: true,
@@ -2690,7 +2705,7 @@ async function handleApi(request, response, pathname, searchParams) {
     }
 
     spawnDetachedTask(["--sync-only", "courtfeeds"]);
-    clearPublicResponseCache();
+    clearPublicCaseCaches();
 
     return sendJson(response, 202, {
       accepted: true,
@@ -2704,7 +2719,7 @@ async function handleApi(request, response, pathname, searchParams) {
     }
 
     spawnDetachedTask(["--sync-only", "lawfirms"]);
-    clearPublicResponseCache();
+    clearPublicCaseCaches();
 
     return sendJson(response, 202, {
       accepted: true,
@@ -2720,7 +2735,7 @@ async function handleApi(request, response, pathname, searchParams) {
     const body = await readRequestBody(request);
     const limit = Math.min(Math.max(Number(body.limit || 100), 1), 500);
     spawnDetachedTask(["--sync-only", "reconcile-duplicates", "--limit", String(limit)]);
-    clearPublicResponseCache();
+    clearPublicCaseCaches();
 
     return sendJson(response, 202, {
       accepted: true,
@@ -2754,7 +2769,7 @@ async function handleApi(request, response, pathname, searchParams) {
     }
 
     spawnDetachedTask(args);
-    clearPublicResponseCache();
+    clearPublicCaseCaches();
 
     return sendJson(response, 202, {
       accepted: true,
@@ -2820,7 +2835,7 @@ async function handleApi(request, response, pathname, searchParams) {
       "--providers",
       providers.join(",")
     ]);
-    clearPublicResponseCache();
+    clearPublicCaseCaches();
 
     return sendJson(response, 202, {
       accepted: true,
@@ -2872,7 +2887,7 @@ function serveStatic(request, response, pathname) {
 
   if (extension === ".html") {
     headers["content-security-policy"] =
-      "default-src 'self'; img-src 'self' data:; style-src 'self' https://fonts.googleapis.com 'unsafe-inline'; font-src 'self' https://fonts.gstatic.com data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self' mailto:";
+      "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self' mailto:";
     headers["cache-control"] = "no-store";
   }
   if (extension === ".html") {
