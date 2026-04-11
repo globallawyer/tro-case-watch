@@ -3029,7 +3029,8 @@ async function main() {
           ? "catalog-until-idle"
           : rawMode;
     if (normalizedMode === "catalog") {
-      const result = await syncService.syncPriorityFeedRecent("backfill");
+      const forceDiscovery = process.argv.includes("--force-discovery");
+      const result = await syncService.syncPriorityFeedRecent("backfill", { forceDiscovery });
       if (resultJson) {
         console.log(JSON.stringify(result));
       } else {
@@ -3063,15 +3064,18 @@ async function main() {
       let totalNotFoundCases = 0;
       let discoverySnapshot = null;
 
+      const forceDiscovery = process.argv.includes("--force-discovery");
       while (rounds < maxRounds && idleStreak < idleRounds) {
         rounds += 1;
         console.log(`[sync] catalog round ${rounds} starting ${JSON.stringify({ batchSize })}`);
+        const forceDiscoveryEnv = forceDiscovery && rounds === 1 ? "1" : "0";
         const result = await runSyncModeChild(
           "catalog",
           [],
           {
             PRIORITY_FEED_BACKFILL_MAX_CASES_PER_RUN: String(batchSize),
-            PRIORITY_FEED_PROGRESS: "1"
+            PRIORITY_FEED_PROGRESS: "1",
+            PRIORITY_FEED_FORCE_DISCOVERY: forceDiscoveryEnv
           },
           { streamLogs: true }
         );

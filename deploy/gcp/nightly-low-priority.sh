@@ -25,4 +25,6 @@ run_sync() {
 
 run_sync "recent" --sync-only recent
 sleep 20
+run_sync "catalog" --sync-only worldtro
+sleep 15
 run_sync "courtlistener-alerts" --sync-only courtlistener-alerts --force --limit "$COURTLISTENER_ALERT_LIMIT" --start-date "$START_DATE"

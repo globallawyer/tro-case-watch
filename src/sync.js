@@ -3738,7 +3738,7 @@ export class CaseSyncService {
     });
   }
 
-  async syncPriorityFeedRecent(mode = "recent") {
+  async syncPriorityFeedRecent(mode = "recent", { forceDiscovery = false } = {}) {
     return this.store.batchMutations(async () => {
       if (!this.priorityFeed.enabled) {
         return {
@@ -3747,7 +3747,8 @@ export class CaseSyncService {
         };
       }
 
-      const discoveryResult = await this.syncPriorityFeedDiscovery();
+      const shouldForceDiscovery = Boolean(forceDiscovery || process.env.PRIORITY_FEED_FORCE_DISCOVERY === "1");
+      const discoveryResult = await this.syncPriorityFeedDiscovery({ force: shouldForceDiscovery });
 
       const maxCases =
         mode === "backfill"
@@ -3845,7 +3846,7 @@ export class CaseSyncService {
     });
   }
 
-  async syncPriorityFeedDiscovery() {
+  async syncPriorityFeedDiscovery({ force = false } = {}) {
       if (!this.priorityFeed.enabled) {
         return { discoveredCases: 0 };
       }
@@ -3854,7 +3855,7 @@ export class CaseSyncService {
     const staleAfterMs = Number(this.config.priorityFeed.discoveryStaleAfterHours || 0) * 60 * 60 * 1000;
     const checkpoint = this.store.getCheckpoint(checkpointKey) || {};
     const lastCatalogSyncMs = checkpoint.lastSyncedAt ? Date.parse(checkpoint.lastSyncedAt) : 0;
-    if (staleAfterMs > 0 && lastCatalogSyncMs && Date.now() - lastCatalogSyncMs < staleAfterMs) {
+    if (!force && staleAfterMs > 0 && lastCatalogSyncMs && Date.now() - lastCatalogSyncMs < staleAfterMs) {
       return {
         discoveredCases: 0,
         attachedCases: Number(checkpoint.attachedCases || 0),
