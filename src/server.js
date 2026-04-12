@@ -1464,8 +1464,12 @@ function sanitizePublicText(value) {
 
   return text
     .replace(new RegExp(PRIORITY_FEED_SOURCE, "gi"), "站内归档")
+    .replace(/worldtro/gi, "站内归档")
     .replace(/worldtro\.com/gi, "站内归档")
     .replace(/courtlistener/gi, "公开摘要")
+    .replace(/61tro/gi, "站内归档")
+    .replace(/sriplaw/gi, "站内归档")
+    .replace(/\bgbc\b/gi, "站内归档")
     .replace(/pacermonitor/gi, "公开来源")
     .replace(/docketalarm/gi, "外部补充源")
     .replace(/unicourt/gi, "外部补充源");
@@ -1622,6 +1626,14 @@ function normalizeDisplayNumber(value) {
 
 function sanitizeTimelineLabel(entry = {}) {
   return "站内归档";
+}
+
+function publicCasePresentationMode(item = {}) {
+  if (hasPriorityFeedCoverage(item)) {
+    return "brand_first";
+  }
+
+  return "case_first";
 }
 
 function hasPriorityFeedCoverage(item = {}) {
@@ -2184,8 +2196,7 @@ function serializePublicEntry(entry = {}) {
 function serializePublicCaseSummary(item = {}) {
   return {
     id: item.id,
-    source_case_key: item.source_case_key || null,
-    primary_source: item.primary_source || null,
+    presentation_mode: publicCasePresentationMode(item),
     case_name: item.case_name || null,
     case_name_zh: item.case_name_zh || null,
     court_id: item.court_id || null,

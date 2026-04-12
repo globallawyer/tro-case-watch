@@ -503,14 +503,12 @@ function formatPlaintiffBrandValue(item) {
   return `${baseValue} · ${caseTypeLabel}`;
 }
 
-function isWorldtroCase(item) {
-  const primarySource = String(item?.primary_source || "").trim().toLowerCase();
-  const sourceCaseKey = String(item?.source_case_key || "").trim().toLowerCase();
-  return primarySource === "worldtro" || sourceCaseKey.startsWith("worldtro:") || sourceCaseKey.startsWith("priority:");
+function usesBrandFirstPresentation(item) {
+  return String(item?.presentation_mode || "").trim().toLowerCase() === "brand_first";
 }
 
 function formatCaseListTitle(item) {
-  if (isWorldtroCase(item)) {
+  if (usesBrandFirstPresentation(item)) {
     return formatPlaintiffBrandValue(item);
   }
 
