@@ -2681,7 +2681,25 @@ function serializePublicCaseSummary(item = {}) {
   };
 }
 
+function areEntryNumbersSequential(entries) {
+  const nums = entries
+    .map((e) => {
+      const raw = e.document_number ?? e.entry_number;
+      return raw != null ? Number(raw) : NaN;
+    })
+    .filter((n) => !isNaN(n) && n > 0);
+  if (nums.length < 3) return false;
+  const sorted = [...nums].sort((a, b) => a - b);
+  let gaps = 0;
+  for (let i = 1; i < sorted.length; i++) {
+    if (sorted[i] - sorted[i - 1] !== 1) gaps++;
+  }
+  return gaps / (sorted.length - 1) < 0.3;
+}
+
 function serializePublicCaseDetail(item = {}) {
+  const rawEntries = Array.isArray(item.entries) ? item.entries : [];
+  const serializedEntries = rawEntries.map(serializePublicEntry);
   return {
     ...serializePublicCaseSummary(item),
     entries_truncated: Boolean(item.entries_truncated),
@@ -2690,7 +2708,8 @@ function serializePublicCaseDetail(item = {}) {
           pending: Boolean(item.hydration_pending.pending)
         }
       : null,
-    entries: Array.isArray(item.entries) ? item.entries.map(serializePublicEntry) : []
+    entries_sequential: areEntryNumbersSequential(rawEntries),
+    entries: serializedEntries
   };
 }
 

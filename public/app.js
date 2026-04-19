@@ -723,6 +723,7 @@ function timelineSourceSummary(entries) {
 function renderDetail(item) {
   const insights = item.insights || {};
   const entries = item.entries || [];
+  const entriesSequential = Boolean(item.entries_sequential);
   const entriesTruncated = Boolean(item.entries_truncated);
   const newestTimelineFiledAt = latestTimelineFiledAt(entries);
   const hasCaseLevelUpdateGap =
@@ -830,7 +831,7 @@ function renderDetail(item) {
                       <time>${formatDate(entry.filed_at)}</time>
                       <span class="status-pill neutral">${timelineSourceLabel(entry)}</span>
                     </div>
-                    <h3>${entry.document_number || entry.entry_number || "No.?"} · ${displayEntryType(entry)}</h3>
+                    <h3>${entriesSequential && (entry.document_number || entry.entry_number) ? (entry.document_number || entry.entry_number) + " · " : ""}${displayEntryType(entry)}</h3>
                     ${signals ? `<div class="tag-row timeline-tags">${signals}</div>` : ""}
                     <p>${entry.description || "无可显示文本"}</p>
                     ${entry.description_zh ? `<p class="timeline-zh">${entry.description_zh}</p>` : ""}
