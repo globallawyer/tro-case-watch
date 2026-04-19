@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import http from "node:http";
 import crypto from "node:crypto";
+import os from "node:os";
 import { spawn } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
 import zlib from "node:zlib";
@@ -32,6 +33,12 @@ import { docketLooksLike } from "./insights.js";
 import { DailyEmailReportService } from "./daily-report.js";
 import { TroDailyRoundupService } from "./tro-daily-roundup.js";
 import { loadTroDailyUpdates } from "./tro-daily-updates.js";
+import {
+  claimWebhookEnrichmentJobState,
+  enqueueWebhookEnrichmentJobState,
+  finishWebhookEnrichmentJobState,
+  getWebhookEnrichmentQueueStats
+} from "./webhook-enrichment.js";
 
 const mimeTypes = {
   ".css": "text/css; charset=utf-8",
@@ -83,8 +90,8 @@ const publicRateLimitBuckets = new Map();
 const publicBehaviorBuckets = new Map();
 const publicChallengeBuckets = new Map();
 const pendingLookupImports = new Map();
-const pendingCourtListenerWebhookFollowUps = new Map();
 let lastTroDailyUpdatesRefreshQueuedAt = 0;
+let lastWebhookEnrichmentWorkerQueuedAt = 0;
 const browserGuardCookieName = "__tt_guard";
 const publicApiTokenMetaName = "tt-public-api-token";
 const publicApiTokenHeaderName = "x-tt-public-token";
@@ -130,6 +137,16 @@ const publicSiteOrigins = new Set([
   "http://localhost:4127"
 ]);
 const courtListenerWebhookPrefix = "/api/webhook/courtlistener/";
+const webhookEnrichmentQueueCheckpointKey = "system:webhook-enrichment-queue";
+const supportedWebhookEnrichmentProviders = new Set([
+  PRIORITY_FEED_SOURCE,
+  "61tro",
+  "recentfilings",
+  "courtlistener",
+  "pacermonitor",
+  "docketalarm",
+  "unicourt"
+]);
 
 function clearPublicResponseCache(pathPrefixes = []) {
   if (!Array.isArray(pathPrefixes) || !pathPrefixes.length) {
@@ -158,10 +175,13 @@ function isSqliteBusyError(error) {
   );
 }
 
-function spawnDetachedTask(args = []) {
+function spawnDetachedTask(args = [], extraEnv = {}) {
   const child = spawn(process.execPath, [currentScriptPath, ...args], {
     cwd: path.dirname(config.publicDir),
-    env: process.env,
+    env: {
+      ...process.env,
+      ...extraEnv
+    },
     detached: true,
     stdio: "ignore"
   });
@@ -260,45 +280,184 @@ function queueLookupImport(term, { courtName = "", caseName = "" } = {}) {
   return true;
 }
 
-function queueCourtListenerWebhookFollowUp(caseId, {
-  delayMs = 60 * 1000,
-  attempt = 1
+function getWebhookEnrichmentProviders(providers = null) {
+  const rawProviders = Array.isArray(providers) && providers.length
+    ? providers
+    : config.sync?.webhookEnrichmentProviders || [];
+
+  return [...new Set(
+    rawProviders
+      .map((value) => String(value || "").trim())
+      .filter((value) => supportedWebhookEnrichmentProviders.has(value))
+  )];
+}
+
+function buildWebhookEnrichmentWorkerEnv() {
+  const maxOldSpaceMb = Math.max(Number(config.sync?.webhookEnrichmentMaxOldSpaceMb || 0), 128);
+  const existingNodeOptions = String(process.env.NODE_OPTIONS || "").trim();
+  if (existingNodeOptions.includes("--max-old-space-size=")) {
+    return {};
+  }
+
+  return {
+    NODE_OPTIONS: `${existingNodeOptions} --max-old-space-size=${maxOldSpaceMb}`.trim()
+  };
+}
+
+function scheduleWebhookEnrichmentWorker({ force = false } = {}) {
+  if (!config.sync?.webhookEnrichmentEnabled) {
+    return false;
+  }
+
+  const debounceMs = Math.max(Number(config.sync?.webhookEnrichmentSpawnDebounceMs || 0), 1000);
+  if (!force && Date.now() - lastWebhookEnrichmentWorkerQueuedAt < debounceMs) {
+    return false;
+  }
+
+  lastWebhookEnrichmentWorkerQueuedAt = Date.now();
+  spawnDetachedTask(["--sync-only", "webhook-enrichment"], buildWebhookEnrichmentWorkerEnv());
+  return true;
+}
+
+function getWebhookEnrichmentPriorityAt(caseRow, { lastWebhookFiledAt = null, lastWebhookAt = null } = {}) {
+  const candidates = [
+    String(lastWebhookFiledAt || "").trim(),
+    String(caseRow?.latest_docket_filed_at || "").trim(),
+    String(caseRow?.date_filed || "").trim(),
+    String(lastWebhookAt || "").trim(),
+    String(caseRow?.last_seen_at || "").trim(),
+    String(caseRow?.updated_at || "").trim()
+  ].filter(Boolean);
+
+  let selected = null;
+  let selectedTs = -Infinity;
+  for (const value of candidates) {
+    const timestamp = Date.parse(value);
+    if (Number.isFinite(timestamp) && timestamp > selectedTs) {
+      selected = value;
+      selectedTs = timestamp;
+    }
+  }
+
+  return selected || new Date().toISOString();
+}
+
+function getWebhookEnrichmentMemorySnapshot() {
+  const usage = process.memoryUsage();
+  return {
+    rssMb: Number((usage.rss / (1024 * 1024)).toFixed(1)),
+    heapUsedMb: Number((usage.heapUsed / (1024 * 1024)).toFixed(1)),
+    freeSystemMb: Number((os.freemem() / (1024 * 1024)).toFixed(1))
+  };
+}
+
+function checkWebhookEnrichmentMemoryPressure() {
+  const snapshot = getWebhookEnrichmentMemorySnapshot();
+  const maxRssMb = Math.max(Number(config.sync?.webhookEnrichmentMaxRssMb || 0), 0);
+  const minFreeSystemMb = Math.max(Number(config.sync?.webhookEnrichmentMinFreeSystemMb || 0), 0);
+
+  if (maxRssMb > 0 && snapshot.rssMb >= maxRssMb) {
+    return {
+      ok: false,
+      reason: "rss-limit",
+      snapshot
+    };
+  }
+
+  if (minFreeSystemMb > 0 && snapshot.freeSystemMb <= minFreeSystemMb) {
+    return {
+      ok: false,
+      reason: "low-system-memory",
+      snapshot
+    };
+  }
+
+  return {
+    ok: true,
+    reason: null,
+    snapshot
+  };
+}
+
+function enqueueWebhookEnrichmentCase(caseId, {
+  providers = null,
+  lastWebhookAt = new Date().toISOString(),
+  lastWebhookFiledAt = null,
+  latestEntryId = null,
+  entryCount = 0,
+  eventType = null,
+  idempotencyKey = null,
+  delayMs = null
 } = {}) {
+  if (!config.sync?.webhookEnrichmentEnabled) {
+    return {
+      enqueued: false,
+      reason: "disabled"
+    };
+  }
+
   const normalizedCaseId = Number(caseId || 0);
   if (!Number.isFinite(normalizedCaseId) || normalizedCaseId <= 0) {
-    return false;
+    return {
+      enqueued: false,
+      reason: "invalid-case-id"
+    };
   }
 
-  const normalizedDelayMs = Math.max(15 * 1000, Number(delayMs || 0));
-  const existing = pendingCourtListenerWebhookFollowUps.get(normalizedCaseId);
-  if (existing && existing.runAt <= Date.now() + normalizedDelayMs) {
-    return false;
+  const caseRow = store.getCase(normalizedCaseId);
+  if (!caseRow) {
+    return {
+      enqueued: false,
+      reason: "missing-case"
+    };
   }
 
-  if (existing?.timer) {
-    clearTimeout(existing.timer);
+  const selectedProviders = getWebhookEnrichmentProviders(providers);
+  if (!selectedProviders.length) {
+    return {
+      enqueued: false,
+      reason: "no-providers"
+    };
   }
 
-  const runAt = Date.now() + normalizedDelayMs;
-  const timer = setTimeout(() => {
-    pendingCourtListenerWebhookFollowUps.delete(normalizedCaseId);
-    console.warn(
-      `[webhook] retrying courtlistener follow-up for case ${normalizedCaseId} after ${Math.round(normalizedDelayMs / 1000)}s (attempt ${attempt})`
-    );
-    spawnDetachedTask([
-      "--enrich-case-id",
-      String(normalizedCaseId),
-      "--providers",
-      "courtlistener"
-    ]);
-  }, normalizedDelayMs);
+  const normalizedDelayMs = Math.max(
+    Number((delayMs ?? config.sync?.webhookEnrichmentSettleDelayMs) || 0),
+    15 * 1000
+  );
+  const now = new Date();
+  const queuedJob = store.updateCheckpointAtomically(webhookEnrichmentQueueCheckpointKey, (currentValue) => {
+    const result = enqueueWebhookEnrichmentJobState(currentValue, {
+      caseId: normalizedCaseId,
+      providers: selectedProviders,
+      enqueuedAt: now.toISOString(),
+      runAfter: new Date(now.getTime() + normalizedDelayMs).toISOString(),
+      priorityAt: getWebhookEnrichmentPriorityAt(caseRow, {
+        lastWebhookFiledAt,
+        lastWebhookAt
+      }),
+      lastWebhookAt,
+      lastWebhookFiledAt,
+      latestEntryId,
+      entryCount,
+      eventType,
+      idempotencyKey
+    }, {
+      maxPending: Math.max(Number(config.sync?.webhookEnrichmentMaxPendingJobs || 0), 0),
+      now: now.toISOString()
+    });
 
-  pendingCourtListenerWebhookFollowUps.set(normalizedCaseId, {
-    runAt,
-    attempt,
-    timer
+    return {
+      value: result.state,
+      result
+    };
   });
-  return true;
+
+  scheduleWebhookEnrichmentWorker();
+  return {
+    enqueued: Boolean(queuedJob?.queuedJob),
+    pendingCount: Number(queuedJob?.pendingCount || 0),
+    queuedJob: queuedJob?.queuedJob || null
+  };
 }
 
 function runSyncModeChild(mode, extraArgs = [], extraEnv = {}, { streamLogs = false } = {}) {
@@ -612,7 +771,7 @@ async function handleCourtListenerWebhook(request, response, pathname) {
     const findCaseByCLId = store.db.prepare(
       "SELECT id, case_name, docket_number FROM cases WHERE courtlistener_docket_id = ? LIMIT 1"
     );
-    const casesToRefresh = new Set();
+    const casesToRefresh = new Map();
 
     const oldAlerts = [
       ...(Array.isArray(body?.payload?.old_alerts) ? body.payload.old_alerts : []),
@@ -659,7 +818,26 @@ async function handleCourtListenerWebhook(request, response, pathname) {
           last_synced_at: timestamp
         });
         processed += 1;
-        casesToRefresh.add(Number(caseRow.id));
+        const normalizedCaseId = Number(caseRow.id || 0);
+        const existingMeta = casesToRefresh.get(normalizedCaseId) || {
+          entryCount: 0,
+          latestEntryId: null,
+          lastWebhookFiledAt: null
+        };
+        const entryFiledAt = String(entry.date_filed || entry.entry_date_filed || "").trim() || null;
+        const previousFiledAt = Date.parse(String(existingMeta.lastWebhookFiledAt || ""));
+        const currentFiledAt = Date.parse(String(entryFiledAt || ""));
+        casesToRefresh.set(normalizedCaseId, {
+          entryCount: existingMeta.entryCount + 1,
+          latestEntryId:
+            existingMeta.latestEntryId && Number(existingMeta.latestEntryId) > Number(entryId || 0)
+              ? existingMeta.latestEntryId
+              : Number(entryId || 0) || existingMeta.latestEntryId || null,
+          lastWebhookFiledAt:
+            Number.isFinite(currentFiledAt) && currentFiledAt >= previousFiledAt
+              ? entryFiledAt
+              : existingMeta.lastWebhookFiledAt || entryFiledAt || null
+        });
       } catch (error) {
         console.error("[webhook] entry error:", error);
         skipped += 1;
@@ -670,34 +848,28 @@ async function handleCourtListenerWebhook(request, response, pathname) {
       clearPublicCaseCaches();
     }
 
-    const latestEntryId = [...results]
-      .map((item) => Number(item?.id || 0))
-      .filter((value) => Number.isFinite(value) && value > 0)
-      .sort((left, right) => right - left)[0] || null;
-
-    for (const caseId of casesToRefresh) {
+    for (const [caseId, caseMeta] of casesToRefresh.entries()) {
       syncService.handleCourtListenerWebhookEvent(caseId, {
         eventType: webhookMeta.event_type || null,
         idempotencyKey,
-        latestEntryId,
-        entryCount: results.length
-      }).catch((error) => {
-        console.error(`[webhook] follow-up refresh failed for case ${caseId}:`, error);
-        if (Number(error?.status || 0) === 429) {
-          const retryAfterMs = Math.max(
-            Number(error?.retryAfterMs || 0),
-            60 * 1000
+        latestEntryId: caseMeta.latestEntryId || null,
+        entryCount: caseMeta.entryCount || 0
+      }).then(() => {
+        const queued = enqueueWebhookEnrichmentCase(caseId, {
+          eventType: webhookMeta.event_type || null,
+          idempotencyKey,
+          latestEntryId: caseMeta.latestEntryId || null,
+          entryCount: caseMeta.entryCount || 0,
+          lastWebhookAt: new Date().toISOString(),
+          lastWebhookFiledAt: caseMeta.lastWebhookFiledAt || null
+        });
+        if (queued.enqueued) {
+          console.log(
+            `[webhook] queued high-quality enrichment for case ${caseId} with ${queued.queuedJob?.providers?.join(",") || "none"}`
           );
-          const scheduled = queueCourtListenerWebhookFollowUp(caseId, {
-            delayMs: retryAfterMs,
-            attempt: 2
-          });
-          if (scheduled) {
-            console.warn(
-              `[webhook] queued delayed courtlistener follow-up for case ${caseId} in ${Math.round(retryAfterMs / 1000)}s`
-            );
-          }
         }
+      }).catch((error) => {
+        console.error(`[webhook] failed to persist webhook state for case ${caseId}:`, error);
       });
     }
 
@@ -2059,7 +2231,9 @@ function queueCaseHydration(caseId, initialItem) {
 
 async function refreshCaseAcrossSources(caseId, {
   initialItem = null,
-  providers = ["lookup:courtlistener", "recentfilings", "61tro", PRIORITY_FEED_SOURCE, "courtlistener", "pacermonitor", "docketalarm", "unicourt"]
+  providers = ["lookup:courtlistener", "recentfilings", "61tro", PRIORITY_FEED_SOURCE, "courtlistener", "pacermonitor", "docketalarm", "unicourt"],
+  interProviderDelayMs = 0,
+  shouldContinue = null
 } = {}) {
   const expandedProviders = [...new Set(
     providers.flatMap((provider) => {
@@ -2077,74 +2251,142 @@ async function refreshCaseAcrossSources(caseId, {
   )];
   const completedProviders = [];
   const failedProviders = [];
+  const providerResults = [];
   let lookupResult = null;
   let current = store.getCase(caseId) || initialItem || null;
+  let stoppedReason = null;
 
   const refreshCurrent = () => {
     current = store.getCase(caseId) || current;
     return current;
   };
 
+  const shouldRunProvider = async (provider) => {
+    if (typeof shouldContinue !== "function") {
+      return {
+        ok: true,
+        reason: null
+      };
+    }
+
+    const decision = await shouldContinue({
+      caseId,
+      provider,
+      current: refreshCurrent(),
+      completedProviders: [...completedProviders],
+      failedProviders: [...failedProviders],
+      providerResults: [...providerResults]
+    });
+    if (decision === false) {
+      return {
+        ok: false,
+        reason: "stopped"
+      };
+    }
+
+    if (decision && typeof decision === "object" && decision.ok === false) {
+      return {
+        ok: false,
+        reason: decision.reason || "stopped"
+      };
+    }
+
+    return {
+      ok: true,
+      reason: null
+    };
+  };
+
   const runProvider = async (provider, task) => {
+    const decision = await shouldRunProvider(provider);
+    if (!decision.ok) {
+      stoppedReason = decision.reason;
+      return false;
+    }
+
     try {
-      await task();
+      const result = await task();
+      providerResults.push({
+        provider,
+        ...(result && typeof result === "object" ? result : { result })
+      });
       completedProviders.push(provider);
       refreshCurrent();
+      if (interProviderDelayMs > 0) {
+        await wait(interProviderDelayMs);
+      }
     } catch (error) {
       failedProviders.push({
         provider,
-        error: error?.message || String(error)
+        error: error?.message || String(error),
+        status: Number(error?.status || 0) || null,
+        retryAfterMs: Number(error?.retryAfterMs || 0) || null
       });
       console.warn(`[sync] provider ${provider} failed for case ${caseId}: ${error?.message || error}`);
     }
+    return true;
   };
 
   const lookupProviders = expandedProviders.filter((provider) => provider.startsWith("lookup:"));
   if (lookupProviders.length && current) {
-    try {
-      const lookupTerm = String(current?.docket_number || current?.case_name || "").trim();
-      if (lookupTerm) {
-        const lookupSources = lookupProviders
-          .map((provider) => provider.split(":")[1] || "")
-          .filter(Boolean);
-        lookupResult = await syncService.importLookup(lookupTerm, {
-          courtName: current?.court_name || "",
-          caseName: current?.case_name || "",
-          sources: lookupSources
-        });
-        refreshCurrent();
-      }
-    } catch (error) {
-      failedProviders.push({
-        provider: "lookup",
-        error: error?.message || String(error)
-      });
-      console.warn(`[sync] provider lookup failed for case ${caseId}: ${error?.message || error}`);
-    }
-    if (lookupResult?.sourceResults) {
-      for (const provider of lookupProviders) {
-        const sourceKey = provider.split(":")[1] || "";
-        const sourceResult = lookupResult.sourceResults?.[sourceKey] || null;
-        if (!sourceResult?.attempted) {
-          continue;
+    const decision = await shouldRunProvider("lookup");
+    if (!decision.ok) {
+      stoppedReason = decision.reason;
+    } else {
+      try {
+        const lookupTerm = String(current?.docket_number || current?.case_name || "").trim();
+        if (lookupTerm) {
+          const lookupSources = lookupProviders
+            .map((provider) => provider.split(":")[1] || "")
+            .filter(Boolean);
+          lookupResult = await syncService.importLookup(lookupTerm, {
+            courtName: current?.court_name || "",
+            caseName: current?.case_name || "",
+            sources: lookupSources
+          });
+          providerResults.push({
+            provider: "lookup",
+            lookupResult
+          });
+          refreshCurrent();
         }
-        completedProviders.push(provider);
+      } catch (error) {
+        failedProviders.push({
+          provider: "lookup",
+          error: error?.message || String(error),
+          status: Number(error?.status || 0) || null,
+          retryAfterMs: Number(error?.retryAfterMs || 0) || null
+        });
+        console.warn(`[sync] provider lookup failed for case ${caseId}: ${error?.message || error}`);
+      }
+      if (lookupResult?.sourceResults) {
+        for (const provider of lookupProviders) {
+          const sourceKey = provider.split(":")[1] || "";
+          const sourceResult = lookupResult.sourceResults?.[sourceKey] || null;
+          if (!sourceResult?.attempted) {
+            continue;
+          }
+          completedProviders.push(provider);
+        }
+      }
+      if (interProviderDelayMs > 0 && lookupProviders.length) {
+        await wait(interProviderDelayMs);
       }
     }
   }
 
-  if (expandedProviders.includes("recentfilings")) {
+  if (!stoppedReason && expandedProviders.includes("recentfilings")) {
     await runProvider("recentfilings", () => syncService.enrichCaseWithRecentFilings(caseId, { force: true }));
   }
 
-  if (expandedProviders.includes("61tro")) {
+  if (!stoppedReason && expandedProviders.includes("61tro")) {
     await runProvider("61tro", () => syncService.enrichCaseWithLawFirmLookup(caseId, {
       sourceIds: ["61tro"],
       force: true
     }));
   }
 
-  if (expandedProviders.includes(PRIORITY_FEED_SOURCE)) {
+  if (!stoppedReason && expandedProviders.includes(PRIORITY_FEED_SOURCE)) {
     await runProvider(PRIORITY_FEED_SOURCE, async () => {
       await syncService.enrichCaseWithPriorityFeed(caseId, {
         force: true
@@ -2152,19 +2394,19 @@ async function refreshCaseAcrossSources(caseId, {
     });
   }
 
-  if (expandedProviders.includes("courtlistener")) {
+  if (!stoppedReason && expandedProviders.includes("courtlistener")) {
     await runProvider("courtlistener", () => syncService.enrichCaseWithCourtListener(caseId, { force: true }));
   }
 
-  if (expandedProviders.includes("pacermonitor")) {
+  if (!stoppedReason && expandedProviders.includes("pacermonitor")) {
     await runProvider("pacermonitor", () => syncService.enrichCaseWithPacerMonitor(caseId, { force: true }));
   }
 
-  if (expandedProviders.includes("docketalarm")) {
+  if (!stoppedReason && expandedProviders.includes("docketalarm")) {
     await runProvider("docketalarm", () => syncService.enrichCaseWithDocketAlarm(caseId, { force: true }));
   }
 
-  if (expandedProviders.includes("unicourt")) {
+  if (!stoppedReason && expandedProviders.includes("unicourt")) {
     await runProvider("unicourt", () => syncService.enrichCaseWithUniCourt(caseId, { force: true }));
   }
 
@@ -2176,8 +2418,233 @@ async function refreshCaseAcrossSources(caseId, {
     requestedProviders: expandedProviders,
     completedProviders,
     failedProviders,
+    providerResults,
+    stoppedReason,
     lookupResult
   };
+}
+
+function isTransientEnrichmentFailure(failure = {}) {
+  const status = Number(failure?.status || 0);
+  if ([408, 409, 425, 429, 500, 502, 503, 504].includes(status)) {
+    return true;
+  }
+
+  return /\b(408|409|425|429|500|502|503|504)\b/.test(String(failure?.error || ""));
+}
+
+function shouldClearCachesForEnrichment(result = {}) {
+  return (result.providerResults || []).some((item) =>
+    item?.enriched ||
+    Number(item?.casesUpserted || 0) > 0 ||
+    Number(item?.docketEntriesUpserted || 0) > 0
+  );
+}
+
+async function runWebhookEnrichmentWorker() {
+  if (!config.sync?.webhookEnrichmentEnabled) {
+    return {
+      skipped: true,
+      reason: "disabled"
+    };
+  }
+
+  const runId = store.claimSyncRun("system", "webhook-enrichment", 45);
+  if (!runId) {
+    return {
+      skipped: true,
+      reason: "already-running"
+    };
+  }
+
+  let claimedJob = null;
+
+  try {
+    const claimed = store.updateCheckpointAtomically(webhookEnrichmentQueueCheckpointKey, (currentValue) => {
+      const result = claimWebhookEnrichmentJobState(currentValue, {
+        now: new Date().toISOString(),
+        leaseTtlMs: Math.max(Number(config.sync?.webhookEnrichmentLeaseTtlMs || 0), 60 * 1000),
+        maxPending: Math.max(Number(config.sync?.webhookEnrichmentMaxPendingJobs || 0), 0)
+      });
+      return {
+        value: result.state,
+        result
+      };
+    });
+
+    claimedJob = claimed?.job || null;
+    if (!claimedJob) {
+      const queueStats = getWebhookEnrichmentQueueStats(store.getCheckpoint(webhookEnrichmentQueueCheckpointKey), {
+        now: new Date().toISOString()
+      });
+      const stats = {
+        claimed: 0,
+        pendingCount: queueStats.pendingCount,
+        readyCount: queueStats.readyCount,
+        leasedCount: queueStats.leasedCount,
+        note: "webhook enrichment queue empty"
+      };
+      store.finishSyncRun(runId, "completed", stats);
+      return {
+        skipped: true,
+        reason: "queue-empty",
+        ...stats
+      };
+    }
+
+    const initialMemory = checkWebhookEnrichmentMemoryPressure();
+    if (!initialMemory.ok) {
+      const finished = store.updateCheckpointAtomically(webhookEnrichmentQueueCheckpointKey, (currentValue) => {
+        const result = finishWebhookEnrichmentJobState(currentValue, {
+          caseId: claimedJob.caseId,
+          leaseId: claimedJob.leaseId,
+          now: new Date().toISOString(),
+          requeueAfterMs: Math.max(Number(config.sync?.webhookEnrichmentMemoryRetryDelayMs || 0), 60 * 1000),
+          requeueJob: {
+            providers: claimedJob.providers
+          },
+          maxPending: Math.max(Number(config.sync?.webhookEnrichmentMaxPendingJobs || 0), 0)
+        });
+        return {
+          value: result.state,
+          result
+        };
+      });
+      const queueStats = getWebhookEnrichmentQueueStats(finished?.state || store.getCheckpoint(webhookEnrichmentQueueCheckpointKey), {
+        now: new Date().toISOString()
+      });
+      const stats = {
+        claimed: 1,
+        caseId: claimedJob.caseId,
+        requeued: 1,
+        reason: initialMemory.reason,
+        memory: initialMemory.snapshot,
+        pendingCount: queueStats.pendingCount,
+        readyCount: queueStats.readyCount,
+        leasedCount: queueStats.leasedCount
+      };
+      store.finishSyncRun(runId, "completed", stats);
+      return stats;
+    }
+
+    const result = await refreshCaseAcrossSources(claimedJob.caseId, {
+      initialItem: store.getCase(claimedJob.caseId),
+      providers: claimedJob.providers,
+      interProviderDelayMs: Math.max(Number(config.sync?.webhookEnrichmentProviderDelayMs || 0), 0),
+      shouldContinue: () => {
+        const guard = checkWebhookEnrichmentMemoryPressure();
+        return guard.ok
+          ? { ok: true }
+          : {
+              ok: false,
+              reason: "memory-pressure"
+            };
+      }
+    });
+
+    const remainingProviders = (claimedJob.providers || []).filter((provider) => !result.completedProviders.includes(provider));
+    const transientFailures = (result.failedProviders || []).filter(isTransientEnrichmentFailure);
+    const retryAfterMs = transientFailures.reduce((maxDelay, failure) => {
+      return Math.max(maxDelay, Number(failure?.retryAfterMs || 0), 0);
+    }, 0);
+    const requeueAfterMs = result.stoppedReason === "memory-pressure"
+      ? Math.max(Number(config.sync?.webhookEnrichmentMemoryRetryDelayMs || 0), 60 * 1000)
+      : transientFailures.length && remainingProviders.length
+        ? Math.max(Number(config.sync?.webhookEnrichmentRetryDelayMs || 0), retryAfterMs, 60 * 1000)
+        : 0;
+
+    const finished = store.updateCheckpointAtomically(webhookEnrichmentQueueCheckpointKey, (currentValue) => {
+      const completion = finishWebhookEnrichmentJobState(currentValue, {
+        caseId: claimedJob.caseId,
+        leaseId: claimedJob.leaseId,
+        now: new Date().toISOString(),
+        requeueAfterMs,
+        requeueJob: requeueAfterMs > 0
+          ? {
+              providers: remainingProviders.length ? remainingProviders : claimedJob.providers,
+              priorityAt: claimedJob.priorityAt,
+              lastWebhookAt: claimedJob.lastWebhookAt,
+              lastWebhookFiledAt: claimedJob.lastWebhookFiledAt,
+              latestEntryId: claimedJob.latestEntryId,
+              entryCount: claimedJob.entryCount,
+              eventType: claimedJob.eventType,
+              idempotencyKey: claimedJob.idempotencyKey
+            }
+          : null,
+        maxPending: Math.max(Number(config.sync?.webhookEnrichmentMaxPendingJobs || 0), 0)
+      });
+      return {
+        value: completion.state,
+        result: completion
+      };
+    });
+
+    if (shouldClearCachesForEnrichment(result)) {
+      clearPublicCaseCaches();
+    }
+
+    const queueStats = getWebhookEnrichmentQueueStats(finished?.state || store.getCheckpoint(webhookEnrichmentQueueCheckpointKey), {
+      now: new Date().toISOString()
+    });
+    const stats = {
+      claimed: 1,
+      caseId: claimedJob.caseId,
+      completedProviders: result.completedProviders,
+      failedProviders: result.failedProviders,
+      stoppedReason: result.stoppedReason,
+      requeued: requeueAfterMs > 0 ? 1 : 0,
+      requeueAfterMs: requeueAfterMs || null,
+      pendingCount: queueStats.pendingCount,
+      readyCount: queueStats.readyCount,
+      leasedCount: queueStats.leasedCount
+    };
+    store.finishSyncRun(runId, "completed", stats);
+
+    if (queueStats.readyCount > 0) {
+      scheduleWebhookEnrichmentWorker({ force: true });
+    }
+
+    return {
+      ...stats,
+      providerResults: result.providerResults
+    };
+  } catch (error) {
+    if (claimedJob?.caseId) {
+      try {
+        store.updateCheckpointAtomically(webhookEnrichmentQueueCheckpointKey, (currentValue) => {
+          const completion = finishWebhookEnrichmentJobState(currentValue, {
+            caseId: claimedJob.caseId,
+            leaseId: claimedJob.leaseId,
+            now: new Date().toISOString(),
+            requeueAfterMs: Math.max(Number(config.sync?.webhookEnrichmentRetryDelayMs || 0), 60 * 1000),
+            requeueJob: {
+              providers: claimedJob.providers,
+              priorityAt: claimedJob.priorityAt,
+              lastWebhookAt: claimedJob.lastWebhookAt,
+              lastWebhookFiledAt: claimedJob.lastWebhookFiledAt,
+              latestEntryId: claimedJob.latestEntryId,
+              entryCount: claimedJob.entryCount,
+              eventType: claimedJob.eventType,
+              idempotencyKey: claimedJob.idempotencyKey
+            },
+            maxPending: Math.max(Number(config.sync?.webhookEnrichmentMaxPendingJobs || 0), 0)
+          });
+          return {
+            value: completion.state,
+            result: completion
+          };
+        });
+      } catch (checkpointError) {
+        console.error("[webhook-enrichment] failed to requeue crashed job", checkpointError);
+      }
+    }
+
+    store.finishSyncRun(runId, "failed", {
+      claimed: claimedJob?.caseId ? 1 : 0,
+      caseId: claimedJob?.caseId || null
+    }, error?.message || String(error));
+    throw error;
+  }
 }
 
 function serializePublicEntry(entry = {}) {
@@ -3314,6 +3781,16 @@ async function main() {
       process.exit(0);
     }
 
+    if (rawMode === "webhook-enrichment") {
+      const result = await runWebhookEnrichmentWorker();
+      if (result?.skipped) {
+        console.log(`[sync] skipped webhook-enrichment ${JSON.stringify({ reason: result.reason || "queue-empty" })}`);
+      } else {
+        console.log(`[sync] completed webhook-enrichment ${JSON.stringify(result)}`);
+      }
+      process.exit(0);
+    }
+
     const mode = rawMode === "backfill" ? "backfill" : "recent";
     const result = await syncService.run(mode);
     if (resultJson) {
@@ -3347,6 +3824,16 @@ async function main() {
   server.listen(config.server.port, () => {
     console.log(`TRO Case Watch listening on http://localhost:${config.server.port}`);
   });
+
+  if (config.sync?.webhookEnrichmentEnabled) {
+    setTimeout(() => {
+      scheduleWebhookEnrichmentWorker({ force: true });
+    }, Math.min(Math.max(Number(config.sync?.webhookEnrichmentPollIntervalMs || 60 * 1000), 15 * 1000), 60 * 1000));
+
+    setInterval(() => {
+      scheduleWebhookEnrichmentWorker({ force: true });
+    }, Math.max(Number(config.sync?.webhookEnrichmentPollIntervalMs || 60 * 1000), 15 * 1000));
+  }
 
   if (!config.sync.internalSchedulersEnabled) {
     console.log("[scheduler] internal background schedulers disabled; use cron or explicit sync commands");

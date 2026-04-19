@@ -3475,7 +3475,11 @@ export class CaseSyncService {
       lastWebhookIdempotencyKey: idempotencyKey
     });
 
-    return this.enrichCaseWithCourtListener(caseId, { force: true });
+    return {
+      caseId: Number(caseRow.id || 0),
+      courtlistenerDocketId: Number(caseRow.courtlistener_docket_id || 0) || null,
+      persisted: true
+    };
   }
 
   async reupCourtListenerAlertsFromWebhook(alerts = []) {

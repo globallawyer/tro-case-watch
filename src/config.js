@@ -232,7 +232,20 @@ export const config = {
     workerCatalogMaxRounds: envInt("WORKER_CATALOG_MAX_ROUNDS", 100),
     workerCatalogIdleRounds: envInt("WORKER_CATALOG_IDLE_ROUNDS", 5),
     workerCatalogSleepMs: envInt("WORKER_CATALOG_SLEEP_MS", 2000),
-    workerCatalogBatchSize: envInt("WORKER_CATALOG_BATCH_SIZE", 4)
+    workerCatalogBatchSize: envInt("WORKER_CATALOG_BATCH_SIZE", 4),
+    webhookEnrichmentEnabled: envBool("WEBHOOK_ENRICHMENT_ENABLED", true),
+    webhookEnrichmentProviders: envList("WEBHOOK_ENRICHMENT_PROVIDERS", ["worldtro", "61tro", "recentfilings"]),
+    webhookEnrichmentSettleDelayMs: envInt("WEBHOOK_ENRICHMENT_SETTLE_DELAY_MS", 90 * 1000),
+    webhookEnrichmentLeaseTtlMs: envInt("WEBHOOK_ENRICHMENT_LEASE_TTL_MS", 15 * 60 * 1000),
+    webhookEnrichmentProviderDelayMs: envInt("WEBHOOK_ENRICHMENT_PROVIDER_DELAY_MS", 2000),
+    webhookEnrichmentRetryDelayMs: envInt("WEBHOOK_ENRICHMENT_RETRY_DELAY_MS", 20 * 60 * 1000),
+    webhookEnrichmentMemoryRetryDelayMs: envInt("WEBHOOK_ENRICHMENT_MEMORY_RETRY_DELAY_MS", 10 * 60 * 1000),
+    webhookEnrichmentMaxOldSpaceMb: envInt("WEBHOOK_ENRICHMENT_MAX_OLD_SPACE_MB", 256),
+    webhookEnrichmentMaxRssMb: envInt("WEBHOOK_ENRICHMENT_MAX_RSS_MB", 384),
+    webhookEnrichmentMinFreeSystemMb: envInt("WEBHOOK_ENRICHMENT_MIN_FREE_SYSTEM_MB", 768),
+    webhookEnrichmentPollIntervalMs: envInt("WEBHOOK_ENRICHMENT_POLL_INTERVAL_MS", 60 * 1000),
+    webhookEnrichmentSpawnDebounceMs: envInt("WEBHOOK_ENRICHMENT_SPAWN_DEBOUNCE_MS", 5000),
+    webhookEnrichmentMaxPendingJobs: envInt("WEBHOOK_ENRICHMENT_MAX_PENDING_JOBS", 500)
   },
   courtListener: {
     baseUrl: env("COURTLISTENER_BASE_URL", "https://www.courtlistener.com/api/rest/v4"),

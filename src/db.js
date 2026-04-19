@@ -6153,6 +6153,42 @@ export class Store {
     return row ? parseJson(row.value_json, {}) : null;
   }
 
+  updateCheckpointAtomically(key, updater) {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.db.prepare("SELECT value_json FROM checkpoints WHERE checkpoint_key = ?").get(key);
+      const currentValue = row ? parseJson(row.value_json, {}) : null;
+      const outcome = updater(currentValue);
+      const hasStructuredOutcome =
+        outcome &&
+        typeof outcome === "object" &&
+        Object.prototype.hasOwnProperty.call(outcome, "value");
+      const nextValue = hasStructuredOutcome ? outcome.value : outcome;
+
+      if (nextValue === null) {
+        this.db.prepare("DELETE FROM checkpoints WHERE checkpoint_key = ?").run(key);
+      } else {
+        this.db
+          .prepare(`
+            INSERT INTO checkpoints (checkpoint_key, value_json, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(checkpoint_key) DO UPDATE SET
+              value_json = excluded.value_json,
+              updated_at = excluded.updated_at
+          `)
+          .run(key, toJson(nextValue, "{}"), nowIso());
+      }
+
+      this.db.exec("COMMIT");
+      return hasStructuredOutcome ? outcome.result : nextValue;
+    } catch (error) {
+      try {
+        this.db.exec("ROLLBACK");
+      } catch {}
+      throw error;
+    }
+  }
+
   saveCheckpoint(key, value) {
     this.db
       .prepare(`
