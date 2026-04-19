@@ -817,40 +817,43 @@ function renderDetail(item) {
           : ""
       }
       ${
-        entries.length
-          ? entries
-              .map(
-                (entry) => {
-                  const signals = timelineSignals(entry)
-                    .map((value) => `<span class="highlight-pill">${value}</span>`)
-                    .join("");
-
-                  return `
-                  <article class="timeline-item">
-                    <div class="timeline-item-head">
-                      <time>${formatDate(entry.filed_at)}</time>
-                      <span class="status-pill neutral">${timelineSourceLabel(entry)}</span>
-                    </div>
-                    <h3>${entriesSequential && (entry.document_number || entry.entry_number) ? (entry.document_number || entry.entry_number) + " · " : ""}${displayEntryType(entry)}</h3>
-                    ${signals ? `<div class="tag-row timeline-tags">${signals}</div>` : ""}
-                    <p>${entry.description || "无可显示文本"}</p>
-                    ${entry.description_zh ? `<p class="timeline-zh">${entry.description_zh}</p>` : ""}
-                    <p class="timeline-source-note">来源已归档到本站，如需转换成中文，请在Chrome浏览器右键点击翻译</p>
-                  </article>
-                `;
-                }
-              )
-              .join("")
-          : `
-            <article class="timeline-item">
-              <time>${formatDate(item.latest_docket_filed_at || item.date_filed)}</time>
-              <h3>最近进展</h3>
-              <p>${item.recent_activity_summary || "当前只有案件级元数据，没有补到逐条 docket。"}
-              </p>
-              <p class="focus-text">当前公开来源只补到了案件级摘要。等详细 docket 补进来后，这里会直接显示站内时间线。</p>
-              ${item.recent_activity_summary_zh ? `<p class="timeline-zh">${item.recent_activity_summary_zh}</p>` : ""}
-            </article>
-          `
+        (() => {
+          const visibleEntries = entries.filter(e => e.description || e.description_zh);
+          if (!visibleEntries.length) {
+            return `
+              <article class="timeline-item">
+                <time>${formatDate(item.latest_docket_filed_at || item.date_filed)}</time>
+                <h3>最近进展</h3>
+                <p>${item.recent_activity_summary || "当前只有案件级元数据，没有补到逐条 docket。"}</p>
+                <p class="focus-text">当前公开来源只补到了案件级摘要。等详细 docket 补进来后，这里会直接显示站内时间线。</p>
+                ${item.recent_activity_summary_zh ? `<p class="timeline-zh">${item.recent_activity_summary_zh}</p>` : ""}
+              </article>
+            `;
+          }
+          return visibleEntries
+            .map((entry) => {
+              const signals = timelineSignals(entry)
+                .map((value) => `<span class="highlight-pill">${value}</span>`)
+                .join("");
+              const numPrefix = entriesSequential && (entry.document_number || entry.entry_number)
+                ? (entry.document_number || entry.entry_number) + " · "
+                : "";
+              return `
+                <article class="timeline-item">
+                  <div class="timeline-item-head">
+                    <time>${formatDate(entry.filed_at)}</time>
+                    <span class="status-pill neutral">${timelineSourceLabel(entry)}</span>
+                  </div>
+                  <h3>${numPrefix}${displayEntryType(entry)}</h3>
+                  ${signals ? `<div class="tag-row timeline-tags">${signals}</div>` : ""}
+                  <p>${entry.description || entry.description_zh}</p>
+                  ${entry.description_zh && entry.description ? `<p class="timeline-zh">${entry.description_zh}</p>` : ""}
+                  <p class="timeline-source-note">来源已归档到本站，如需转换成中文，请在Chrome浏览器右键点击翻译</p>
+                </article>
+              `;
+            })
+            .join("");
+        })()
       }
     </section>
   `;
