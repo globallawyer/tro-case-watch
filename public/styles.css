@@ -1697,3 +1697,52 @@ a {
     font-size: 0.76rem;
   }
 }
+
+/* New docket notification banner */
+.new-docket-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  background: #e8f4fd;
+  border-left: 3px solid #1a8cd8;
+  border-radius: 6px;
+  margin: 0 0 12px 0;
+  font-size: 0.86rem;
+  color: #0d2136;
+  flex-wrap: wrap;
+}
+
+.new-docket-banner span {
+  flex: 1;
+  min-width: 0;
+}
+
+.new-docket-refresh-btn {
+  background: #1a8cd8;
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  padding: 4px 12px;
+  font-size: 0.84rem;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.new-docket-refresh-btn:hover {
+  background: #1572b6;
+}
+
+.new-docket-dismiss-btn {
+  background: none;
+  border: none;
+  color: #666;
+  font-size: 1rem;
+  cursor: pointer;
+  padding: 0 4px;
+  line-height: 1;
+}
+
+.new-docket-dismiss-btn:hover {
+  color: #333;
+}

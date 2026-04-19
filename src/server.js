@@ -2682,19 +2682,25 @@ function serializePublicCaseSummary(item = {}) {
 }
 
 function areEntryNumbersSequential(entries) {
+  if (!entries.length) return false;
   const nums = entries
     .map((e) => {
       const raw = e.document_number ?? e.entry_number;
       return raw != null ? Number(raw) : NaN;
     })
     .filter((n) => !isNaN(n) && n > 0);
+  // Need at least 3 numbered entries
   if (nums.length < 3) return false;
+  // At least 80% of all entries must carry a number;
+  // if many entries lack numbers it means sources are mixed
+  if (nums.length / entries.length < 0.8) return false;
   const sorted = [...nums].sort((a, b) => a - b);
   let gaps = 0;
   for (let i = 1; i < sorted.length; i++) {
     if (sorted[i] - sorted[i - 1] !== 1) gaps++;
   }
-  return gaps / (sorted.length - 1) < 0.3;
+  // Strict: tolerate at most 15 % non-consecutive pairs
+  return gaps / (sorted.length - 1) < 0.15;
 }
 
 function serializePublicCaseDetail(item = {}) {

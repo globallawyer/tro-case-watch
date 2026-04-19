@@ -16,6 +16,8 @@ let casesRequestToken = 0;
 let detailRefreshTimer = null;
 let prefetchDetailsTimer = null;
 let lookupPendingRetryTimer = null;
+let newDocketPollTimer = null;
+let currentDetailSnapshot = null; // { caseId, latestDocketFiledAt, docketCount }
 const inflightDetailRequests = new Map();
 const caseRoutePattern = /^\/case\/(\d+)\/?$/;
 let latestStatusPayload = null;
@@ -857,6 +859,16 @@ function renderDetail(item) {
       }
     </section>
   `;
+
+  // Track snapshot for new-docket polling
+  if (item.id) {
+    currentDetailSnapshot = {
+      caseId: item.id,
+      latestDocketFiledAt: item.latest_docket_filed_at || null,
+      docketCount: Number(item.docket_count || 0)
+    };
+    startNewDocketPoll(item.id);
+  }
 }
 
 function renderDetailLoading(item = {}) {
@@ -918,6 +930,73 @@ function clearDetailRefreshTimer() {
     window.clearTimeout(detailRefreshTimer);
     detailRefreshTimer = null;
   }
+}
+
+function clearNewDocketPollTimer() {
+  if (newDocketPollTimer) {
+    window.clearInterval(newDocketPollTimer);
+    newDocketPollTimer = null;
+  }
+}
+
+function startNewDocketPoll(caseId) {
+  clearNewDocketPollTimer();
+  const pollIntervalMs = 3 * 60 * 1000; // every 3 minutes
+  newDocketPollTimer = window.setInterval(async () => {
+    if (document.visibilityState !== "visible") return;
+    if (state.selectedCaseId !== caseId) {
+      clearNewDocketPollTimer();
+      return;
+    }
+    if (!currentDetailSnapshot || currentDetailSnapshot.caseId !== caseId) return;
+    try {
+      const res = await request(`/api/cases/${caseId}`);
+      if (state.selectedCaseId !== caseId) return;
+      const newFiledAt = res.latest_docket_filed_at || null;
+      const newCount = Number(res.docket_count || 0);
+      const snap = currentDetailSnapshot;
+      if (
+        (newFiledAt && newFiledAt !== snap.latestDocketFiledAt) ||
+        (newCount > snap.docketCount)
+      ) {
+        showNewDocketBanner(caseId, res);
+      }
+    } catch {
+      // ignore poll errors
+    }
+  }, pollIntervalMs);
+}
+
+function showNewDocketBanner(caseId, freshSummary) {
+  // Remove any existing banner first
+  const existing = detailPanel.querySelector(".new-docket-banner");
+  if (existing) existing.remove();
+
+  const banner = document.createElement("div");
+  banner.className = "new-docket-banner";
+  const latestDate = formatDate(freshSummary.latest_docket_filed_at);
+  banner.innerHTML = `
+    <span>发现新 docket（最近节点：${latestDate}），点击刷新查看</span>
+    <button class="new-docket-refresh-btn" type="button">刷新</button>
+    <button class="new-docket-dismiss-btn" type="button">✕</button>
+  `;
+  banner.querySelector(".new-docket-refresh-btn").addEventListener("click", () => {
+    banner.remove();
+    detailCache.delete(detailCacheKey(caseId, { full: false }));
+    detailCache.delete(detailCacheKey(caseId, { full: true }));
+    loadCaseDetail(caseId, { summaryItem: freshSummary }).catch(console.error);
+  });
+  banner.querySelector(".new-docket-dismiss-btn").addEventListener("click", () => {
+    // Update snapshot so the banner doesn't re-appear for this same update
+    if (currentDetailSnapshot && currentDetailSnapshot.caseId === caseId) {
+      currentDetailSnapshot.latestDocketFiledAt = freshSummary.latest_docket_filed_at || currentDetailSnapshot.latestDocketFiledAt;
+      currentDetailSnapshot.docketCount = Math.max(Number(freshSummary.docket_count || 0), currentDetailSnapshot.docketCount);
+    }
+    banner.remove();
+  });
+
+  // Insert at the top of the detail panel
+  detailPanel.insertBefore(banner, detailPanel.firstChild);
 }
 
 function cacheDetailItem(caseId, item) {
