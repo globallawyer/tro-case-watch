@@ -4128,7 +4128,7 @@ export class Store {
         FROM cases
         WHERE COALESCE(date_filed, '') >= ?
           AND (${clauses.join(" OR ")})
-        ORDER BY COALESCE(priority_activity_at, ${CASE_PRIORITY_ACTIVITY_SQL}) DESC, updated_at DESC
+        ORDER BY docket_number DESC, COALESCE(priority_activity_at, ${CASE_PRIORITY_ACTIVITY_SQL}) DESC, updated_at DESC
         LIMIT 250
       `)
       .all(...params)
@@ -4179,7 +4179,7 @@ export class Store {
         SELECT *
         FROM cases
         WHERE ${whereClauses.join("\n          AND ")}
-        ORDER BY COALESCE(priority_activity_at, ${CASE_PRIORITY_ACTIVITY_SQL}) DESC, updated_at DESC
+        ORDER BY docket_number DESC, COALESCE(priority_activity_at, ${CASE_PRIORITY_ACTIVITY_SQL}) DESC, updated_at DESC
         LIMIT ?
       `)
       .all(...params, Math.max(limit, 120))
@@ -4217,7 +4217,7 @@ export class Store {
           JOIN cases c ON c.id = cases_search_fts.rowid
           WHERE cases_search_fts MATCH ?
             AND ${whereClauses.join("\n            AND ")}
-          ORDER BY bm25(cases_search_fts), COALESCE(c.priority_activity_at, ${CASE_PRIORITY_ACTIVITY_SQL.replaceAll("updated_at", "c.updated_at").replaceAll("latest_docket_filed_at", "c.latest_docket_filed_at").replaceAll("date_filed", "c.date_filed")}) DESC, c.updated_at DESC
+          ORDER BY c.docket_number DESC, bm25(cases_search_fts), COALESCE(c.priority_activity_at, ${CASE_PRIORITY_ACTIVITY_SQL.replaceAll("updated_at", "c.updated_at").replaceAll("latest_docket_filed_at", "c.latest_docket_filed_at").replaceAll("date_filed", "c.date_filed")}) DESC, c.updated_at DESC
           LIMIT ?
         `)
         .all(...params, Math.max(limit, 120))
@@ -4280,6 +4280,7 @@ export class Store {
         FROM cases
         WHERE ${whereSql}
         ORDER BY
+          docket_number DESC,
           COALESCE(priority_activity_at, ${CASE_PRIORITY_ACTIVITY_SQL}) DESC,
           latest_docket_filed_at DESC,
           updated_at DESC,
