@@ -328,14 +328,14 @@ function spawnDetachedTask(args = [], extraEnv = {}) {
   };
 }
 
-function isSuccessfulSyncModeDue(mode, minimumIntervalMs) {
+function isSyncModeDue(mode, minimumIntervalMs) {
   const latest = store.db
     .prepare(`
       SELECT finished_at, started_at
       FROM sync_runs
       WHERE provider = 'system'
         AND mode = ?
-        AND status IN ('succeeded', 'completed')
+        AND status IN ('succeeded', 'completed', 'failed')
       ORDER BY COALESCE(finished_at, started_at) DESC
       LIMIT 1
     `)
@@ -348,7 +348,7 @@ function isSuccessfulSyncModeDue(mode, minimumIntervalMs) {
 }
 
 function spawnDetachedTaskIfDue(mode, minimumIntervalMs) {
-  if (!isSuccessfulSyncModeDue(mode, minimumIntervalMs)) {
+  if (!isSyncModeDue(mode, minimumIntervalMs)) {
     return { spawned: false, mode, reason: "not-due" };
   }
   return spawnDetachedTask(["--sync-only", mode]);

@@ -2408,7 +2408,7 @@ export class CaseSyncService {
     return this.lookupDiscoveryCandidates(candidates, this.config.lawFirms.maxLookupsPerRun);
   }
 
-  async lookupDiscoveryCandidates(candidates, maxLookups = 8) {
+  async lookupDiscoveryCandidates(candidates, maxLookups = 8, { sources = ["courtlistener"] } = {}) {
     const ordered = [...candidates.values()]
       .sort((left, right) => {
         if (left.priority !== right.priority) {
@@ -2426,7 +2426,8 @@ export class CaseSyncService {
     for (const candidate of ordered) {
       const result = await this.importLookup(candidate.docketNumber, {
         courtName: candidate.courtName,
-        caseName: candidate.caseName
+        caseName: candidate.caseName,
+        sources
       });
       lookupsTriggered += 1;
       imported += Number(result.imported || 0);
