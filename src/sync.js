@@ -1551,23 +1551,29 @@ export class CaseSyncService {
   }
 
   buildCourtFeedCaseIndex() {
-    const rows = this.store.getHydratedCases(getDiscoveryStartDate(this.config));
-    const index = new Map();
+    return new Map();
+  }
 
-    for (const row of rows) {
-      const keys = [
-        buildCourtDocketKey(row.court_id, row.docket_number),
-        buildCourtDocketKey(row.court_name, row.docket_number)
-      ].filter(Boolean);
-
-      for (const key of keys) {
-        if (!index.has(key)) {
-          index.set(key, row);
-        }
-      }
+  findDiscoveryCase(caseIndex, { courtId = "", courtName = "", docketNumber = "" } = {}) {
+    const primaryKey = buildCourtDocketKey(courtId, docketNumber);
+    const fallbackKey = buildCourtDocketKey(courtName, docketNumber);
+    const cached = caseIndex.get(primaryKey) || caseIndex.get(fallbackKey) || null;
+    if (cached) {
+      return cached;
     }
 
-    return index;
+    const found = this.store.findCaseByCourtAndDocket({
+      courtId,
+      courtName,
+      docketNumber,
+      startDate: getDiscoveryStartDate(this.config)
+    });
+    if (found) {
+      for (const key of [primaryKey, fallbackKey].filter(Boolean)) {
+        caseIndex.set(key, found);
+      }
+    }
+    return found;
   }
 
   classifySignalFeedItem(item) {
@@ -1606,15 +1612,11 @@ export class CaseSyncService {
 
       const primaryKey = buildCourtDocketKey(item.courtId, docketNumber);
       const fallbackKey = buildCourtDocketKey(item.courtName, docketNumber);
-      const existingCase =
-        caseIndex.get(primaryKey) ||
-        caseIndex.get(fallbackKey) ||
-        this.store.findCaseByCourtAndDocket({
-          courtId: item.courtId,
-          courtName: item.courtName,
-          docketNumber,
-          startDate: getDiscoveryStartDate(this.config)
-        });
+      const existingCase = this.findDiscoveryCase(caseIndex, {
+        courtId: item.courtId,
+        courtName: item.courtName,
+        docketNumber
+      });
       const entries = Array.isArray(item.entries) ? item.entries : [];
       const latestEntry = entries.reduce((latest, entry) => {
         if (!latest) {
@@ -1905,7 +1907,7 @@ export class CaseSyncService {
     );
   }
 
-  ingestRecentFilingsItems(sourceResult, caseIndex, { preexistingCaseIds = new Set() } = {}) {
+  ingestRecentFilingsItems(sourceResult, caseIndex, { createdCaseIds = new Set() } = {}) {
     let casesUpserted = 0;
     const lookupCandidates = new Map();
     const followUpCandidates = new Map();
@@ -1914,8 +1916,12 @@ export class CaseSyncService {
     for (const item of sourceResult.items || []) {
       const primaryKey = buildCourtDocketKey(item.courtId, item.docketNumber);
       const fallbackKey = buildCourtDocketKey(item.courtName, item.docketNumber);
-      const existingCase = caseIndex.get(primaryKey) || caseIndex.get(fallbackKey) || null;
-      const existedBeforeRun = Boolean(existingCase?.id) && preexistingCaseIds.has(Number(existingCase.id));
+      const existingCase = this.findDiscoveryCase(caseIndex, {
+        courtId: item.courtId,
+        courtName: item.courtName,
+        docketNumber: item.docketNumber
+      });
+      const existedBeforeRun = Boolean(existingCase?.id) && !createdCaseIds.has(Number(existingCase.id));
       const tags = this.classifyRecentFilingsItem(item);
 
       if (!this.shouldTrackRecentFilingsItem(item, existingCase, tags)) {
@@ -1994,6 +2000,10 @@ export class CaseSyncService {
 
       if (!savedCase) {
         continue;
+      }
+
+      if (!existingCase?.id) {
+        createdCaseIds.add(Number(savedCase.id));
       }
 
       casesUpserted += 1;
@@ -2228,7 +2238,7 @@ export class CaseSyncService {
     });
   }
 
-  ingestCourtFeedItems(feedResult, caseIndex, { preexistingCaseIds = new Set() } = {}) {
+  ingestCourtFeedItems(feedResult, caseIndex, { createdCaseIds = new Set() } = {}) {
     let casesUpserted = 0;
     let docketEntriesUpserted = 0;
     const lookupCandidates = new Map();
@@ -2238,8 +2248,12 @@ export class CaseSyncService {
     for (const item of feedResult.items || []) {
       const primaryKey = buildCourtDocketKey(item.courtId, item.docketNumber);
       const fallbackKey = buildCourtDocketKey(item.courtName, item.docketNumber);
-      const existingCase = caseIndex.get(primaryKey) || caseIndex.get(fallbackKey) || null;
-      const existedBeforeRun = Boolean(existingCase?.id) && preexistingCaseIds.has(Number(existingCase.id));
+      const existingCase = this.findDiscoveryCase(caseIndex, {
+        courtId: item.courtId,
+        courtName: item.courtName,
+        docketNumber: item.docketNumber
+      });
+      const existedBeforeRun = Boolean(existingCase?.id) && !createdCaseIds.has(Number(existingCase.id));
       const tags = this.classifyCourtFeedItem(item);
 
       if (!this.shouldTrackCourtFeedItem(item, existingCase, tags)) {
@@ -2316,6 +2330,10 @@ export class CaseSyncService {
         continue;
       }
 
+      if (!existingCase?.id) {
+        createdCaseIds.add(Number(savedCase.id));
+      }
+
       casesUpserted += 1;
 
       const entryKey = `courtfeed:${item.courtId}:${item.guid || `${item.caseId || item.reportCaseId}:${item.sequenceNumber || item.documentNumber}`}`;
@@ -2373,7 +2391,8 @@ export class CaseSyncService {
     return {
       casesUpserted,
       docketEntriesUpserted,
-      lookupCandidates
+      lookupCandidates,
+      followUpCandidates
     };
   }
 
@@ -2516,7 +2535,7 @@ export class CaseSyncService {
     return tags.length > 0;
   }
 
-  ingestLawFirmItems(sourceResult, caseIndex, { preexistingCaseIds = new Set() } = {}) {
+  ingestLawFirmItems(sourceResult, caseIndex, { createdCaseIds = new Set() } = {}) {
     let casesUpserted = 0;
     let docketEntriesUpserted = 0;
     const lookupCandidates = new Map();
@@ -2527,11 +2546,14 @@ export class CaseSyncService {
       const primaryKey = buildCourtDocketKey(item.courtId, item.docketNumber);
       const fallbackKey = buildCourtDocketKey(item.courtName, item.docketNumber);
       const existingCase =
-        caseIndex.get(primaryKey) ||
-        caseIndex.get(fallbackKey) ||
+        this.findDiscoveryCase(caseIndex, {
+          courtId: item.courtId,
+          courtName: item.courtName,
+          docketNumber: item.docketNumber
+        }) ||
         this.store.findCaseByDocketNumber(item.docketNumber, getDiscoveryStartDate(this.config)) ||
         null;
-      const existedBeforeRun = Boolean(existingCase?.id) && preexistingCaseIds.has(Number(existingCase.id));
+      const existedBeforeRun = Boolean(existingCase?.id) && !createdCaseIds.has(Number(existingCase.id));
       const tags = this.augmentLawFirmTags(item, this.classifyLawFirmItem(item));
 
       if (!this.shouldTrackLawFirmItem(item, existingCase, tags)) {
@@ -2627,6 +2649,10 @@ export class CaseSyncService {
 
       if (!savedCase) {
         continue;
+      }
+
+      if (!existingCase?.id) {
+        createdCaseIds.add(Number(savedCase.id));
       }
 
       casesUpserted += 1;
@@ -3004,10 +3030,7 @@ export class CaseSyncService {
 
       const caseIndex = this.buildCourtFeedCaseIndex();
       const activeCourtIds = new Set(
-        [...caseIndex.values()]
-          .filter((row) => hasHighConfidenceTargetCase(row))
-          .map((row) => String(row.court_id || "").trim().toLowerCase())
-          .filter(Boolean)
+        this.store.listActiveTargetCourtIds(getDiscoveryStartDate(this.config))
       );
       const configuredFeeds = this.courtFeeds.listFeeds();
       const feedsForRun = configuredFeeds
@@ -3031,9 +3054,7 @@ export class CaseSyncService {
         })
         .slice(0, Math.max(Number(this.courtFeeds.maxFeedsPerRun || 12), 1))
         .map((item) => item.feed);
-      const preexistingCaseIds = new Set(
-        [...new Set([...caseIndex.values()].map((row) => Number(row.id)).filter((value) => Number.isFinite(value) && value > 0))]
-      );
+      const createdCaseIds = new Set();
       const lookupCandidates = new Map();
       const followUpCandidates = new Map();
       let successfulFeeds = 0;
@@ -3055,7 +3076,7 @@ export class CaseSyncService {
               items: freshItems
             },
             caseIndex,
-            { preexistingCaseIds }
+            { createdCaseIds }
           );
           casesUpserted += ingest.casesUpserted;
           docketEntriesUpserted += ingest.docketEntriesUpserted;
@@ -3157,9 +3178,7 @@ export class CaseSyncService {
         .slice(0, Math.max(Number(this.config.recentFilings.maxSourcesPerRun || 1), 1))
         .map((item) => item.source);
       const caseIndex = this.buildCourtFeedCaseIndex();
-      const preexistingCaseIds = new Set(
-        [...new Set([...caseIndex.values()].map((row) => Number(row.id)).filter((value) => Number.isFinite(value) && value > 0))]
-      );
+      const createdCaseIds = new Set();
       const lookupCandidates = new Map();
       const followUpCandidates = new Map();
       let successfulSources = 0;
@@ -3170,7 +3189,7 @@ export class CaseSyncService {
         const checkpointKey = `recentfilings:${source.id}:recent`;
         try {
           const sourceResult = await this.recentFilings.fetchRecentForCourt(source);
-          const ingest = this.ingestRecentFilingsItems(sourceResult, caseIndex, { preexistingCaseIds });
+          const ingest = this.ingestRecentFilingsItems(sourceResult, caseIndex, { createdCaseIds });
           casesUpserted += ingest.casesUpserted;
 
           for (const [key, value] of ingest.lookupCandidates.entries()) {
@@ -3264,9 +3283,7 @@ export class CaseSyncService {
         .slice(0, Math.max(Number(this.config.lawFirms.maxSourcesPerRun || 1), 1))
         .map((item) => item.source);
       const caseIndex = this.buildCourtFeedCaseIndex();
-      const preexistingCaseIds = new Set(
-        [...new Set([...caseIndex.values()].map((row) => Number(row.id)).filter((value) => Number.isFinite(value) && value > 0))]
-      );
+      const createdCaseIds = new Set();
       const lookupCandidates = new Map();
       const followUpCandidates = new Map();
       let successfulSources = 0;
@@ -3278,7 +3295,7 @@ export class CaseSyncService {
         const checkpointKey = `lawfirm:${source.id}:recent`;
         try {
           const sourceResult = await this.lawFirms.fetchRecentForSource(source);
-          const ingest = this.ingestLawFirmItems(sourceResult, caseIndex, { preexistingCaseIds });
+          const ingest = this.ingestLawFirmItems(sourceResult, caseIndex, { createdCaseIds });
           casesUpserted += ingest.casesUpserted;
           docketEntriesUpserted += ingest.docketEntriesUpserted;
 

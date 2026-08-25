@@ -3073,20 +3073,21 @@ export class Store {
       return null;
     }
 
-    const index = this.getCaseIdentityIndex(startDate);
-    const candidateKeys = [
-      `${normalizeLookupText(courtId)}|${docketKey}`,
-      `${normalizeCourtLookupText(courtName)}|${docketKey}`
-    ].filter((value) => !value.startsWith("|"));
+    const courtIdKey = normalizeLookupText(courtId);
+    const courtNameKey = normalizeCourtLookupText(courtName);
+    const matches = this.getFastPathDocketCases(startDate, docketNumber)
+      .filter((row) => normalizeDocketIdentity(row.docket_number) === docketKey)
+      .filter((row) => {
+        if (!courtIdKey && !courtNameKey) {
+          return true;
+        }
+        return (
+          (courtIdKey && normalizeLookupText(row.court_id) === courtIdKey) ||
+          (courtNameKey && normalizeCourtLookupText(row.court_name) === courtNameKey)
+        );
+      });
 
-    for (const key of candidateKeys) {
-      const row = index.get(key);
-      if (row) {
-        return row;
-      }
-    }
-
-    return null;
+    return matches.length === 1 ? matches[0] : null;
   }
 
   listSignalFeedRefreshCandidates({ limit = 10, staleAfterMinutes = 60 } = {}) {
@@ -3159,12 +3160,42 @@ export class Store {
       return null;
     }
 
-    const matches = this.getHydratedCases(startDate).filter((row) => normalizeDocket(row.docket_number) === docketKey);
+    const matches = this.getFastPathDocketCases(startDate, docketNumber)
+      .filter((row) => normalizeDocket(row.docket_number) === docketKey);
     if (matches.length !== 1) {
       return null;
     }
 
     return matches[0];
+  }
+
+  listActiveTargetCourtIds(startDate = "2025-01-01") {
+    return this.db
+      .prepare(`
+        SELECT DISTINCT lower(trim(court_id)) AS court_id
+        FROM cases
+        WHERE date_filed >= ?
+          AND court_id IS NOT NULL
+          AND trim(court_id) <> ''
+          AND (
+            is_schedule_a = 1
+            OR is_seller_watch = 1
+            OR lower(COALESCE(case_name, '')) LIKE '%schedule a%'
+            OR lower(COALESCE(case_name, '')) LIKE '%unincorporated associations%'
+            OR lower(COALESCE(nature_of_suit, '')) LIKE '%820%'
+            OR lower(COALESCE(nature_of_suit, '')) LIKE '%830%'
+            OR lower(COALESCE(nature_of_suit, '')) LIKE '%840%'
+            OR lower(COALESCE(cause, '')) LIKE '%15:1114%'
+            OR lower(COALESCE(cause, '')) LIKE '%15:1116%'
+            OR lower(COALESCE(cause, '')) LIKE '%15:1117%'
+            OR lower(COALESCE(cause, '')) LIKE '%15:1125%'
+            OR lower(COALESCE(cause, '')) LIKE '%17:501%'
+            OR source_urls_json LIKE '%${PRIORITY_FEED_HOST}%'
+          )
+      `)
+      .all(String(startDate || "2025-01-01"))
+      .map((row) => String(row.court_id || "").trim())
+      .filter(Boolean);
   }
 
   getHydratedCases(startDate = "2025-01-01") {

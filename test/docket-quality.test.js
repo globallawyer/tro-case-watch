@@ -203,3 +203,27 @@ test("official court feed discovery can rotate across all district courts", () =
   assert.ok(client.listFeeds().some((feed) => feed.id === "pawd"));
   assert.ok(client.listFeeds().length > 3);
 });
+
+test("crawler docket matching uses indexed lookup instead of hydrating the full case table", () => {
+  const { directory, store } = createStore();
+  try {
+    const saved = store.upsertCase(targetCase());
+    store.getHydratedCases = () => {
+      throw new Error("full case hydration must not run during crawler matching");
+    };
+
+    assert.equal(
+      store.findCaseByCourtAndDocket({
+        courtId: "pawd",
+        docketNumber: "2:26-cv-00651",
+        startDate: "2026-01-01"
+      })?.id,
+      saved.id
+    );
+    assert.equal(store.findCaseByDocketNumber("2:26-cv-00651", "2026-01-01")?.id, saved.id);
+    assert.deepEqual(store.listActiveTargetCourtIds("2026-01-01"), ["pawd"]);
+  } finally {
+    store.db.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
