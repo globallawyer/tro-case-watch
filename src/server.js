@@ -100,6 +100,7 @@ const publicChallengeBuckets = new Map();
 const pendingLookupImports = new Map();
 let lastTroDailyUpdatesRefreshQueuedAt = 0;
 let lastWebhookEnrichmentWorkerQueuedAt = 0;
+let lastCourtListenerWebhookWorkerQueuedAt = 0;
 const browserGuardCookieName = "__tt_guard";
 const publicApiTokenMetaName = "tt-public-api-token";
 const publicApiTokenHeaderName = "x-tt-public-token";
@@ -161,6 +162,7 @@ const standaloneSyncTaskLockMinutes = new Map([
   ["catalog", 30],
   ["courtfeeds", 4],
   ["docket-completion", 4],
+  ["courtlistener-webhook-events", 3],
   ["webhook-enrichment", 6],
   ["recentfilings", 3],
   ["lawfirms", 3],
@@ -544,6 +546,44 @@ function scheduleWebhookEnrichmentWorker({ force = false } = {}) {
 
   lastWebhookEnrichmentWorkerQueuedAt = Date.now();
   const spawned = spawnDetachedTask(["--sync-only", "webhook-enrichment"], buildWebhookEnrichmentWorkerEnv());
+  return Boolean(spawned.spawned);
+}
+
+function getCourtListenerWebhookWorkStats() {
+  try {
+    return store.getCourtListenerWebhookEventStats({
+      now: new Date().toISOString(),
+      leaseTtlMs: Math.max(Number(config.courtListener?.webhookLeaseTtlMs || 0), 60 * 1000)
+    });
+  } catch (error) {
+    if (isSqliteBusyError(error)) {
+      console.warn(`[courtlistener-webhook] skipped queue probe: ${error.message}`);
+      return null;
+    }
+    throw error;
+  }
+}
+
+function scheduleCourtListenerWebhookWorker({ force = false } = {}) {
+  if (!config.courtListener?.webhookSecret || !config.courtListener?.webhookWorkerEnabled) {
+    return false;
+  }
+
+  const queueStats = getCourtListenerWebhookWorkStats();
+  if (
+    !queueStats ||
+    (Number(queueStats.readyCount || 0) <= 0 && Number(queueStats.staleProcessingCount || 0) <= 0)
+  ) {
+    return false;
+  }
+
+  const debounceMs = Math.max(Number(config.courtListener?.webhookPollIntervalMs || 0), 1000);
+  if (!force && Date.now() - lastCourtListenerWebhookWorkerQueuedAt < debounceMs) {
+    return false;
+  }
+
+  lastCourtListenerWebhookWorkerQueuedAt = Date.now();
+  const spawned = spawnDetachedTask(["--sync-only", "courtlistener-webhook-events"]);
   return Boolean(spawned.spawned);
 }
 
@@ -1057,14 +1097,26 @@ function redirectToWww(request, response) {
   response.end();
 }
 
-async function readRequestBody(request) {
+async function readRequestBody(request, { maxBytes = 2 * 1024 * 1024 } = {}) {
   const chunks = [];
+  let totalBytes = 0;
   for await (const chunk of request) {
+    totalBytes += chunk.length;
+    if (totalBytes > Math.max(Number(maxBytes || 0), 1024)) {
+      const error = new Error("Request body too large");
+      error.statusCode = 413;
+      throw error;
+    }
     chunks.push(chunk);
   }
 
   const text = Buffer.concat(chunks).toString("utf-8");
   return text ? JSON.parse(text) : {};
+}
+
+function requestIsLoopback(request) {
+  const remoteAddress = String(request.socket?.remoteAddress || "").trim();
+  return remoteAddress === "127.0.0.1" || remoteAddress === "::1" || remoteAddress === "::ffff:127.0.0.1";
 }
 
 async function handleCourtListenerWebhook(request, response, pathname) {
@@ -1078,134 +1130,175 @@ async function handleCourtListenerWebhook(request, response, pathname) {
     return sendJson(response, 403, { error: "Invalid webhook secret" });
   }
 
+  const startedAt = performance.now();
   try {
-    const body = await readRequestBody(request);
-    const results = Array.isArray(body?.payload?.results)
-      ? body.payload.results
-      : Array.isArray(body?.results)
-        ? body.results
-        : [];
+    const body = await readRequestBody(request, {
+      maxBytes: Math.max(Number(config.courtListener?.webhookMaxBodyBytes || 0), 1024)
+    });
     const webhookMeta = body?.webhook || {};
-    const idempotencyKey = request.headers["idempotency-key"] || null;
+    const suppliedIdempotencyKey = String(request.headers["idempotency-key"] || "").trim();
+    const idempotencyKey = suppliedIdempotencyKey || `fallback:${crypto
+      .createHash("sha256")
+      .update(JSON.stringify(body))
+      .digest("hex")}`;
+    const isProbe = requestIsLoopback(request) && request.headers["x-trotracker-webhook-probe"] === "1";
+    const queued = store.enqueueCourtListenerWebhookEvent({
+      idempotencyKey,
+      eventType: webhookMeta.event_type || null,
+      payload: body,
+      isProbe,
+      maxPending: Math.max(Number(config.courtListener?.webhookMaxPendingEvents || 0), 1)
+    });
+
+    if (queued.status === "queue-full") {
+      console.error("[courtlistener-webhook] queue full; requesting upstream retry");
+      return sendJson(response, 503, { error: "Webhook queue full" });
+    }
+
+    const elapsedMs = Math.round((performance.now() - startedAt) * 10) / 10;
     console.log(
-      `[webhook] CL: type=${webhookMeta.event_type || "unknown"}, results=${results.length}, key=${idempotencyKey || "none"}`
+      `[courtlistener-webhook] accepted event=${queued.id || "existing"} duplicate=${queued.duplicate ? 1 : 0} probe=${isProbe ? 1 : 0} elapsedMs=${elapsedMs}`
     );
-
-    let processed = 0;
-    let skipped = 0;
-    let reupped = 0;
-    const timestamp = new Date().toISOString();
-    const findCaseByCLId = store.db.prepare(
-      "SELECT id, case_name, docket_number FROM cases WHERE courtlistener_docket_id = ? LIMIT 1"
-    );
-    const casesToRefresh = new Map();
-
-    const oldAlerts = [
-      ...(Array.isArray(body?.payload?.old_alerts) ? body.payload.old_alerts : []),
-      ...(Array.isArray(body?.payload?.disabled_alerts) ? body.payload.disabled_alerts : [])
-    ];
-    if (oldAlerts.length) {
-      const reupResult = await syncService.reupCourtListenerAlertsFromWebhook(oldAlerts);
-      reupped += Number(reupResult.processed || 0);
-      skipped += Number(reupResult.skipped || 0);
-    }
-
-    for (const entry of results) {
-      try {
-        const docketId = extractCourtListenerWebhookDocketId(entry);
-        if (!docketId) {
-          skipped += 1;
-          continue;
-        }
-
-        const caseRow = findCaseByCLId.get(docketId);
-        if (!caseRow) {
-          skipped += 1;
-          continue;
-        }
-
-        const entryId = entry.id ?? null;
-        const entryNumber = entry.entry_number ?? entry.document_number ?? null;
-        const entryKey = `courtlistener:docket-entry:${entryId ?? `${docketId}:${entryNumber ?? Date.now()}`}`;
-        store.upsertDocketEntry({
-          case_id: caseRow.id,
-          source_entry_key: entryKey,
-          primary_source: "courtlistener",
-          source_entry_id: entryId != null ? String(entryId) : null,
-          document_type: null,
-          entry_number: entryNumber != null ? String(entryNumber) : null,
-          document_number: entry.document_number != null ? String(entry.document_number) : null,
-          filed_at: entry.date_filed || entry.entry_date_filed || null,
-          description: entry.description || null,
-          absolute_url: entry.absolute_url ? courtListener.absoluteUrl(entry.absolute_url) : null,
-          is_available: entry.recap_documents?.some((item) => item.is_available) ? 1 : 0,
-          page_count: entry.page_count ?? null,
-          pacer_doc_id: entry.pacer_doc_id != null ? String(entry.pacer_doc_id) : null,
-          raw_json: JSON.stringify(entry),
-          last_synced_at: timestamp
-        });
-        processed += 1;
-        const normalizedCaseId = Number(caseRow.id || 0);
-        const existingMeta = casesToRefresh.get(normalizedCaseId) || {
-          entryCount: 0,
-          latestEntryId: null,
-          lastWebhookFiledAt: null
-        };
-        const entryFiledAt = String(entry.date_filed || entry.entry_date_filed || "").trim() || null;
-        const previousFiledAt = Date.parse(String(existingMeta.lastWebhookFiledAt || ""));
-        const currentFiledAt = Date.parse(String(entryFiledAt || ""));
-        casesToRefresh.set(normalizedCaseId, {
-          entryCount: existingMeta.entryCount + 1,
-          latestEntryId:
-            existingMeta.latestEntryId && Number(existingMeta.latestEntryId) > Number(entryId || 0)
-              ? existingMeta.latestEntryId
-              : Number(entryId || 0) || existingMeta.latestEntryId || null,
-          lastWebhookFiledAt:
-            Number.isFinite(currentFiledAt) && currentFiledAt >= previousFiledAt
-              ? entryFiledAt
-              : existingMeta.lastWebhookFiledAt || entryFiledAt || null
-        });
-      } catch (error) {
-        console.error("[webhook] entry error:", error);
-        skipped += 1;
-      }
-    }
-
-    if (processed > 0) {
-      clearPublicCaseCaches();
-    }
-
-    for (const [caseId, caseMeta] of casesToRefresh.entries()) {
-      syncService.handleCourtListenerWebhookEvent(caseId, {
-        eventType: webhookMeta.event_type || null,
-        idempotencyKey,
-        latestEntryId: caseMeta.latestEntryId || null,
-        entryCount: caseMeta.entryCount || 0
-      }).then(() => {
-        const queued = enqueueWebhookEnrichmentCase(caseId, {
-          eventType: webhookMeta.event_type || null,
-          idempotencyKey,
-          latestEntryId: caseMeta.latestEntryId || null,
-          entryCount: caseMeta.entryCount || 0,
-          lastWebhookAt: new Date().toISOString(),
-          lastWebhookFiledAt: caseMeta.lastWebhookFiledAt || null
-        });
-        if (queued.enqueued) {
-          console.log(
-            `[webhook] queued high-quality enrichment for case ${caseId} with ${queued.queuedJob?.providers?.join(",") || "none"}`
-          );
-        }
-      }).catch((error) => {
-        console.error(`[webhook] failed to persist webhook state for case ${caseId}:`, error);
-      });
-    }
-
-    console.log(`[webhook] Done: processed=${processed}, skipped=${skipped}, reupped=${reupped}`);
-    return sendJson(response, 200, { received: true, processed, skipped, reupped, idempotencyKey });
+    scheduleCourtListenerWebhookWorker();
+    return sendJson(response, 202, {
+      received: true,
+      queued: queued.queued,
+      duplicate: queued.duplicate,
+      eventId: queued.id
+    });
   } catch (error) {
-    console.error("[webhook] Error:", error);
-    return sendJson(response, 500, { error: "Webhook processing error" });
+    const statusCode = Number(error?.statusCode || 0) === 413 ? 413 : 503;
+    console.error(`[courtlistener-webhook] intake failed: ${error.message}`);
+    return sendJson(response, statusCode, {
+      error: statusCode === 413 ? "Webhook payload too large" : "Webhook intake unavailable"
+    });
   }
+}
+
+async function processCourtListenerWebhookEvent(event) {
+  const body = event?.payload || {};
+  const results = Array.isArray(body?.payload?.results)
+    ? body.payload.results
+    : Array.isArray(body?.results)
+      ? body.results
+      : [];
+  const webhookMeta = body?.webhook || {};
+  const idempotencyKey = event?.idempotency_key || null;
+  let processed = 0;
+  let skipped = 0;
+  let reupped = 0;
+  const timestamp = new Date().toISOString();
+  const findCaseByCLId = store.db.prepare(
+    "SELECT id, case_name, docket_number FROM cases WHERE courtlistener_docket_id = ? LIMIT 1"
+  );
+  const casesToRefresh = new Map();
+
+  const oldAlerts = [
+    ...(Array.isArray(body?.payload?.old_alerts) ? body.payload.old_alerts : []),
+    ...(Array.isArray(body?.payload?.disabled_alerts) ? body.payload.disabled_alerts : [])
+  ];
+  if (oldAlerts.length) {
+    const reupResult = await syncService.reupCourtListenerAlertsFromWebhook(oldAlerts);
+    reupped += Number(reupResult.processed || 0);
+    skipped += Number(reupResult.skipped || 0);
+  }
+
+  for (const entry of results) {
+    try {
+      const docketId = extractCourtListenerWebhookDocketId(entry);
+      if (!docketId) {
+        skipped += 1;
+        continue;
+      }
+
+      const caseRow = findCaseByCLId.get(docketId);
+      if (!caseRow) {
+        skipped += 1;
+        continue;
+      }
+
+      const entryId = entry.id ?? null;
+      const entryNumber = entry.entry_number ?? entry.document_number ?? null;
+      const entryKey = `courtlistener:docket-entry:${entryId ?? `${docketId}:${entryNumber ?? Date.now()}`}`;
+      store.upsertDocketEntry({
+        case_id: caseRow.id,
+        source_entry_key: entryKey,
+        primary_source: "courtlistener",
+        source_entry_id: entryId != null ? String(entryId) : null,
+        document_type: null,
+        entry_number: entryNumber != null ? String(entryNumber) : null,
+        document_number: entry.document_number != null ? String(entry.document_number) : null,
+        filed_at: entry.date_filed || entry.entry_date_filed || null,
+        description: entry.description || null,
+        absolute_url: entry.absolute_url ? courtListener.absoluteUrl(entry.absolute_url) : null,
+        is_available: entry.recap_documents?.some((item) => item.is_available) ? 1 : 0,
+        page_count: entry.page_count ?? null,
+        pacer_doc_id: entry.pacer_doc_id != null ? String(entry.pacer_doc_id) : null,
+        raw_json: JSON.stringify(entry),
+        last_synced_at: timestamp
+      });
+      processed += 1;
+      const normalizedCaseId = Number(caseRow.id || 0);
+      const existingMeta = casesToRefresh.get(normalizedCaseId) || {
+        entryCount: 0,
+        latestEntryId: null,
+        lastWebhookFiledAt: null
+      };
+      const entryFiledAt = String(entry.date_filed || entry.entry_date_filed || "").trim() || null;
+      const previousFiledAt = Date.parse(String(existingMeta.lastWebhookFiledAt || ""));
+      const currentFiledAt = Date.parse(String(entryFiledAt || ""));
+      casesToRefresh.set(normalizedCaseId, {
+        entryCount: existingMeta.entryCount + 1,
+        latestEntryId:
+          existingMeta.latestEntryId && Number(existingMeta.latestEntryId) > Number(entryId || 0)
+            ? existingMeta.latestEntryId
+            : Number(entryId || 0) || existingMeta.latestEntryId || null,
+        lastWebhookFiledAt:
+          Number.isFinite(currentFiledAt) && currentFiledAt >= previousFiledAt
+            ? entryFiledAt
+            : existingMeta.lastWebhookFiledAt || entryFiledAt || null
+      });
+    } catch (error) {
+      if (isSqliteBusyError(error)) {
+        throw error;
+      }
+      console.error(`[courtlistener-webhook] event=${event.id} entry failed: ${error.message}`);
+      skipped += 1;
+    }
+  }
+
+  if (processed > 0) {
+    clearPublicCaseCaches();
+  }
+
+  for (const [caseId, caseMeta] of casesToRefresh.entries()) {
+    await syncService.handleCourtListenerWebhookEvent(caseId, {
+      eventType: webhookMeta.event_type || event?.event_type || null,
+      idempotencyKey,
+      latestEntryId: caseMeta.latestEntryId || null,
+      entryCount: caseMeta.entryCount || 0
+    });
+    const queued = enqueueWebhookEnrichmentCase(caseId, {
+      eventType: webhookMeta.event_type || event?.event_type || null,
+      idempotencyKey,
+      latestEntryId: caseMeta.latestEntryId || null,
+      entryCount: caseMeta.entryCount || 0,
+      lastWebhookAt: timestamp,
+      lastWebhookFiledAt: caseMeta.lastWebhookFiledAt || null
+    });
+    if (queued.enqueued) {
+      console.log(`[courtlistener-webhook] queued completion case=${caseId}`);
+    }
+  }
+
+  return {
+    processed,
+    skipped,
+    reupped,
+    caseCount: casesToRefresh.size,
+    resultCount: results.length,
+    probe: Boolean(event?.is_probe)
+  };
 }
 
 function authorize(request) {
@@ -2816,6 +2909,105 @@ function shouldClearCachesForEnrichment(result = {}) {
   );
 }
 
+async function runCourtListenerWebhookWorker() {
+  if (!config.courtListener?.webhookSecret || !config.courtListener?.webhookWorkerEnabled) {
+    return {
+      skipped: true,
+      reason: "disabled"
+    };
+  }
+
+  const detachedRunId = Number(process.env.DETACHED_TASK_RUN_ID || 0);
+  const runId = detachedRunId > 0
+    ? detachedRunId
+    : store.claimSyncRun(
+        "system",
+        "courtlistener-webhook-events",
+        getStandaloneSyncLockMinutes("courtlistener-webhook-events")
+      );
+  if (!runId) {
+    return {
+      skipped: true,
+      reason: "already-running"
+    };
+  }
+
+  const maxEvents = Math.max(Number(config.courtListener?.webhookMaxEventsPerRun || 0), 1);
+  let claimedCount = 0;
+  let completedCount = 0;
+  let requeuedCount = 0;
+  let failedCount = 0;
+  let processedEntries = 0;
+
+  try {
+    for (let index = 0; index < maxEvents; index += 1) {
+      const event = store.claimCourtListenerWebhookEvent({
+        now: new Date().toISOString(),
+        leaseTtlMs: Math.max(Number(config.courtListener?.webhookLeaseTtlMs || 0), 60 * 1000)
+      });
+      if (!event) {
+        break;
+      }
+
+      claimedCount += 1;
+      try {
+        const result = await processCourtListenerWebhookEvent(event);
+        store.completeCourtListenerWebhookEvent(event.id, result);
+        completedCount += 1;
+        processedEntries += Number(result.processed || 0);
+        console.log(
+          `[courtlistener-webhook] completed event=${event.id} entries=${result.processed} skipped=${result.skipped}`
+        );
+      } catch (error) {
+        const retry = store.retryCourtListenerWebhookEvent(event.id, error, {
+          retryAfterMs: Math.max(Number(config.courtListener?.webhookRetryDelayMs || 0), 10 * 1000),
+          maxAttempts: Math.max(Number(config.courtListener?.webhookMaxAttempts || 0), 1)
+        });
+        if (retry?.failed) {
+          failedCount += 1;
+        } else {
+          requeuedCount += 1;
+        }
+        console.error(
+          `[courtlistener-webhook] event=${event.id} ${retry?.failed ? "failed" : "requeued"}: ${error.message}`
+        );
+      }
+    }
+
+    const prunedCount = store.pruneCourtListenerWebhookEvents({
+      completedRetentionDays: Math.max(Number(config.courtListener?.webhookCompletedRetentionDays || 0), 1),
+      failedRetentionDays: Math.max(Number(config.courtListener?.webhookFailedRetentionDays || 0), 1)
+    });
+    const queueStats = getCourtListenerWebhookWorkStats() || {};
+    const stats = {
+      claimedCount,
+      completedCount,
+      requeuedCount,
+      failedCount,
+      processedEntries,
+      prunedCount,
+      pendingCount: Number(queueStats.pendingCount || 0),
+      readyCount: Number(queueStats.readyCount || 0),
+      processingCount: Number(queueStats.processingCount || 0)
+    };
+    store.finishSyncRun(runId, "completed", stats);
+
+    if (stats.readyCount > 0) {
+      scheduleCourtListenerWebhookWorker({ force: true });
+    }
+    return stats;
+  } catch (error) {
+    store.finishSyncRun(runId, "failed", {
+      claimedCount,
+      completedCount,
+      requeuedCount,
+      failedCount,
+      processedEntries
+    }, error?.message || String(error));
+    throw error;
+  }
+}
+
 async function runWebhookEnrichmentWorker() {
   if (!config.sync?.webhookEnrichmentEnabled || !config.sync?.webhookEnrichmentWorkerEnabled) {
     return {
@@ -4257,6 +4449,18 @@ async function main() {
       process.exit(0);
     }
 
+    if (rawMode === "courtlistener-webhook-events") {
+      const result = await runCourtListenerWebhookWorker();
+      if (result?.skipped) {
+        console.log(
+          `[sync] skipped courtlistener-webhook-events ${JSON.stringify({ reason: result.reason || "queue-empty" })}`
+        );
+      } else {
+        console.log(`[sync] completed courtlistener-webhook-events ${JSON.stringify(result)}`);
+      }
+      process.exit(0);
+    }
+
     if (rawMode === "webhook-enrichment") {
       const result = await runWebhookEnrichmentWorker();
       if (result?.skipped) {
@@ -4300,6 +4504,16 @@ async function main() {
   server.listen(config.server.port, () => {
     console.log(`TRO Case Watch listening on http://localhost:${config.server.port}`);
   });
+
+  if (config.courtListener?.webhookSecret && config.courtListener?.webhookWorkerEnabled) {
+    const webhookPollIntervalMs = Math.max(Number(config.courtListener?.webhookPollIntervalMs || 0), 2000);
+    setTimeout(() => {
+      scheduleCourtListenerWebhookWorker({ force: true });
+    }, Math.min(webhookPollIntervalMs, 5000));
+    setInterval(() => {
+      scheduleCourtListenerWebhookWorker({ force: true });
+    }, webhookPollIntervalMs);
+  }
 
   if (config.sync?.webhookEnrichmentEnabled && config.sync?.webhookEnrichmentWorkerEnabled) {
     setTimeout(() => {
