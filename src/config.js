@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { PRIORITY_FEED_BASE_URL, buildLegacyPriorityFeedEnvKey } from "./priority-feed.js";
+import { SIGNAL_FEED_PROVIDER_KEY } from "./providers/signal-feed.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(__dirname, "..");
@@ -265,7 +266,22 @@ export const config = {
       "61tro",
       "recentfilings"
     ]),
-    discoveryEnrichmentDelayMs: envInt("DISCOVERY_ENRICHMENT_DELAY_MS", 60 * 1000)
+    discoveryEnrichmentDelayMs: envInt("DISCOVERY_ENRICHMENT_DELAY_MS", 60 * 1000),
+    docketCompletionSchedulerEnabled: envBool("DOCKET_COMPLETION_SCHEDULER_ENABLED", true),
+    docketCompletionSchedulerIntervalMs: envInt("DOCKET_COMPLETION_SCHEDULER_INTERVAL_MS", 10 * 60 * 1000),
+    docketCompletionSchedulerBootstrapDelayMs: envInt("DOCKET_COMPLETION_SCHEDULER_BOOTSTRAP_DELAY_MS", 2 * 60 * 1000),
+    docketCompletionMaxCasesPerRun: envInt("DOCKET_COMPLETION_MAX_CASES_PER_RUN", 3),
+    docketCompletionRetryDelayMs: envInt("DOCKET_COMPLETION_RETRY_DELAY_MS", 6 * 60 * 60 * 1000),
+    docketCompletionQueueDelayMs: envInt("DOCKET_COMPLETION_QUEUE_DELAY_MS", 45 * 1000),
+    docketCompletionRecentWindowDays: envInt("DOCKET_COMPLETION_RECENT_WINDOW_DAYS", 365),
+    docketCompletionProviders: envList("DOCKET_COMPLETION_PROVIDERS", [
+      SIGNAL_FEED_PROVIDER_KEY,
+      "worldtro",
+      "courtlistener",
+      "61tro",
+      "recentfilings",
+      "pacermonitor"
+    ])
   },
   courtListener: {
     baseUrl: env("COURTLISTENER_BASE_URL", "https://www.courtlistener.com/api/rest/v4"),

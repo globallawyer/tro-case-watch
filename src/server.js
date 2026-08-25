@@ -160,6 +160,7 @@ const standaloneSyncTaskLockMinutes = new Map([
   [SIGNAL_FEED_PROVIDER_KEY, 3],
   ["catalog", 30],
   ["courtfeeds", 4],
+  ["docket-completion", 4],
   ["webhook-enrichment", 6],
   ["recentfilings", 3],
   ["lawfirms", 3],
@@ -4065,6 +4066,14 @@ async function main() {
       process.exit(0);
     }
 
+    if (rawMode === "docket-completion") {
+      const result = await withStandaloneSyncTaskLock("docket-completion", () =>
+        syncService.enqueueDocketCompletionCandidates()
+      );
+      printSyncOnlyResult("docket-completion", result, { resultJson });
+      process.exit(0);
+    }
+
     if (rawMode === "recentfilings") {
       const result = await withStandaloneSyncTaskLock("recentfilings", () => syncService.syncRecentFilingsRecent("recent"));
       printSyncOnlyResult("recentfilings", result, { resultJson });
@@ -4333,6 +4342,13 @@ async function main() {
   }
   if (config.lawFirms?.enabled) {
     scheduleSourceMode("lawfirms", config.sync.lawFirmsIntervalMs, 210 * 1000);
+  }
+  if (config.sync.docketCompletionSchedulerEnabled) {
+    scheduleSourceMode(
+      "docket-completion",
+      config.sync.docketCompletionSchedulerIntervalMs,
+      config.sync.docketCompletionSchedulerBootstrapDelayMs
+    );
   }
   if (config.pacerMonitor?.enabled) {
     scheduleSourceMode(
