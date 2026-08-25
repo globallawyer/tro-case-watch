@@ -115,13 +115,14 @@ export function classifyCase(searchResult, presetTags = []) {
   const hasStrongScheduleA = includesOne(text, SCHEDULE_A_STRONG_PATTERNS);
   const hasLooseScheduleA = text.includes("schedule a");
 
-  if (requestedTro || hasTro) {
+  if (hasTro || (requestedTro && (hasStrongScheduleA || (hasSeller && hasIp)))) {
     tags.add("tro");
   }
 
   if (
     !hasBankruptcy &&
-    (hasStrongScheduleA || requestedScheduleA || (hasLooseScheduleA && (hasIp || hasSeller || hasTro)))
+    (hasStrongScheduleA || (hasLooseScheduleA && (hasIp || hasSeller || hasTro)) ||
+      (requestedScheduleA && hasSeller && hasIp))
   ) {
     tags.add("schedule_a");
   }

@@ -741,13 +741,23 @@ function renderDetail(item) {
     Boolean(newestTimelineFiledAt) &&
     toDateMs(item.latest_docket_filed_at) > toDateMs(newestTimelineFiledAt);
   const hydrationPending = item.hydration_pending?.pending;
+  const knownDocketEntries = Math.max(Number(item.known_docket_entries_count || 0), entries.length);
+  const docketGapCount = Math.max(Number(item.docket_gap_count || 0), knownDocketEntries - entries.length, 0);
+  const coveragePending = Boolean(hydrationPending || entriesTruncated || docketGapCount > 0);
   const timelineSummary = entries.length ? timelineSourceSummary(entries) : "当前只有案件级摘要";
   const summaryCards = [
     { label: "Plaintiff / Brand", value: formatPlaintiffBrandValue(item) },
     { label: "Plaintiff Counsel", value: translatePlaintiffTabValue(insights.lead_law_firm || "待识别") },
     { label: "程序阶段", value: insights.status?.label || "持续观察" },
     { label: "被告数量", value: insights.defendant_count || 0 },
-    { label: "站内 docket", value: entries.length ? `${entries.length} 条` : "仅案件摘要" }
+    {
+      label: "Docket 完整度",
+      value: entries.length
+        ? knownDocketEntries > entries.length
+          ? `已归档 ${entries.length} / 已知至少 ${knownDocketEntries}`
+          : `已归档 ${entries.length} 条`
+        : "仅案件摘要"
+    }
   ];
   const defendantPreview = insights.defendant_preview?.length
     ? insights.defendant_preview.join(" / ")
@@ -785,13 +795,14 @@ function renderDetail(item) {
         <div class="timeline-toolbar-copy">
           <strong>站内直接查看案件时间线</strong>
           <p>以下 docket 已同步展示在本站，默认不要求跳转到外部来源才能看进展。</p>
-          ${hydrationPending ? '<p class="focus-text">当前条目还在后台继续补抓，页面会自动刷新补进来的 docket。</p>' : ""}
+          ${coveragePending ? '<p class="focus-text">系统已识别到时间线缺口，正在后台按小批次继续补抓，不影响页面访问。</p>' : ""}
         </div>
         <div class="timeline-toolbar-stats">
           <span class="tag-pill">最近案级节点 ${formatDate(item.latest_docket_filed_at || item.date_filed)}</span>
           ${entries.length ? `<span class="tag-pill">最新站内 docket ${formatDate(newestTimelineFiledAt)}</span>` : ""}
           <span class="tag-pill">${timelineSummary}</span>
           ${entriesTruncated ? '<span class="tag-pill">完整时间线继续加载中</span>' : ""}
+          ${docketGapCount > 0 ? `<span class="tag-pill">已知缺口至少 ${docketGapCount} 条</span>` : ""}
         </div>
       </div>
     </div>

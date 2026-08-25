@@ -643,6 +643,32 @@ const PRIORITY_FEED_URL_CLAUSE = `source_urls_json LIKE '%${PRIORITY_FEED_HOST}%
 const PRIORITY_FEED_RAW_CLAUSE =
   `(raw_json LIKE '%"${PRIORITY_FEED_MODERN_RAW_KEY}"%' OR raw_json LIKE '%"${PRIORITY_FEED_LEGACY_RAW_KEY}"%')`;
 
+function buildTargetedDocketCoverageClause() {
+  return `(
+    ${PRIORITY_FEED_URL_CLAUSE}
+    OR COALESCE(json_extract(raw_json, '$.${PRIORITY_FEED_MODERN_RAW_KEY}.rowCount'), 0) > 0
+    OR COALESCE(json_extract(raw_json, '$.${PRIORITY_FEED_LEGACY_RAW_KEY}.rowCount'), 0) > 0
+    OR COALESCE(json_extract(raw_json, '$.${PRIORITY_FEED_MODERN_RAW_KEY}.url'), '') <> ''
+    OR COALESCE(json_extract(raw_json, '$.${PRIORITY_FEED_LEGACY_RAW_KEY}.url'), '') <> ''
+    OR json_type(raw_json, '$.signal_feed') = 'object'
+    OR ${buildTrackedLawFirmSourceClause()}
+    OR LOWER(COALESCE(case_name, '')) LIKE '%schedule a%'
+    OR LOWER(COALESCE(case_name, '')) LIKE '%unincorporated associations%'
+    OR LOWER(COALESCE(case_name, '')) LIKE '%trademark%'
+    OR LOWER(COALESCE(case_name, '')) LIKE '%copyright%'
+    OR LOWER(COALESCE(case_name, '')) LIKE '%patent%'
+    OR LOWER(COALESCE(case_name, '')) LIKE '%counterfeit%'
+    OR COALESCE(nature_of_suit, '') GLOB '*820*'
+    OR COALESCE(nature_of_suit, '') GLOB '*830*'
+    OR COALESCE(nature_of_suit, '') GLOB '*840*'
+    OR COALESCE(cause, '') GLOB '*15:1114*'
+    OR COALESCE(cause, '') GLOB '*15:1116*'
+    OR COALESCE(cause, '') GLOB '*15:1125*'
+    OR COALESCE(cause, '') GLOB '*17:501*'
+    OR COALESCE(cause, '') GLOB '*35:271*'
+  )`;
+}
+
 function buildTrackedLawFirmSourceClause(columnName = "source_urls_json") {
   return `(${TRACKED_LAW_FIRM_SOURCE_PATTERNS.map((pattern) => `${columnName} LIKE '%${pattern}%'`).join(" OR ")})`;
 }
@@ -1280,9 +1306,7 @@ function dedupeEntries(entries) {
     }
 
     const existing = orderCollapsed.get(orderKey);
-    if (!existing || compareEntriesForCanonicalRow(entry, existing) < 0) {
-      orderCollapsed.set(orderKey, entry);
-    }
+    orderCollapsed.set(orderKey, existing ? mergeDisplayEntries(existing, entry) : entry);
   }
 
   const candidates = [...orderCollapsed.values(), ...orderlessEntries];
@@ -1671,10 +1695,6 @@ function normalizedEntryOrderKey(entry) {
     return "";
   }
 
-  if (isPriorityFeedPrimarySource(entry?.primary_source)) {
-    return `priority:${normalized}`;
-  }
-
   return normalized;
 }
 
@@ -1919,15 +1939,15 @@ function mergeDisplayEntries(existing = null, incoming = null) {
 
   return {
     ...canonical,
-    primary_source: pickPreferredDisplayPrimarySource(existing?.primary_source, incoming?.primary_source),
-    source_entry_id: preferLongerNormalizedValue(existing?.source_entry_id, incoming?.source_entry_id) || null,
-    document_type: pickPreferredEntryType(existing?.document_type, incoming?.document_type),
+    primary_source: canonical?.primary_source || pickPreferredDisplayPrimarySource(existing?.primary_source, incoming?.primary_source),
+    source_entry_id: canonical?.source_entry_id || existing?.source_entry_id || incoming?.source_entry_id || null,
+    document_type: canonical?.document_type || pickPreferredEntryType(existing?.document_type, incoming?.document_type),
     entry_number: pickPreferredEntryNumber(existing?.entry_number, incoming?.entry_number),
     document_number: pickPreferredEntryNumber(existing?.document_number, incoming?.document_number),
-    filed_at: laterIso(existing?.filed_at, incoming?.filed_at) || existing?.filed_at || incoming?.filed_at || null,
-    description: pickPreferredEntryDescription(existing?.description, incoming?.description),
-    description_zh: preferLongerNormalizedValue(existing?.description_zh, incoming?.description_zh) || null,
-    absolute_url: pickPreferredEntryUrl(existing?.absolute_url, incoming?.absolute_url),
+    filed_at: canonical?.filed_at || existing?.filed_at || incoming?.filed_at || null,
+    description: canonical?.description || existing?.description || incoming?.description || null,
+    description_zh: canonical?.description_zh || existing?.description_zh || incoming?.description_zh || null,
+    absolute_url: canonical?.absolute_url || pickPreferredEntryUrl(existing?.absolute_url, incoming?.absolute_url),
     is_available: pickPreferredNumericValue(existing?.is_available, incoming?.is_available),
     page_count: pickPreferredNumericValue(existing?.page_count, incoming?.page_count),
     pacer_doc_id: preferLongerNormalizedValue(existing?.pacer_doc_id, incoming?.pacer_doc_id) || null,
@@ -1962,9 +1982,9 @@ function buildMergedDocketEntryRecord(existing = null, record = {}, timestamp = 
 }
 
 function compareEntriesForCanonicalRow(left, right) {
-  const descriptionCompare = String(right.description || "").length - String(left.description || "").length;
-  if (descriptionCompare !== 0) {
-    return descriptionCompare;
+  const authorityCompare = entryAuthorityRank(right.primary_source) - entryAuthorityRank(left.primary_source);
+  if (authorityCompare !== 0) {
+    return authorityCompare;
   }
 
   const contentCompare = entryContentRank(right) - entryContentRank(left);
@@ -1972,9 +1992,9 @@ function compareEntriesForCanonicalRow(left, right) {
     return contentCompare;
   }
 
-  const sourceCompare = entrySourceRank(right) - entrySourceRank(left);
-  if (sourceCompare !== 0) {
-    return sourceCompare;
+  const descriptionCompare = String(right.description || "").length - String(left.description || "").length;
+  if (descriptionCompare !== 0) {
+    return descriptionCompare;
   }
 
   const dateCompare = String(right.filed_at || right.created_at).localeCompare(String(left.filed_at || left.created_at));
@@ -3082,6 +3102,10 @@ export class Store {
             OR COALESCE(json_extract(c.raw_json, '$.signal_feed.docketId'), '') <> ''
           )
           AND COALESCE(json_extract(c.raw_json, '$.signal_feed.syncedAt'), '') < ?
+          AND (
+            COALESCE(json_extract(c.raw_json, '$.signal_feed.refreshRetryAt'), '') = ''
+            OR datetime(json_extract(c.raw_json, '$.signal_feed.refreshRetryAt')) <= datetime('now')
+          )
         ORDER BY
           CASE WHEN c.date_filed >= date('now', 'start of year') THEN 1 ELSE 0 END DESC,
           CASE WHEN c.status = 'open' THEN 1 ELSE 0 END DESC,
@@ -3091,6 +3115,23 @@ export class Store {
       `)
       .all(cutoff, normalizedLimit)
       .map(buildCaseView);
+  }
+
+  recordSignalFeedRefreshFailure(caseId, { code = "request-failed", retryAt = null } = {}) {
+    const timestamp = new Date().toISOString();
+    const normalizedRetryAt = retryAt || new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    return this.db
+      .prepare(`
+        UPDATE cases
+        SET raw_json = json_set(
+          COALESCE(raw_json, '{}'),
+          '$.signal_feed.refreshFailureAt', ?,
+          '$.signal_feed.refreshFailureCode', ?,
+          '$.signal_feed.refreshRetryAt', ?
+        )
+        WHERE id = ?
+      `)
+      .run(timestamp, String(code || "request-failed"), normalizedRetryAt, Number(caseId || 0));
   }
 
   getCaseByCourtListenerDocketId(docketId) {
@@ -5032,9 +5073,17 @@ export class Store {
     const coverage = new Map();
     const numericOrderSql = `
       CASE
-        WHEN TRIM(COALESCE(NULLIF(document_number, ''), NULLIF(entry_number, ''), '')) GLOB '[0-9]*'
+        WHEN TRIM(COALESCE(NULLIF(document_number, ''), NULLIF(entry_number, ''), '')) <> ''
+          AND TRIM(COALESCE(NULLIF(document_number, ''), NULLIF(entry_number, ''), '')) NOT GLOB '*[^0-9]*'
         THEN CAST(COALESCE(NULLIF(document_number, ''), NULLIF(entry_number, '')) AS INTEGER)
         ELSE NULL
+      END
+    `;
+    const canonicalEntrySql = `
+      CASE
+        WHEN ${numericOrderSql} IS NOT NULL
+        THEN 'number:' || CAST(${numericOrderSql} AS TEXT)
+        ELSE 'text:' || COALESCE(filed_at, '') || '|' || lower(trim(COALESCE(description, '')))
       END
     `;
 
@@ -5045,7 +5094,8 @@ export class Store {
         .prepare(`
           SELECT
             case_id,
-            COUNT(*) AS total_entries,
+            COUNT(*) AS raw_entries,
+            COUNT(DISTINCT ${canonicalEntrySql}) AS total_entries,
             SUM(CASE WHEN primary_source = 'courtlistener' THEN 1 ELSE 0 END) AS courtlistener_entries,
             SUM(CASE WHEN primary_source = '${PRIORITY_FEED_ENTRY_SOURCE}' THEN 1 ELSE 0 END) AS priority_entries,
             SUM(CASE WHEN primary_source = 'pacermonitor' THEN 1 ELSE 0 END) AS pacermonitor_entries,
@@ -5062,6 +5112,7 @@ export class Store {
       for (const row of rows) {
         const baseCoverage = {
           totalEntries: Number(row.total_entries || 0),
+          rawEntries: Number(row.raw_entries || 0),
           courtlistenerEntries: Number(row.courtlistener_entries || 0),
           priorityFeedEntries: Number(row.priority_entries || 0),
           pacermonitorEntries: Number(row.pacermonitor_entries || 0),
@@ -5673,7 +5724,6 @@ export class Store {
 
   getCasesNeedingSupplementalDocketSync(limit, { recentWindowDays = 120, startDate = "2025-01-01" } = {}) {
     const recentCutoff = Date.now() - recentWindowDays * 24 * 60 * 60 * 1000;
-    const recentCutoffIso = new Date(recentCutoff).toISOString();
     const candidatePoolSize = Math.max(limit * 120, 360);
 
     const candidateRows = this.db
@@ -5683,16 +5733,11 @@ export class Store {
         WHERE date(date_filed) >= date(?)
           AND docket_number IS NOT NULL
           AND TRIM(docket_number) <> ''
-          AND (
-            tags_marker LIKE '%|seller_tro|%'
-            OR tags_marker LIKE '%|tro|%'
-            OR tags_marker LIKE '%|schedule_a|%'
-            OR ${CASE_PRIORITY_ACTIVITY_SQL} >= ?
-          )
+          AND ${buildTargetedDocketCoverageClause()}
         ORDER BY ${CASE_PRIORITY_ACTIVITY_SQL} DESC
         LIMIT ?
       `)
-      .all(String(startDate || "2025-01-01"), recentCutoffIso, candidatePoolSize)
+      .all(String(startDate || "2025-01-01"), candidatePoolSize)
       .map(buildCaseView);
     const entryCounts = this.getEntryCoverageForCaseIds(candidateRows.map((row) => row.id));
 
@@ -5823,7 +5868,6 @@ export class Store {
     const blockedBefore = Date.now() - blockedRetryAfterHours * 60 * 60 * 1000;
     const notFoundBefore = Date.now() - notFoundRetryAfterHours * 60 * 60 * 1000;
     const recentCutoff = Date.now() - recentWindowDays * 24 * 60 * 60 * 1000;
-    const recentCutoffIso = new Date(recentCutoff).toISOString();
     const candidatePoolSize = Math.max(limit * 80, 240);
 
     const candidateRows = this.db
@@ -5833,14 +5877,11 @@ export class Store {
         WHERE date(date_filed) >= date(?)
           AND docket_number IS NOT NULL
           AND TRIM(docket_number) <> ''
-          AND (
-            tags_marker LIKE '%|seller_tro|%'
-            OR ${CASE_PRIORITY_ACTIVITY_SQL} >= ?
-          )
+          AND ${buildTargetedDocketCoverageClause()}
         ORDER BY ${CASE_PRIORITY_ACTIVITY_SQL} DESC
         LIMIT ?
       `)
-      .all(String(startDate || "2025-01-01"), recentCutoffIso, candidatePoolSize)
+      .all(String(startDate || "2025-01-01"), candidatePoolSize)
       .map(buildCaseView);
     const entryCounts = this.getEntryCoverageForCaseIds(candidateRows.map((row) => row.id));
 
@@ -5921,7 +5962,6 @@ export class Store {
           shouldSync
         };
       })
-      .filter((item) => !hasPriorityFeedAuthority(item.row))
       .filter((item) => item.shouldSync)
       .sort((left, right) => {
         if (left.priority !== right.priority) {
@@ -5972,7 +6012,6 @@ export class Store {
 
   getCoverageGapCases(limit = 25, { recentWindowDays = 90, startDate = "2025-01-01" } = {}) {
     const recentCutoff = Date.now() - recentWindowDays * 24 * 60 * 60 * 1000;
-    const recentCutoffIso = new Date(recentCutoff).toISOString();
     const candidatePoolSize = Math.max(limit * 80, 300);
 
     const candidateRows = this.db
@@ -5980,16 +6019,11 @@ export class Store {
         SELECT *
         FROM cases
         WHERE date(date_filed) >= date(?)
-          AND (
-            tags_marker LIKE '%|tro|%'
-            OR tags_marker LIKE '%|schedule_a|%'
-            OR tags_marker LIKE '%|seller_tro|%'
-            OR ${CASE_PRIORITY_ACTIVITY_SQL} >= ?
-          )
+          AND ${buildTargetedDocketCoverageClause()}
         ORDER BY ${CASE_PRIORITY_ACTIVITY_SQL} DESC
         LIMIT ?
       `)
-      .all(String(startDate || "2025-01-01"), recentCutoffIso, candidatePoolSize)
+      .all(String(startDate || "2025-01-01"), candidatePoolSize)
       .map(buildCaseView);
 
     const entryCounts = this.getEntryCoverageForCaseIds(candidateRows.map((row) => row.id));
@@ -6065,6 +6099,10 @@ export class Store {
           defendant_count: Number(row.insights?.defendant_count || 0),
           docket_count: Number(row.docket_count || 0),
           total_entries: totalEntries,
+          raw_entries: Number(coverage.rawEntries || 0),
+          duplicate_entries: Math.max(Number(coverage.rawEntries || 0) - totalEntries, 0),
+          numbered_entries: Number(coverage.numberedEntries || 0),
+          continuity_gap: Number(coverage.leadingGap || 0) + Number(coverage.sequenceGap || 0),
           courtlistener_entries: courtListenerEntries,
           expected_entries: expectedEntries,
           gap,
@@ -6128,9 +6166,25 @@ export class Store {
         if (item.pacermonitor_state === "challenge" || item.pacermonitor_state === "rate_limited") {
           acc.challenge += 1;
         }
+        if (item.duplicate_entries > 0) {
+          acc.cases_with_duplicates += 1;
+          acc.duplicate_entries += item.duplicate_entries;
+        }
+        if (item.continuity_gap > 0) {
+          acc.continuity_gaps += 1;
+        }
         return acc;
       },
-      { total: 0, courtlistener: 0, priority: 0, pacermonitor: 0, challenge: 0 }
+      {
+        total: 0,
+        courtlistener: 0,
+        priority: 0,
+        pacermonitor: 0,
+        challenge: 0,
+        cases_with_duplicates: 0,
+        duplicate_entries: 0,
+        continuity_gaps: 0
+      }
     );
 
     return {

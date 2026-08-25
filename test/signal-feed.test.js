@@ -78,6 +78,54 @@ test("public discovery falls back to the localized home page", async () => {
   }
 });
 
+test("public discovery rejects an HTTP 200 page with no case rows", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(
+    "<html><body><p>No cases found</p></body></html>",
+    { status: 200 }
+  );
+
+  try {
+    const client = new SignalFeedClient({
+      enabled: true,
+      publicCasesUrl: "https://example.test/en/cases/",
+      minIntervalMs: 1
+    });
+
+    await assert.rejects(
+      () => client.fetchPublicRecent(),
+      (error) => error?.code === "EMPTY_DISCOVERY"
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("recent hydration reports detail failures instead of silently hiding them", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    if (String(url) === "https://example.test/en/cases/") {
+      return new Response(`<table>${buildPublicRows(1)}</table>`, { status: 200 });
+    }
+    return new Response("rate limited", { status: 429 });
+  };
+
+  try {
+    const client = new SignalFeedClient({
+      enabled: true,
+      publicCasesUrl: "https://example.test/en/cases/",
+      minIntervalMs: 1
+    });
+    const result = await client.fetchRecent();
+
+    assert.equal(result.items.length, 1);
+    assert.equal(result.hydratedItems, 0);
+    assert.deepEqual(result.hydrationFailures, { "http-429": 1 });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("known cases retry canonical public detail URL variants", async () => {
   const client = new SignalFeedClient({
     enabled: true,

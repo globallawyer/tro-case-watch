@@ -45,6 +45,32 @@ function waitForMs(ms) {
   });
 }
 
+function classifySignalFeedFailure(error) {
+  const status = Number(error?.status || 0);
+  if (status) {
+    return `http-${status}`;
+  }
+  if (error?.code === "EMPTY_DISCOVERY") {
+    return "empty-discovery";
+  }
+  if (error?.name === "AbortError" || error?.code === "ETIMEDOUT") {
+    return "timeout";
+  }
+  return "request-failed";
+}
+
+function signalFeedRetryAt(failure) {
+  const delays = {
+    "http-404": 24 * 60 * 60 * 1000,
+    "http-429": 60 * 60 * 1000,
+    "empty-discovery": 30 * 60 * 1000,
+    timeout: 30 * 60 * 1000,
+    "request-failed": 60 * 60 * 1000,
+    "not-found": 24 * 60 * 60 * 1000
+  };
+  return new Date(Date.now() + Number(delays[failure] || 60 * 60 * 1000)).toISOString();
+}
+
 function parseComparableDocketNumber(value) {
   const normalized = String(value || "").trim().replace(/\.0$/, "");
   const parsed = Number.parseInt(normalized, 10);
@@ -889,6 +915,8 @@ export class CaseSyncService {
     const knownNoDocketEntries = lastNotes.some((note) => note.includes("无权访问 docket-entries"));
     const recentSyncRunning = dashboard.recentSync?.status === "running";
 
+    const signalFeedHealth = this.store.getCheckpoint("provider-health:signal-feed") || null;
+
     return {
       ...this.state,
       isRunning: this.state.isRunning || recentSyncRunning,
@@ -898,6 +926,10 @@ export class CaseSyncService {
       dashboard,
       backfill: this.getBackfillStatus(),
       providers: {
+        signalFeed: {
+          ...this.signalFeed.getStatus(),
+          health: signalFeedHealth
+        },
         courtfeeds: this.courtFeeds.getStatus(),
         recentfilings: this.recentFilings.getStatus(),
         lawfirms: this.lawFirms.getStatus(),
@@ -1616,7 +1648,10 @@ export class CaseSyncService {
           counsel: item.counsel || null,
           counselFirm: item.counselFirm || null,
           entryCount: entries.length,
-          syncedAt: timestamp
+          syncedAt: timestamp,
+          refreshFailureAt: null,
+          refreshFailureCode: null,
+          refreshRetryAt: null
         }
       };
 
@@ -1705,7 +1740,19 @@ export class CaseSyncService {
     }
 
     return this.store.batchMutations(async () => {
-      const result = await this.signalFeed.fetchRecent({ hydrate: true });
+      const healthCheckpointKey = "provider-health:signal-feed";
+      let result;
+      try {
+        result = await this.signalFeed.fetchRecent({ hydrate: true });
+      } catch (error) {
+        const failure = classifySignalFeedFailure(error);
+        this.store.saveCheckpoint(healthCheckpointKey, {
+          state: "degraded",
+          checkedAt: new Date().toISOString(),
+          failure
+        });
+        throw error;
+      }
       const recentItems = result.items || [];
       const ingest = this.ingestSignalFeedItems(recentItems);
       const recentDocketIds = new Set(recentItems.map((item) => String(item.docketId || "")).filter(Boolean));
@@ -1715,6 +1762,7 @@ export class CaseSyncService {
       });
       let refreshedCases = 0;
       let refreshErrors = 0;
+      const refreshFailures = {};
 
       for (const caseRow of candidates) {
         const signalRaw = caseRow.raw?.signal_feed || {};
@@ -1732,20 +1780,48 @@ export class CaseSyncService {
             dateFiled: caseRow.date_filed
           });
           if (!item) {
+            const failure = "not-found";
+            refreshFailures[failure] = Number(refreshFailures[failure] || 0) + 1;
+            this.store.recordSignalFeedRefreshFailure(caseRow.id, {
+              code: failure,
+              retryAt: signalFeedRetryAt(failure)
+            });
             continue;
           }
           const refreshed = this.ingestSignalFeedItems([item]);
           ingest.casesUpserted += refreshed.casesUpserted;
           ingest.docketEntriesUpserted += refreshed.docketEntriesUpserted;
           refreshedCases += 1;
-        } catch {
+        } catch (error) {
           refreshErrors += 1;
+          const failure = classifySignalFeedFailure(error);
+          refreshFailures[failure] = Number(refreshFailures[failure] || 0) + 1;
+          this.store.recordSignalFeedRefreshFailure(caseRow.id, {
+            code: failure,
+            retryAt: signalFeedRetryAt(failure)
+          });
         }
       }
+      const hydrationFailures = result.hydrationFailures || {};
+      const degraded = Number(Object.values(hydrationFailures).reduce((total, count) => total + Number(count || 0), 0)) > 0 || refreshErrors > 0;
+      this.store.saveCheckpoint(healthCheckpointKey, {
+        state: degraded ? "degraded" : "healthy",
+        checkedAt: new Date().toISOString(),
+        discoveryMode: result.source || null,
+        discoveredItems: Number(result.discoveredItems ?? recentItems.length),
+        hydratedItems: Number(result.hydratedItems || 0),
+        hydrationFailures,
+        refreshedCases,
+        refreshFailures
+      });
       return {
         itemsFetched: Number(recentItems.length),
+        discoveredItems: Number(result.discoveredItems ?? recentItems.length),
+        hydratedItems: Number(result.hydratedItems || 0),
+        hydrationFailures,
         refreshedCases,
         refreshErrors,
+        refreshFailures,
         casesUpserted: ingest.casesUpserted,
         docketEntriesUpserted: ingest.docketEntriesUpserted,
         note: `优先信号源本轮检查 ${Number(recentItems.length)} 个最新案件、复查 ${refreshedCases} 个已知案件，写入 ${ingest.casesUpserted} 个案件、${ingest.docketEntriesUpserted} 条 docket${refreshErrors ? `，${refreshErrors} 个复查暂时失败` : ""}。`
@@ -2927,6 +3003,34 @@ export class CaseSyncService {
       await this.courtFeeds.ensureFeedsLoaded();
 
       const caseIndex = this.buildCourtFeedCaseIndex();
+      const activeCourtIds = new Set(
+        [...caseIndex.values()]
+          .filter((row) => hasHighConfidenceTargetCase(row))
+          .map((row) => String(row.court_id || "").trim().toLowerCase())
+          .filter(Boolean)
+      );
+      const configuredFeeds = this.courtFeeds.listFeeds();
+      const feedsForRun = configuredFeeds
+        .map((feed) => {
+          const checkpoint = this.store.getCheckpoint(`courtfeed:${feed.id}:recent`) || {};
+          const lastPolledAt = Date.parse(String(checkpoint.updatedAt || ""));
+          return {
+            feed,
+            lastPolledAt: Number.isFinite(lastPolledAt) ? lastPolledAt : 0,
+            active: activeCourtIds.has(String(feed.courtId || feed.id || "").trim().toLowerCase())
+          };
+        })
+        .sort((left, right) => {
+          if (left.lastPolledAt !== right.lastPolledAt) {
+            return left.lastPolledAt - right.lastPolledAt;
+          }
+          if (left.active !== right.active) {
+            return left.active ? -1 : 1;
+          }
+          return String(left.feed.id || "").localeCompare(String(right.feed.id || ""));
+        })
+        .slice(0, Math.max(Number(this.courtFeeds.maxFeedsPerRun || 12), 1))
+        .map((item) => item.feed);
       const preexistingCaseIds = new Set(
         [...new Set([...caseIndex.values()].map((row) => Number(row.id)).filter((value) => Number.isFinite(value) && value > 0))]
       );
@@ -2937,7 +3041,7 @@ export class CaseSyncService {
       let casesUpserted = 0;
       let docketEntriesUpserted = 0;
 
-      for (const feed of this.courtFeeds.listFeeds()) {
+      for (const feed of feedsForRun) {
         const checkpointKey = `courtfeed:${feed.id}:recent`;
         const checkpoint = this.store.getCheckpoint(checkpointKey) || {};
         const seenGuids = new Set(Array.isArray(checkpoint.seenGuids) ? checkpoint.seenGuids : []);
@@ -3006,12 +3110,14 @@ export class CaseSyncService {
 
       const note =
         successfulFeeds || failedFeeds
-          ? `官方法院 RSS 本轮巡检 ${successfulFeeds} 个法院${failedFeeds ? `，${failedFeeds} 个法院源暂时失败` : ""}；补进 ${casesUpserted} 条案件更新、${docketEntriesUpserted} 条官方 docket${lookupResult.lookupsTriggered ? `，并触发 ${lookupResult.lookupsTriggered} 次 CourtListener 精确补抓` : ""}${followUpResult.triggeredCases ? `；另对 ${followUpResult.triggeredCases} 个旧目标案触发跨源跟进（worldtro ${followUpResult.priorityFeedTriggered}/${followUpResult.priorityFeedSynced}，CourtListener ${followUpResult.courtListenerTriggered}/${followUpResult.courtListenerSynced}，RecentFilings ${followUpResult.recentFilingsTriggered}/${followUpResult.recentFilingsSynced}，61TRO ${followUpResult.lawFirmTriggered}/${followUpResult.lawFirmSynced}${followUpResult.failedCases ? `，失败 ${followUpResult.failedCases}` : ""}）` : ""}。`
+          ? `官方法院 RSS 本轮轮转巡检 ${successfulFeeds + failedFeeds}/${configuredFeeds.length} 个法院，其中成功 ${successfulFeeds}${failedFeeds ? `、暂时失败 ${failedFeeds}` : ""}；补进 ${casesUpserted} 条案件更新、${docketEntriesUpserted} 条官方 docket${lookupResult.lookupsTriggered ? `，并触发 ${lookupResult.lookupsTriggered} 次 CourtListener 精确补抓` : ""}${followUpResult.triggeredCases ? `；另对 ${followUpResult.triggeredCases} 个旧目标案触发跨源跟进（worldtro ${followUpResult.priorityFeedTriggered}/${followUpResult.priorityFeedSynced}，CourtListener ${followUpResult.courtListenerTriggered}/${followUpResult.courtListenerSynced}，RecentFilings ${followUpResult.recentFilingsTriggered}/${followUpResult.recentFilingsSynced}，61TRO ${followUpResult.lawFirmTriggered}/${followUpResult.lawFirmSynced}${followUpResult.failedCases ? `，失败 ${followUpResult.failedCases}` : ""}）` : ""}。`
           : "官方法院 RSS 当前没有已配置法院。";
 
       return {
         successfulFeeds,
         failedFeeds,
+        configuredFeeds: configuredFeeds.length,
+        selectedFeeds: feedsForRun.length,
         casesUpserted,
         docketEntriesUpserted,
         lookupsTriggered: lookupResult.lookupsTriggered,
@@ -3037,6 +3143,19 @@ export class CaseSyncService {
         };
       }
 
+      const configuredSources = this.recentFilings.listSources();
+      const sourcesForRun = configuredSources
+        .map((source) => {
+          const checkpoint = this.store.getCheckpoint(`recentfilings:${source.id}:recent`) || {};
+          const lastPolledAt = Date.parse(String(checkpoint.updatedAt || ""));
+          return {
+            source,
+            lastPolledAt: Number.isFinite(lastPolledAt) ? lastPolledAt : 0
+          };
+        })
+        .sort((left, right) => left.lastPolledAt - right.lastPolledAt || String(left.source.id || "").localeCompare(String(right.source.id || "")))
+        .slice(0, Math.max(Number(this.config.recentFilings.maxSourcesPerRun || 1), 1))
+        .map((item) => item.source);
       const caseIndex = this.buildCourtFeedCaseIndex();
       const preexistingCaseIds = new Set(
         [...new Set([...caseIndex.values()].map((row) => Number(row.id)).filter((value) => Number.isFinite(value) && value > 0))]
@@ -3047,7 +3166,8 @@ export class CaseSyncService {
       let failedSources = 0;
       let casesUpserted = 0;
 
-      for (const source of this.recentFilings.listSources()) {
+      for (const source of sourcesForRun) {
+        const checkpointKey = `recentfilings:${source.id}:recent`;
         try {
           const sourceResult = await this.recentFilings.fetchRecentForCourt(source);
           const ingest = this.ingestRecentFilingsItems(sourceResult, caseIndex, { preexistingCaseIds });
@@ -3067,8 +3187,18 @@ export class CaseSyncService {
           }
 
           successfulSources += 1;
-        } catch {
+          this.store.saveCheckpoint(checkpointKey, {
+            state: "healthy",
+            updatedAt: new Date().toISOString(),
+            itemCount: Number(sourceResult.items?.length || 0)
+          });
+        } catch (error) {
           failedSources += 1;
+          this.store.saveCheckpoint(checkpointKey, {
+            state: "degraded",
+            updatedAt: new Date().toISOString(),
+            errorCode: classifySignalFeedFailure(error)
+          });
         }
       }
 
@@ -3097,6 +3227,8 @@ export class CaseSyncService {
       return {
         successfulSources,
         failedSources,
+        configuredSources: configuredSources.length,
+        selectedSources: sourcesForRun.length,
         casesUpserted,
         lookupsTriggered: lookupResult.lookupsTriggered,
         crossSourceFollowUpCases: followUpResult.triggeredCases,
@@ -3118,6 +3250,19 @@ export class CaseSyncService {
         };
       }
 
+      const configuredSources = this.lawFirms.listSources();
+      const sourcesForRun = configuredSources
+        .map((source) => {
+          const checkpoint = this.store.getCheckpoint(`lawfirm:${source.id}:recent`) || {};
+          const lastPolledAt = Date.parse(String(checkpoint.updatedAt || ""));
+          return {
+            source,
+            lastPolledAt: Number.isFinite(lastPolledAt) ? lastPolledAt : 0
+          };
+        })
+        .sort((left, right) => left.lastPolledAt - right.lastPolledAt || String(left.source.id || "").localeCompare(String(right.source.id || "")))
+        .slice(0, Math.max(Number(this.config.lawFirms.maxSourcesPerRun || 1), 1))
+        .map((item) => item.source);
       const caseIndex = this.buildCourtFeedCaseIndex();
       const preexistingCaseIds = new Set(
         [...new Set([...caseIndex.values()].map((row) => Number(row.id)).filter((value) => Number.isFinite(value) && value > 0))]
@@ -3129,7 +3274,8 @@ export class CaseSyncService {
       let casesUpserted = 0;
       let docketEntriesUpserted = 0;
 
-      for (const source of this.lawFirms.listSources()) {
+      for (const source of sourcesForRun) {
+        const checkpointKey = `lawfirm:${source.id}:recent`;
         try {
           const sourceResult = await this.lawFirms.fetchRecentForSource(source);
           const ingest = this.ingestLawFirmItems(sourceResult, caseIndex, { preexistingCaseIds });
@@ -3150,8 +3296,18 @@ export class CaseSyncService {
           }
 
           successfulSources += 1;
-        } catch {
+          this.store.saveCheckpoint(checkpointKey, {
+            state: "healthy",
+            updatedAt: new Date().toISOString(),
+            itemCount: Number(sourceResult.items?.length || 0)
+          });
+        } catch (error) {
           failedSources += 1;
+          this.store.saveCheckpoint(checkpointKey, {
+            state: "degraded",
+            updatedAt: new Date().toISOString(),
+            errorCode: classifySignalFeedFailure(error)
+          });
         }
       }
 
@@ -3180,6 +3336,8 @@ export class CaseSyncService {
       return {
         successfulSources,
         failedSources,
+        configuredSources: configuredSources.length,
+        selectedSources: sourcesForRun.length,
         casesUpserted,
         docketEntriesUpserted,
         lookupsTriggered: lookupResult.lookupsTriggered,
@@ -4522,7 +4680,6 @@ export class CaseSyncService {
     }
 
     const timestamp = new Date().toISOString();
-    this.store.deleteDocketEntriesNotFromSourceForRelatedCases(caseRow, PRIORITY_FEED_ENTRY_SOURCE);
     this.store.deleteDocketEntriesBySourceForRelatedCases(caseRow, PRIORITY_FEED_ENTRY_SOURCE);
 
     const mergedRaw = mergePriorityFeedRaw(caseRow.raw, {
@@ -4649,10 +4806,6 @@ export class CaseSyncService {
   }
 
   async syncSinglePacerMonitorCase(caseRow) {
-    if (this.store.caseGroupHasPriorityFeedAuthority(caseRow)) {
-      return { enriched: false, reason: "priority-authoritative" };
-    }
-
     const payload = await this.pacerMonitor.enrichCase(caseRow);
     const timestamp = new Date().toISOString();
     if (!payload) {

@@ -23,6 +23,7 @@ import {
   FALLBACK_PROVIDER_KEY,
   OFFICIAL_DOCKET_PROVIDER_KEY,
   PRIORITY_FEED_PROVIDER_KEY,
+  PRIORITY_FEED_PUBLIC_LABEL,
   PRIORITY_FEED_SOURCE,
   caseHasPriorityFeedUrl,
   getPriorityFeedRaw,
@@ -154,12 +155,12 @@ const supportedWebhookEnrichmentProviders = new Set([
   "unicourt"
 ]);
 const standaloneSyncTaskLockMinutes = new Map([
-  [SIGNAL_FEED_PROVIDER_KEY, 5],
+  [SIGNAL_FEED_PROVIDER_KEY, 3],
   ["catalog", 30],
-  ["courtfeeds", 8],
-  ["recentfilings", 8],
-  ["lawfirms", 10],
-  ["pacermonitor", 30],
+  ["courtfeeds", 4],
+  ["recentfilings", 3],
+  ["lawfirms", 3],
+  ["pacermonitor", 3],
   ["pacer", 30],
   ["docketalarm", 30],
   ["unicourt", 30],
@@ -232,10 +233,15 @@ function canPreclaimDetachedTask(mode) {
 }
 
 function getDetachedTaskMaxRuntimeMs(mode) {
-  if (mode !== "recent" && mode !== "backfill") {
-    return 0;
+  if (mode === "recent" || mode === "backfill") {
+    return Math.max(getSyncModeMaxRuntimeMs(mode), 60 * 1000);
   }
-  return Math.max(getSyncModeMaxRuntimeMs(mode), 60 * 1000);
+
+  if (canPreclaimDetachedTask(mode)) {
+    return Math.max(getStandaloneSyncLockMinutes(mode) * 60 * 1000, 60 * 1000);
+  }
+
+  return 0;
 }
 
 function stopDetachedTaskProcessGroup(child, signal) {
@@ -3061,11 +3067,38 @@ function areEntryNumbersSequential(entries) {
   return gaps / (sorted.length - 1) < 0.15;
 }
 
+function countKnownEntryNumberGaps(entries = []) {
+  const numbers = [...new Set(
+    entries
+      .map((entry) => String(entry.document_number ?? entry.entry_number ?? "").trim())
+      .filter((value) => /^\d+$/.test(value))
+      .map((value) => Number.parseInt(value, 10))
+      .filter((value) => Number.isFinite(value) && value > 0)
+  )].sort((left, right) => left - right);
+  if (!numbers.length) {
+    return 0;
+  }
+
+  const leadingGap = Math.max(numbers[0] - 1, 0);
+  const sequenceGap = Math.max(numbers.at(-1) - numbers[0] + 1 - numbers.length, 0);
+  return leadingGap + sequenceGap;
+}
+
 function serializePublicCaseDetail(item = {}) {
   const rawEntries = Array.isArray(item.entries) ? item.entries : [];
   const serializedEntries = rawEntries.map(serializePublicEntry);
+  const latestDocketNumber = Number.parseInt(String(item.latest_docket_number || "").replace(/[^0-9].*$/, ""), 10);
+  const knownDocketEntries = Math.max(
+    Number(item.docket_count || 0),
+    Number.isFinite(latestDocketNumber) ? latestDocketNumber : 0
+  );
+  const docketEntriesCount = serializedEntries.length;
+  const knownSequenceGap = countKnownEntryNumberGaps(rawEntries);
   return {
     ...serializePublicCaseSummary(item),
+    docket_entries_count: docketEntriesCount,
+    known_docket_entries_count: knownDocketEntries,
+    docket_gap_count: Math.max(knownDocketEntries - docketEntriesCount, knownSequenceGap, 0),
     entries_truncated: Boolean(item.entries_truncated),
     hydration_pending: item.hydration_pending
       ? {
@@ -3146,6 +3179,14 @@ function serializeAdminStatus(status = {}) {
   return {
     ...serializePublicStatus(status),
     providers: {
+      signals: status.providers?.signalFeed
+        ? {
+            enabled: Boolean(status.providers.signalFeed.enabled),
+            state: status.providers.signalFeed.health?.state || status.providers.signalFeed.state || null,
+            apiEnabled: Boolean(status.providers.signalFeed.apiEnabled),
+            health: status.providers.signalFeed.health || null
+          }
+        : null,
       priority: status.providers?.priorityFeed
         ? { enabled: Boolean(status.providers.priorityFeed.enabled), state: status.providers.priorityFeed.state || null }
         : null,
@@ -3184,7 +3225,10 @@ function serializeGapPayload(payload = {}) {
       courtlistener: Number(payload.summary?.courtlistener || 0),
       priority: Number(payload.summary?.priority || 0),
       pacermonitor: Number(payload.summary?.pacermonitor || 0),
-      challenge: Number(payload.summary?.challenge || 0)
+      challenge: Number(payload.summary?.challenge || 0),
+      cases_with_duplicates: Number(payload.summary?.cases_with_duplicates || 0),
+      duplicate_entries: Number(payload.summary?.duplicate_entries || 0),
+      continuity_gaps: Number(payload.summary?.continuity_gaps || 0)
     },
     items: Array.isArray(payload.items)
       ? payload.items.map((item) => ({
@@ -3197,6 +3241,10 @@ function serializeGapPayload(payload = {}) {
           defendant_count: Number(item.defendant_count || 0),
           docket_count: Number(item.docket_count || 0),
           total_entries: Number(item.total_entries || 0),
+          raw_entries: Number(item.raw_entries || 0),
+          duplicate_entries: Number(item.duplicate_entries || 0),
+          numbered_entries: Number(item.numbered_entries || 0),
+          continuity_gap: Number(item.continuity_gap || 0),
           courtlistener_entries: Number(item.courtlistener_entries || 0),
           expected_entries: Number(item.expected_entries || 0),
           gap: Number(item.gap || 0),
@@ -4274,6 +4322,13 @@ async function main() {
   }
   if (config.lawFirms?.enabled) {
     scheduleSourceMode("lawfirms", config.sync.lawFirmsIntervalMs, 210 * 1000);
+  }
+  if (config.pacerMonitor?.enabled) {
+    scheduleSourceMode(
+      "pacermonitor",
+      config.pacerMonitor.schedulerIntervalMs,
+      config.pacerMonitor.schedulerBootstrapDelayMs
+    );
   }
   if (courtListener.hasDocketAccess()) {
     scheduleSourceMode("courtlistener-docket", config.sync.courtListenerDocketIntervalMs, 270 * 1000);

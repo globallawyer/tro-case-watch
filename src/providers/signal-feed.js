@@ -180,6 +180,27 @@ function normalizeApiEntry(entry = {}) {
   };
 }
 
+function signalFeedError(code, message, details = {}) {
+  const error = new Error(message);
+  error.code = code;
+  Object.assign(error, details);
+  return error;
+}
+
+function failureCode(error) {
+  const status = Number(error?.status || 0);
+  if (status) {
+    return `http-${status}`;
+  }
+  if (error?.code === "EMPTY_DISCOVERY") {
+    return "empty-discovery";
+  }
+  if (error?.name === "AbortError" || error?.code === "ETIMEDOUT") {
+    return "timeout";
+  }
+  return "request-failed";
+}
+
 export class SignalFeedClient {
   constructor(options = {}) {
     this.enabled = Boolean(options.enabled && options.publicCasesUrl);
@@ -218,6 +239,8 @@ export class SignalFeedClient {
     }
 
     const items = [];
+    const hydrationFailures = {};
+    let hydratedItems = 0;
     for (const candidate of selected) {
       try {
         const detail = candidate.detailUrl
@@ -226,12 +249,23 @@ export class SignalFeedClient {
             ? await this.fetchApiEntries(candidate)
             : null;
         items.push({ ...candidate, ...(detail || {}) });
-      } catch {
+        if (detail) {
+          hydratedItems += 1;
+        }
+      } catch (error) {
+        const code = failureCode(error);
+        hydrationFailures[code] = Number(hydrationFailures[code] || 0) + 1;
         items.push(candidate);
       }
     }
 
-    return { items, source: this.apiKey ? "api" : "public" };
+    return {
+      items,
+      source: this.apiKey ? "api" : "public",
+      discoveredItems: candidates.length,
+      hydratedItems,
+      hydrationFailures
+    };
   }
 
   async lookupByDocket(docketNumber) {
@@ -318,10 +352,20 @@ export class SignalFeedClient {
     const languageRoot = pageUrl.pathname.startsWith("/en/") ? "/en/" : "/";
     const fallbackUrl = new URL(languageRoot, pageUrl.origin).toString();
     if (fallbackUrl === this.publicCasesUrl) {
-      return rows;
+      throw signalFeedError(
+        "EMPTY_DISCOVERY",
+        "signal feed public discovery returned no case rows"
+      );
     }
     const fallbackHtml = await this.requestText(fallbackUrl);
-    return parsePublicRows(fallbackHtml, fallbackUrl);
+    const fallbackRows = parsePublicRows(fallbackHtml, fallbackUrl);
+    if (!fallbackRows.length) {
+      throw signalFeedError(
+        "EMPTY_DISCOVERY",
+        "signal feed public discovery returned no case rows"
+      );
+    }
+    return fallbackRows;
   }
 
   async fetchPublicDetail(detailUrl) {
@@ -410,6 +454,7 @@ export class SignalFeedClient {
 }
 
 export const __test = {
+  failureCode,
   normalizeDocketNumber,
   parsePublicRows,
   parsePublicDetail,

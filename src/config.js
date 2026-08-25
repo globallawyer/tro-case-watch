@@ -316,6 +316,7 @@ export const config = {
     minIntervalMs: envInt("COURT_FEEDS_MIN_INTERVAL_MS", 1000),
     maxItemsPerFeed: envInt("COURT_FEEDS_MAX_ITEMS_PER_FEED", 80),
     maxLookupsPerRun: envInt("COURT_FEEDS_MAX_LOOKUPS_PER_RUN", 12),
+    maxFeedsPerRun: envInt("COURT_FEEDS_MAX_FEEDS_PER_RUN", 12),
     crossSourceFollowUpMaxCasesPerRun: envInt("COURT_FEEDS_CROSS_SOURCE_FOLLOW_UP_MAX_CASES_PER_RUN", 4),
     requireKeywordHit: envBool("COURT_FEEDS_REQUIRE_KEYWORD_HIT", true),
     watchKeywords: envList("COURT_FEEDS_WATCH_KEYWORDS", [
@@ -349,6 +350,7 @@ export const config = {
     maxItemsPerCourt: envInt("RECENT_FILINGS_MAX_ITEMS_PER_COURT", 120),
     maxPagesPerCourt: envInt("RECENT_FILINGS_MAX_PAGES_PER_COURT", 3),
     maxLookupsPerRun: envInt("RECENT_FILINGS_MAX_LOOKUPS_PER_RUN", 12),
+    maxSourcesPerRun: envInt("RECENT_FILINGS_MAX_SOURCES_PER_RUN", 1),
     courts: envList("RECENT_FILINGS_TARGETS", ["ilnd", "cand", "flsd"])
   },
   lawFirms: {
@@ -357,6 +359,7 @@ export const config = {
     minIntervalMs: envInt("LAW_FIRM_SITES_MIN_INTERVAL_MS", 1000),
     maxCasesPerSource: envInt("LAW_FIRM_SITES_MAX_CASES_PER_SOURCE", 8),
     maxLookupsPerRun: envInt("LAW_FIRM_SITES_MAX_LOOKUPS_PER_RUN", 8),
+    maxSourcesPerRun: envInt("LAW_FIRM_SITES_MAX_SOURCES_PER_RUN", 1),
     sources: envList("LAW_FIRM_SITES_TARGETS", ["sriplaw", "gbc", "61tro"])
   },
   translation: {
@@ -403,7 +406,9 @@ export const config = {
     blockedRetryAfterHours: envInt("PACERMONITOR_BLOCKED_RETRY_AFTER_HOURS", 12),
     notFoundRetryAfterHours: envInt("PACERMONITOR_NOT_FOUND_RETRY_AFTER_HOURS", 6),
     recentWindowDays: envInt("PACERMONITOR_RECENT_WINDOW_DAYS", 45),
-    maxSearchQueries: envInt("PACERMONITOR_MAX_SEARCH_QUERIES", 5)
+    maxSearchQueries: envInt("PACERMONITOR_MAX_SEARCH_QUERIES", 5),
+    schedulerIntervalMs: envInt("PACERMONITOR_SCHEDULER_INTERVAL_MS", 15 * 60 * 1000),
+    schedulerBootstrapDelayMs: envInt("PACERMONITOR_SCHEDULER_BOOTSTRAP_DELAY_MS", 5 * 60 * 1000)
   },
   docketAlarm: {
     enabled: envBool("DOCKETALARM_ENABLED", false),

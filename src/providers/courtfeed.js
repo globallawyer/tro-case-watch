@@ -234,7 +234,10 @@ export class CourtFeedClient {
     this.minIntervalMs = Number(config.minIntervalMs || 1000);
     this.maxItemsPerFeed = Number(config.maxItemsPerFeed || 100);
     this.maxLookupsPerRun = Number(config.maxLookupsPerRun || 12);
+    this.maxFeedsPerRun = Math.max(Number(config.maxFeedsPerRun || 12), 1);
     this.selectedIds = new Set((config.courts || []).map((value) => String(value || "").trim().toLowerCase()).filter(Boolean));
+    this.trackAllDistrictCourts = this.selectedIds.has("all");
+    this.selectedIds.delete("all");
     this.feeds = DEFAULT_COURT_FEEDS.filter((feed) => !this.selectedIds.size || this.selectedIds.has(feed.id));
     this.dynamicFeeds = null;
     this.lookupError = null;
@@ -245,6 +248,7 @@ export class CourtFeedClient {
     return {
       enabled: this.enabled,
       trackedCourts: this.listFeeds().length,
+      maxFeedsPerRun: this.maxFeedsPerRun,
       note: this.lookupError ? `PACER 法院目录暂不可用，回退到静态 RSS 列表：${this.lookupError.message}` : null,
       feeds: this.listFeeds().map((feed) => ({
         id: feed.id,
@@ -270,7 +274,7 @@ export class CourtFeedClient {
       const feeds = entries
         .filter((entry) => String(entry.type || "").toLowerCase() === "district")
         .filter((entry) => entry.rssUrl)
-        .filter((entry) => !this.selectedIds.size || this.selectedIds.has(entry.slug))
+        .filter((entry) => this.trackAllDistrictCourts || !this.selectedIds.size || this.selectedIds.has(entry.slug))
         .map((entry) => ({
           id: entry.slug,
           courtId: entry.slug,
