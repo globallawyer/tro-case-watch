@@ -11,6 +11,9 @@ import {
   isPriorityFeedPrimarySource
 } from "./priority-feed.js";
 import { SIGNAL_FEED_PROVIDER_KEY } from "./providers/signal-feed.js";
+import { enqueueWebhookEnrichmentJobState } from "./webhook-enrichment.js";
+
+const DISCOVERY_ENRICHMENT_QUEUE_CHECKPOINT = "system:webhook-enrichment-queue";
 
 function valueOf(...values) {
   return values.find((value) => value !== undefined && value !== null && value !== "") ?? null;
@@ -2423,25 +2426,54 @@ export class CaseSyncService {
       })
       .slice(0, maxLookups);
 
-    let lookupsTriggered = 0;
-    let imported = 0;
-    let matched = 0;
+    let enrichmentsQueued = 0;
+    const now = new Date();
+    const providers = asArray(this.config.sync?.discoveryEnrichmentProviders).length
+      ? asArray(this.config.sync.discoveryEnrichmentProviders)
+      : sources;
+    const delayMs = Math.max(Number(this.config.sync?.discoveryEnrichmentDelayMs || 0), 15 * 1000);
 
     for (const candidate of ordered) {
-      const result = await this.importLookup(candidate.docketNumber, {
+      const caseRow = this.store.findCaseByCourtAndDocket({
+        courtId: candidate.courtId,
         courtName: candidate.courtName,
-        caseName: candidate.caseName,
-        sources
+        docketNumber: candidate.docketNumber,
+        startDate: getDiscoveryStartDate(this.config)
       });
-      lookupsTriggered += 1;
-      imported += Number(result.imported || 0);
-      matched += Number(result.matched || 0);
+      if (!caseRow?.id) {
+        continue;
+      }
+
+      const queued = this.store.updateCheckpointAtomically(DISCOVERY_ENRICHMENT_QUEUE_CHECKPOINT, (currentValue) => {
+        const result = enqueueWebhookEnrichmentJobState(currentValue, {
+          caseId: Number(caseRow.id),
+          providers,
+          enqueuedAt: now.toISOString(),
+          runAfter: new Date(now.getTime() + delayMs).toISOString(),
+          priorityAt: candidate.filedAt || caseRow.latest_docket_filed_at || caseRow.date_filed || now.toISOString(),
+          lastWebhookAt: now.toISOString(),
+          lastWebhookFiledAt: candidate.filedAt || null,
+          eventType: "source-discovery",
+          idempotencyKey: `source-discovery:${Number(caseRow.id)}`
+        }, {
+          maxPending: Math.max(Number(this.config.sync?.webhookEnrichmentMaxPendingJobs || 0), 0),
+          now: now.toISOString()
+        });
+        return {
+          value: result.state,
+          result
+        };
+      });
+      if (queued?.queuedJob) {
+        enrichmentsQueued += 1;
+      }
     }
 
     return {
-      lookupsTriggered,
-      imported,
-      matched
+      lookupsTriggered: 0,
+      enrichmentsQueued,
+      imported: 0,
+      matched: 0
     };
   }
 
@@ -3120,7 +3152,7 @@ export class CaseSyncService {
       const lookupResult =
         mode === "recent" && lookupCandidates.size
           ? await this.lookupCourtFeedCandidates(lookupCandidates)
-          : { lookupsTriggered: 0, imported: 0, matched: 0 };
+          : { lookupsTriggered: 0, enrichmentsQueued: 0, imported: 0, matched: 0 };
       const followUpResult =
         mode === "recent" && followUpCandidates.size
           ? await this.followUpCrossSourceCases(followUpCandidates)
@@ -3136,7 +3168,7 @@ export class CaseSyncService {
 
       const note =
         successfulFeeds || failedFeeds
-          ? `官方法院 RSS 本轮轮转巡检 ${successfulFeeds + failedFeeds}/${configuredFeeds.length} 个法院，其中成功 ${successfulFeeds}${failedFeeds ? `、暂时失败 ${failedFeeds}` : ""}；补进 ${casesUpserted} 条案件更新、${docketEntriesUpserted} 条官方 docket${lookupResult.lookupsTriggered ? `，并触发 ${lookupResult.lookupsTriggered} 次 CourtListener 精确补抓` : ""}${followUpResult.triggeredCases ? `；另对 ${followUpResult.triggeredCases} 个旧目标案触发跨源跟进（worldtro ${followUpResult.priorityFeedTriggered}/${followUpResult.priorityFeedSynced}，CourtListener ${followUpResult.courtListenerTriggered}/${followUpResult.courtListenerSynced}，RecentFilings ${followUpResult.recentFilingsTriggered}/${followUpResult.recentFilingsSynced}，61TRO ${followUpResult.lawFirmTriggered}/${followUpResult.lawFirmSynced}${followUpResult.failedCases ? `，失败 ${followUpResult.failedCases}` : ""}）` : ""}。`
+          ? `官方法院 RSS 本轮轮转巡检 ${successfulFeeds + failedFeeds}/${configuredFeeds.length} 个法院，其中成功 ${successfulFeeds}${failedFeeds ? `、暂时失败 ${failedFeeds}` : ""}；补进 ${casesUpserted} 条案件更新、${docketEntriesUpserted} 条官方 docket${lookupResult.enrichmentsQueued ? `，并排队 ${lookupResult.enrichmentsQueued} 个深度补全任务` : ""}${followUpResult.triggeredCases ? `；另对 ${followUpResult.triggeredCases} 个旧目标案触发跨源跟进（worldtro ${followUpResult.priorityFeedTriggered}/${followUpResult.priorityFeedSynced}，CourtListener ${followUpResult.courtListenerTriggered}/${followUpResult.courtListenerSynced}，RecentFilings ${followUpResult.recentFilingsTriggered}/${followUpResult.recentFilingsSynced}，61TRO ${followUpResult.lawFirmTriggered}/${followUpResult.lawFirmSynced}${followUpResult.failedCases ? `，失败 ${followUpResult.failedCases}` : ""}）` : ""}。`
           : "官方法院 RSS 当前没有已配置法院。";
 
       return {
@@ -3147,6 +3179,7 @@ export class CaseSyncService {
         casesUpserted,
         docketEntriesUpserted,
         lookupsTriggered: lookupResult.lookupsTriggered,
+        enrichmentsQueued: lookupResult.enrichmentsQueued,
         crossSourceFollowUpCases: followUpResult.triggeredCases,
         priorityFeedFollowUpsTriggered: followUpResult.priorityFeedTriggered,
         priorityFeedFollowUpsSynced: followUpResult.priorityFeedSynced,
@@ -3165,6 +3198,7 @@ export class CaseSyncService {
           failedSources: 0,
           casesUpserted: 0,
           lookupsTriggered: 0,
+          enrichmentsQueued: 0,
           note: "官方近期立案页补源已关闭。"
         };
       }
@@ -3229,7 +3263,7 @@ export class CaseSyncService {
       const lookupResult =
         mode === "recent" && lookupCandidates.size
           ? await this.lookupRecentFilingsCandidates(lookupCandidates)
-          : { lookupsTriggered: 0, imported: 0, matched: 0 };
+          : { lookupsTriggered: 0, enrichmentsQueued: 0, imported: 0, matched: 0 };
       const followUpResult =
         mode === "recent" && followUpCandidates.size
           ? await this.followUpCrossSourceCases(followUpCandidates)
@@ -3245,7 +3279,7 @@ export class CaseSyncService {
 
       const note =
         successfulSources || failedSources
-          ? `官方近期立案页本轮巡检 ${successfulSources} 个法院${failedSources ? `，${failedSources} 个法院页暂时失败` : ""}；补进 ${casesUpserted} 条案件线索${lookupResult.lookupsTriggered ? `，并触发 ${lookupResult.lookupsTriggered} 次 CourtListener 精确补抓` : ""}${followUpResult.triggeredCases ? `；另对 ${followUpResult.triggeredCases} 个旧目标案触发跨源跟进（worldtro ${followUpResult.priorityFeedTriggered}/${followUpResult.priorityFeedSynced}，CourtListener ${followUpResult.courtListenerTriggered}/${followUpResult.courtListenerSynced}，RecentFilings ${followUpResult.recentFilingsTriggered}/${followUpResult.recentFilingsSynced}，61TRO ${followUpResult.lawFirmTriggered}/${followUpResult.lawFirmSynced}${followUpResult.failedCases ? `，失败 ${followUpResult.failedCases}` : ""}）` : ""}。`
+          ? `官方近期立案页本轮巡检 ${successfulSources} 个法院${failedSources ? `，${failedSources} 个法院页暂时失败` : ""}；补进 ${casesUpserted} 条案件线索${lookupResult.enrichmentsQueued ? `，并排队 ${lookupResult.enrichmentsQueued} 个深度补全任务` : ""}${followUpResult.triggeredCases ? `；另对 ${followUpResult.triggeredCases} 个旧目标案触发跨源跟进（worldtro ${followUpResult.priorityFeedTriggered}/${followUpResult.priorityFeedSynced}，CourtListener ${followUpResult.courtListenerTriggered}/${followUpResult.courtListenerSynced}，RecentFilings ${followUpResult.recentFilingsTriggered}/${followUpResult.recentFilingsSynced}，61TRO ${followUpResult.lawFirmTriggered}/${followUpResult.lawFirmSynced}${followUpResult.failedCases ? `，失败 ${followUpResult.failedCases}` : ""}）` : ""}。`
           : "官方近期立案页当前没有已配置法院。";
 
       return {
@@ -3255,6 +3289,7 @@ export class CaseSyncService {
         selectedSources: sourcesForRun.length,
         casesUpserted,
         lookupsTriggered: lookupResult.lookupsTriggered,
+        enrichmentsQueued: lookupResult.enrichmentsQueued,
         crossSourceFollowUpCases: followUpResult.triggeredCases,
         note
       };
@@ -3270,6 +3305,7 @@ export class CaseSyncService {
           casesUpserted: 0,
           docketEntriesUpserted: 0,
           lookupsTriggered: 0,
+          enrichmentsQueued: 0,
           note: "律所官网补源已关闭。"
         };
       }
@@ -3336,7 +3372,7 @@ export class CaseSyncService {
       const lookupResult =
         mode === "recent" && lookupCandidates.size
           ? await this.lookupLawFirmCandidates(lookupCandidates)
-          : { lookupsTriggered: 0, imported: 0, matched: 0 };
+          : { lookupsTriggered: 0, enrichmentsQueued: 0, imported: 0, matched: 0 };
       const followUpResult =
         mode === "recent" && followUpCandidates.size
           ? await this.followUpCrossSourceCases(followUpCandidates)
@@ -3352,7 +3388,7 @@ export class CaseSyncService {
 
       const note =
         successfulSources || failedSources
-          ? `律所官网本轮巡检 ${successfulSources} 个来源${failedSources ? `，${failedSources} 个来源暂时失败` : ""}；补进 ${casesUpserted} 条案件更新、${docketEntriesUpserted} 条律所公开文书${lookupResult.lookupsTriggered ? `，并触发 ${lookupResult.lookupsTriggered} 次 CourtListener 精确补抓` : ""}${followUpResult.triggeredCases ? `；另对 ${followUpResult.triggeredCases} 个旧目标案触发跨源跟进（worldtro ${followUpResult.priorityFeedTriggered}/${followUpResult.priorityFeedSynced}，CourtListener ${followUpResult.courtListenerTriggered}/${followUpResult.courtListenerSynced}，RecentFilings ${followUpResult.recentFilingsTriggered}/${followUpResult.recentFilingsSynced}，61TRO ${followUpResult.lawFirmTriggered}/${followUpResult.lawFirmSynced}${followUpResult.failedCases ? `，失败 ${followUpResult.failedCases}` : ""}）` : ""}。`
+          ? `律所官网本轮巡检 ${successfulSources} 个来源${failedSources ? `，${failedSources} 个来源暂时失败` : ""}；补进 ${casesUpserted} 条案件更新、${docketEntriesUpserted} 条律所公开文书${lookupResult.enrichmentsQueued ? `，并排队 ${lookupResult.enrichmentsQueued} 个深度补全任务` : ""}${followUpResult.triggeredCases ? `；另对 ${followUpResult.triggeredCases} 个旧目标案触发跨源跟进（worldtro ${followUpResult.priorityFeedTriggered}/${followUpResult.priorityFeedSynced}，CourtListener ${followUpResult.courtListenerTriggered}/${followUpResult.courtListenerSynced}，RecentFilings ${followUpResult.recentFilingsTriggered}/${followUpResult.recentFilingsSynced}，61TRO ${followUpResult.lawFirmTriggered}/${followUpResult.lawFirmSynced}${followUpResult.failedCases ? `，失败 ${followUpResult.failedCases}` : ""}）` : ""}。`
           : "律所官网当前没有已配置来源。";
 
       return {
@@ -3363,6 +3399,7 @@ export class CaseSyncService {
         casesUpserted,
         docketEntriesUpserted,
         lookupsTriggered: lookupResult.lookupsTriggered,
+        enrichmentsQueued: lookupResult.enrichmentsQueued,
         crossSourceFollowUpCases: followUpResult.triggeredCases,
         note
       };

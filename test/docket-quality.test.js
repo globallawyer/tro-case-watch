@@ -228,27 +228,45 @@ test("crawler docket matching uses indexed lookup instead of hydrating the full 
   }
 });
 
-test("discovery follow-up performs only the fast CourtListener match inline", async () => {
-  const service = new CaseSyncService({
-    config: { courtFeeds: { crossSourceFollowUpMaxCasesPerRun: 0 } },
-    store: {},
-    courtFeeds: { maxLookupsPerRun: 1 }
-  });
-  let requestedSources = null;
-  service.importLookup = async (_term, options) => {
-    requestedSources = options.sources;
-    return { imported: 0, matched: 0 };
-  };
+test("discovery follow-up is persisted for the isolated enrichment worker", async () => {
+  const { directory, store } = createStore();
+  try {
+    const saved = store.upsertCase(targetCase());
+    const service = new CaseSyncService({
+      config: {
+        sync: {
+          discoveryStartDate: "2026-01-01",
+          discoveryEnrichmentProviders: ["courtlistener", "pacermonitor"],
+          discoveryEnrichmentDelayMs: 60_000,
+          webhookEnrichmentMaxPendingJobs: 10
+        },
+        courtFeeds: { crossSourceFollowUpMaxCasesPerRun: 0 }
+      },
+      store,
+      courtFeeds: { maxLookupsPerRun: 1 }
+    });
+    service.importLookup = async () => {
+      throw new Error("discovery must not enrich inline");
+    };
 
-  await service.lookupDiscoveryCandidates(new Map([
-    ["pawd|26cv00651", {
-      docketNumber: "2:26-cv-00651",
-      courtName: "Western District of Pennsylvania",
-      caseName: "Example Brand v. Schedule A Defendants",
-      priority: 0,
-      filedAt: "2026-08-25T00:00:00.000Z"
-    }]
-  ]), 1);
+    const result = await service.lookupDiscoveryCandidates(new Map([
+      ["pawd|26cv00651", {
+        docketNumber: "2:26-cv-00651",
+        courtName: "Western District of Pennsylvania",
+        caseName: "Example Brand v. Schedule A Defendants",
+        priority: 0,
+        filedAt: "2026-08-25T00:00:00.000Z"
+      }]
+    ]), 1);
 
-  assert.deepEqual(requestedSources, ["courtlistener"]);
+    const queue = store.getCheckpoint("system:webhook-enrichment-queue");
+    assert.equal(result.lookupsTriggered, 0);
+    assert.equal(result.enrichmentsQueued, 1);
+    assert.equal(queue.pending.length, 1);
+    assert.equal(queue.pending[0].caseId, saved.id);
+    assert.deepEqual(queue.pending[0].providers, ["courtlistener", "pacermonitor"]);
+  } finally {
+    store.db.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 });

@@ -229,6 +229,10 @@ function getStandaloneSyncLockMinutes(mode) {
   return standaloneSyncTaskLockMinutes.get(mode) || 30;
 }
 
+function getDetachedTaskLeaseMinutes(mode) {
+  return getStandaloneSyncLockMinutes(mode) + 2;
+}
+
 function canPreclaimDetachedTask(mode) {
   return standaloneSyncTaskLockMinutes.has(mode);
 }
@@ -300,7 +304,7 @@ function spawnDetachedTask(args = [], extraEnv = {}) {
   };
 
   if (mode && canPreclaimDetachedTask(mode) && !env.DETACHED_TASK_RUN_ID) {
-    const runId = store.claimSyncRun("system", mode, getStandaloneSyncLockMinutes(mode));
+    const runId = store.claimSyncRun("system", mode, getDetachedTaskLeaseMinutes(mode));
     if (!runId) {
       console.warn(`[spawn-guard] skipped task=${mode} reason=already-running`);
       return {

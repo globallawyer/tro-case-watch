@@ -257,7 +257,15 @@ export const config = {
     webhookEnrichmentMinFreeSystemMb: envInt("WEBHOOK_ENRICHMENT_MIN_FREE_SYSTEM_MB", 768),
     webhookEnrichmentPollIntervalMs: envInt("WEBHOOK_ENRICHMENT_POLL_INTERVAL_MS", 60 * 1000),
     webhookEnrichmentSpawnDebounceMs: envInt("WEBHOOK_ENRICHMENT_SPAWN_DEBOUNCE_MS", 5000),
-    webhookEnrichmentMaxPendingJobs: envInt("WEBHOOK_ENRICHMENT_MAX_PENDING_JOBS", 500)
+    webhookEnrichmentMaxPendingJobs: envInt("WEBHOOK_ENRICHMENT_MAX_PENDING_JOBS", 500),
+    discoveryEnrichmentProviders: envList("DISCOVERY_ENRICHMENT_PROVIDERS", [
+      "courtlistener",
+      "pacermonitor",
+      "worldtro",
+      "61tro",
+      "recentfilings"
+    ]),
+    discoveryEnrichmentDelayMs: envInt("DISCOVERY_ENRICHMENT_DELAY_MS", 60 * 1000)
   },
   courtListener: {
     baseUrl: env("COURTLISTENER_BASE_URL", "https://www.courtlistener.com/api/rest/v4"),
