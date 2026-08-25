@@ -5753,9 +5753,17 @@ export class Store {
     return selected.slice(0, limit);
   }
 
-  getCasesNeedingSupplementalDocketSync(limit, { recentWindowDays = 120, startDate = "2025-01-01" } = {}) {
+  getCasesNeedingSupplementalDocketSync(
+    limit,
+    { recentWindowDays = 120, startDate = "2025-01-01", excludeCaseIds = [] } = {}
+  ) {
     const recentCutoff = Date.now() - recentWindowDays * 24 * 60 * 60 * 1000;
     const candidatePoolSize = Math.max(limit * 120, 360);
+    const excludedIds = new Set(
+      (Array.isArray(excludeCaseIds) ? excludeCaseIds : [])
+        .map((value) => Number(value))
+        .filter((value) => Number.isFinite(value) && value > 0)
+    );
 
     const candidateRows = this.db
       .prepare(`
@@ -5769,7 +5777,8 @@ export class Store {
         LIMIT ?
       `)
       .all(String(startDate || "2025-01-01"), candidatePoolSize)
-      .map(buildCaseView);
+      .map(buildCaseView)
+      .filter((row) => !excludedIds.has(Number(row.id)));
     const entryCounts = this.getEntryCoverageForCaseIds(candidateRows.map((row) => row.id));
 
     return candidateRows

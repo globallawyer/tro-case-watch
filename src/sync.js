@@ -14,6 +14,7 @@ import { SIGNAL_FEED_PROVIDER_KEY } from "./providers/signal-feed.js";
 import { enqueueWebhookEnrichmentJobState } from "./webhook-enrichment.js";
 
 const DISCOVERY_ENRICHMENT_QUEUE_CHECKPOINT = "system:webhook-enrichment-queue";
+const DOCKET_COMPLETION_SCHEDULE_CHECKPOINT = "system:docket-completion-schedule";
 
 function valueOf(...values) {
   return values.find((value) => value !== undefined && value !== null && value !== "") ?? null;
@@ -2474,6 +2475,117 @@ export class CaseSyncService {
       enrichmentsQueued,
       imported: 0,
       matched: 0
+    };
+  }
+
+  enqueueDocketCompletionCandidates() {
+    const syncConfig = this.config.sync || {};
+    const maxCases = Math.max(Number(syncConfig.docketCompletionMaxCasesPerRun || 0), 0);
+    if (!syncConfig.docketCompletionSchedulerEnabled || !maxCases) {
+      return {
+        candidateCount: 0,
+        enrichmentsQueued: 0,
+        note: "docket completion scheduler disabled"
+      };
+    }
+
+    const providers = asArray(syncConfig.docketCompletionProviders).length
+      ? asArray(syncConfig.docketCompletionProviders)
+      : asArray(syncConfig.discoveryEnrichmentProviders);
+    if (!providers.length) {
+      return {
+        candidateCount: 0,
+        enrichmentsQueued: 0,
+        note: "docket completion providers empty"
+      };
+    }
+
+    const now = new Date();
+    const nowIso = now.toISOString();
+    const retryDelayMs = Math.max(Number(syncConfig.docketCompletionRetryDelayMs || 0), 60 * 60 * 1000);
+    const retryCutoffMs = now.getTime() - retryDelayMs;
+    const queueState = this.store.getCheckpoint(DISCOVERY_ENRICHMENT_QUEUE_CHECKPOINT) || {};
+    const scheduleState = this.store.getCheckpoint(DOCKET_COMPLETION_SCHEDULE_CHECKPOINT) || {};
+    const excludedIds = new Set(
+      [...asArray(queueState.pending), ...asArray(queueState.leased)]
+        .map((job) => Number(job?.caseId || 0))
+        .filter((caseId) => caseId > 0)
+    );
+
+    for (const [caseIdRaw, queuedAtRaw] of Object.entries(scheduleState.queuedAtByCase || {})) {
+      const caseId = Number(caseIdRaw);
+      const queuedAtMs = Date.parse(String(queuedAtRaw || ""));
+      if (caseId > 0 && Number.isFinite(queuedAtMs) && queuedAtMs >= retryCutoffMs) {
+        excludedIds.add(caseId);
+      }
+    }
+
+    const candidates = this.store.getCasesNeedingSupplementalDocketSync(maxCases, {
+      recentWindowDays: Math.max(Number(syncConfig.docketCompletionRecentWindowDays || 0), 30),
+      startDate: getDiscoveryStartDate(this.config),
+      excludeCaseIds: [...excludedIds]
+    });
+    const queueDelayMs = Math.max(Number(syncConfig.docketCompletionQueueDelayMs || 0), 15 * 1000);
+    const queuedCaseIds = [];
+
+    for (const [index, caseRow] of candidates.entries()) {
+      const caseId = Number(caseRow.id || 0);
+      if (!caseId) {
+        continue;
+      }
+
+      const queued = this.store.updateCheckpointAtomically(DISCOVERY_ENRICHMENT_QUEUE_CHECKPOINT, (currentValue) => {
+        const result = enqueueWebhookEnrichmentJobState(currentValue, {
+          caseId,
+          providers,
+          enqueuedAt: nowIso,
+          runAfter: new Date(now.getTime() + queueDelayMs + index * 5000).toISOString(),
+          priorityAt: getCasePriorityActivityAt(caseRow) || caseRow.date_filed || nowIso,
+          lastWebhookAt: nowIso,
+          lastWebhookFiledAt: caseRow.latest_docket_filed_at || null,
+          eventType: "docket-completion",
+          entryCount: Number(caseRow.docket_count || 0),
+          idempotencyKey: `docket-completion:${caseId}`
+        }, {
+          maxPending: Math.max(Number(syncConfig.webhookEnrichmentMaxPendingJobs || 0), 0),
+          now: nowIso
+        });
+        return {
+          value: result.state,
+          result
+        };
+      });
+
+      if (queued?.queuedJob) {
+        queuedCaseIds.push(caseId);
+      }
+    }
+
+    this.store.updateCheckpointAtomically(DOCKET_COMPLETION_SCHEDULE_CHECKPOINT, (currentValue) => {
+      const queuedAtByCase = {
+        ...((currentValue && typeof currentValue === "object" && currentValue.queuedAtByCase) || {})
+      };
+      for (const caseId of queuedCaseIds) {
+        queuedAtByCase[String(caseId)] = nowIso;
+      }
+
+      const trimmedEntries = Object.entries(queuedAtByCase)
+        .filter(([, queuedAt]) => Number.isFinite(Date.parse(String(queuedAt || ""))))
+        .sort((left, right) => Date.parse(String(right[1])) - Date.parse(String(left[1])))
+        .slice(0, 2000);
+      return {
+        version: 1,
+        queuedAtByCase: Object.fromEntries(trimmedEntries),
+        lastRunAt: nowIso,
+        lastQueuedCaseIds: queuedCaseIds
+      };
+    });
+
+    return {
+      candidateCount: candidates.length,
+      enrichmentsQueued: queuedCaseIds.length,
+      queuedCaseIds,
+      excludedCaseCount: excludedIds.size
     };
   }
 

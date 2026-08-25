@@ -270,3 +270,42 @@ test("discovery follow-up is persisted for the isolated enrichment worker", asyn
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test("docket completion scheduler queues bounded candidates and honors cooldown", () => {
+  const { directory, store } = createStore();
+  try {
+    const saved = store.upsertCase(targetCase({
+      docket_count: 20,
+      latest_docket_number: "20",
+      last_filing_at: "2026-08-25T00:00:00.000Z"
+    }));
+    store.upsertDocketEntry(docketEntry(saved.id, "courtlistener", 1));
+    const service = new CaseSyncService({
+      config: {
+        sync: {
+          discoveryStartDate: "2026-01-01",
+          docketCompletionSchedulerEnabled: true,
+          docketCompletionMaxCasesPerRun: 1,
+          docketCompletionRetryDelayMs: 6 * 60 * 60 * 1000,
+          docketCompletionQueueDelayMs: 15_000,
+          docketCompletionRecentWindowDays: 365,
+          docketCompletionProviders: ["signal-feed", "courtlistener"],
+          webhookEnrichmentMaxPendingJobs: 10
+        }
+      },
+      store
+    });
+
+    const first = service.enqueueDocketCompletionCandidates();
+    assert.equal(first.enrichmentsQueued, 1);
+    assert.deepEqual(first.queuedCaseIds, [saved.id]);
+
+    store.updateCheckpointAtomically("system:webhook-enrichment-queue", () => null);
+    const second = service.enqueueDocketCompletionCandidates();
+    assert.equal(second.enrichmentsQueued, 0);
+    assert.ok(second.excludedCaseCount >= 1);
+  } finally {
+    store.db.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
