@@ -1321,6 +1321,10 @@ export class CaseSyncService {
           }
         }
 
+        if (candidates.length && docketLooksLike(rawTerm)) {
+          break;
+        }
+
         if (candidates.length >= 10) {
           break;
         }

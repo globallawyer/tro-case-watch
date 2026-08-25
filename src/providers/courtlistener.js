@@ -2,6 +2,8 @@ export class CourtListenerClient {
   constructor(config, pacerConfig = {}) {
     this.baseUrl = config.baseUrl.replace(/\/$/, "");
     this.apiToken = config.apiToken || "";
+    this.timeoutMs = Math.max(1000, Number(config.timeoutMs || 15000));
+    this.maxRetries = Math.max(0, Number(config.maxRetries ?? 2));
     this.enableDocketSync = Boolean(config.enableDocketSync);
     this.enableDocketAlerts = Boolean(config.enableDocketAlerts);
     this.recapFetchEnabled = Boolean(config.recapFetchEnabled);
@@ -247,12 +249,15 @@ export class CourtListenerClient {
       headers.authorization = `Token ${this.apiToken}`;
     }
 
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+
     try {
-      const response = await fetch(url, { method, headers, body });
+      const response = await fetch(url, { method, headers, body, signal: controller.signal });
       const text = await response.text();
 
       if (!response.ok) {
-        if (attempt < 2 && shouldRetryStatus(response.status)) {
+        if (attempt < this.maxRetries && shouldRetryStatus(response.status)) {
           await delay(retryDelayMs(response.headers.get("retry-after"), attempt));
           return this.fetchJsonWithRetry(url, options, attempt + 1);
         }
@@ -270,12 +275,14 @@ export class CourtListenerClient {
 
       return JSON.parse(text);
     } catch (error) {
-      if (attempt < 2 && shouldRetryError(error)) {
+      if (attempt < this.maxRetries && shouldRetryError(error)) {
         await delay(retryDelayMs(null, attempt));
         return this.fetchJsonWithRetry(url, options, attempt + 1);
       }
 
       throw error;
+    } finally {
+      clearTimeout(timeout);
     }
   }
 }
@@ -314,7 +321,11 @@ function shouldRetryStatus(status) {
 }
 
 function shouldRetryError(error) {
-  return error instanceof TypeError || String(error?.message || "").includes("fetch failed");
+  return (
+    error?.name === "AbortError" ||
+    error instanceof TypeError ||
+    String(error?.message || "").includes("fetch failed")
+  );
 }
 
 function retryDelayMs(retryAfterHeader, attempt) {

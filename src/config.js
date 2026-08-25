@@ -262,6 +262,8 @@ export const config = {
   courtListener: {
     baseUrl: env("COURTLISTENER_BASE_URL", "https://www.courtlistener.com/api/rest/v4"),
     apiToken: env("COURTLISTENER_API_TOKEN", ""),
+    timeoutMs: envInt("COURTLISTENER_TIMEOUT_MS", 15_000),
+    maxRetries: envInt("COURTLISTENER_MAX_RETRIES", 2),
     enableDocketSync: envBool("COURTLISTENER_ENABLE_DOCKET_SYNC", false),
     enableDocketAlerts: envBool("COURTLISTENER_ENABLE_DOCKET_ALERTS", true),
     recapFetchEnabled: envBool("COURTLISTENER_RECAP_FETCH_ENABLED", envBool("PACER_ENABLED", false)),
