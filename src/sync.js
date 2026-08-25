@@ -3923,8 +3923,10 @@ export class CaseSyncService {
     let reuppedAlerts = 0;
     let skippedCases = 0;
     let failedCases = 0;
+    let deferredCases = 0;
+    let rateLimited = false;
 
-    for (const row of rows) {
+    for (const [index, row] of rows.entries()) {
       try {
         const result = await this.ensureCourtListenerDocketAlert(row, { force });
         if (result.subscribed) {
@@ -3942,6 +3944,12 @@ export class CaseSyncService {
       } catch (error) {
         failedCases += 1;
         console.error(`[courtlistener-alerts] case ${row.id} failed: ${error.message}`);
+        if (Number(error?.status || 0) === 429) {
+          rateLimited = true;
+          deferredCases = Math.max(rows.length - index - 1, 0);
+          console.warn(`[courtlistener-alerts] rate limited; deferred ${deferredCases} remaining case(s)`);
+          break;
+        }
       }
     }
 
@@ -3952,8 +3960,10 @@ export class CaseSyncService {
       reuppedAlerts,
       skippedCases,
       failedCases,
+      deferredCases,
+      rateLimited,
       note: rows.length
-        ? `CourtListener docket alert 本轮处理 ${rows.length} 个案件。`
+        ? `CourtListener docket alert 本轮处理 ${rows.length - deferredCases} 个案件${deferredCases ? `，延后 ${deferredCases} 个` : ""}。`
         : "CourtListener docket alert 本轮没有待订阅或待续订案件。"
     };
   }

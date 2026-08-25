@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { CourtListenerClient, extractCourtListenerWebhookDocketId } from "../src/providers/courtlistener.js";
+import { CaseSyncService } from "../src/sync.js";
 
 test("extractCourtListenerWebhookDocketId accepts integer docket ids from webhook payloads", () => {
   assert.equal(extractCourtListenerWebhookDocketId({ docket: 4214664 }), "4214664");
@@ -61,4 +62,45 @@ test("CourtListenerClient can create and re-up docket alerts via the official AP
       contentType: "application/x-www-form-urlencoded; charset=utf-8"
     }
   ]);
+});
+
+test("docket alert subscription stops the batch after the first rate limit", async () => {
+  const rows = [1, 2, 3].map((id) => ({
+    id,
+    courtlistener_docket_id: 4200000 + id,
+    raw: {}
+  }));
+  let calls = 0;
+  const service = new CaseSyncService({
+    config: {
+      sync: { startDate: "2026-01-01" },
+      courtListener: {
+        docketAlertSyncMaxCasesPerRun: 3,
+        docketAlertSyncStaleAfterHours: 24
+      }
+    },
+    store: {
+      getCasesNeedingCourtListenerAlertSync() {
+        return rows;
+      }
+    },
+    courtListener: {
+      hasDocketAlertAccess() {
+        return true;
+      },
+      async getDocketAlertsByDocket() {
+        calls += 1;
+        const error = new Error("CourtListener rate limit cooldown active");
+        error.status = 429;
+        throw error;
+      }
+    }
+  });
+
+  const result = await service.syncCourtListenerAlertSubscriptions();
+
+  assert.equal(calls, 1);
+  assert.equal(result.failedCases, 1);
+  assert.equal(result.deferredCases, 2);
+  assert.equal(result.rateLimited, true);
 });
