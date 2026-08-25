@@ -2,7 +2,6 @@ import fs from "node:fs";
 import path from "node:path";
 import http from "node:http";
 import crypto from "node:crypto";
-import os from "node:os";
 import { spawn } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
 import zlib from "node:zlib";
@@ -35,6 +34,7 @@ import { docketLooksLike } from "./insights.js";
 import { DailyEmailReportService } from "./daily-report.js";
 import { TroDailyRoundupService } from "./tro-daily-roundup.js";
 import { loadTroDailyUpdates } from "./tro-daily-updates.js";
+import { getAvailableSystemMemoryMb } from "./system-memory.js";
 import {
   claimWebhookEnrichmentJobState,
   enqueueWebhookEnrichmentJobState,
@@ -572,10 +572,12 @@ function getWebhookEnrichmentPriorityAt(caseRow, { lastWebhookFiledAt = null, la
 
 function getWebhookEnrichmentMemorySnapshot() {
   const usage = process.memoryUsage();
+  const availableSystemMb = getAvailableSystemMemoryMb();
   return {
     rssMb: Number((usage.rss / (1024 * 1024)).toFixed(1)),
     heapUsedMb: Number((usage.heapUsed / (1024 * 1024)).toFixed(1)),
-    freeSystemMb: Number((os.freemem() / (1024 * 1024)).toFixed(1))
+    availableSystemMb,
+    freeSystemMb: availableSystemMb
   };
 }
 
@@ -592,7 +594,7 @@ function checkWebhookEnrichmentMemoryPressure() {
     };
   }
 
-  if (minFreeSystemMb > 0 && snapshot.freeSystemMb <= minFreeSystemMb) {
+  if (minFreeSystemMb > 0 && snapshot.availableSystemMb <= minFreeSystemMb) {
     return {
       ok: false,
       reason: "low-system-memory",
