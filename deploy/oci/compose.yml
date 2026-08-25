@@ -13,7 +13,8 @@ services:
       ENABLE_SCHEDULER: "false"
       ENABLE_BACKFILL_SCHEDULER: "false"
       BOOTSTRAP_SYNC: "false"
-      WEBHOOK_ENRICHMENT_ENABLED: "false"
+      WEBHOOK_ENRICHMENT_ENABLED: "true"
+      WEBHOOK_ENRICHMENT_WORKER_ENABLED: "false"
       NODE_OPTIONS: ${NODE_OPTIONS:---max-old-space-size=1536}
     volumes:
       - ${APP_DATA_DIR:-/var/lib/tro-case-watch/data}:/app/data
@@ -54,6 +55,11 @@ services:
     environment:
       PORT: "4128"
       ENABLE_INTERNAL_SCHEDULERS: "true"
+      WEBHOOK_ENRICHMENT_ENABLED: "true"
+      WEBHOOK_ENRICHMENT_WORKER_ENABLED: "true"
+      WEBHOOK_ENRICHMENT_MAX_OLD_SPACE_MB: "256"
+      WEBHOOK_ENRICHMENT_MAX_RSS_MB: "320"
+      WEBHOOK_ENRICHMENT_MIN_FREE_SYSTEM_MB: "1024"
       COURT_FEEDS_TARGETS: "all"
       COURT_FEEDS_MAX_FEEDS_PER_RUN: "8"
       COURT_FEEDS_MAX_LOOKUPS_PER_RUN: "1"

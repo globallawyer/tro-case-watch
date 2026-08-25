@@ -158,6 +158,7 @@ const standaloneSyncTaskLockMinutes = new Map([
   [SIGNAL_FEED_PROVIDER_KEY, 3],
   ["catalog", 30],
   ["courtfeeds", 4],
+  ["webhook-enrichment", 6],
   ["recentfilings", 3],
   ["lawfirms", 3],
   ["pacermonitor", 3],
@@ -488,12 +489,13 @@ function getWebhookEnrichmentProviders(providers = null) {
 function buildWebhookEnrichmentWorkerEnv() {
   const maxOldSpaceMb = Math.max(Number(config.sync?.webhookEnrichmentMaxOldSpaceMb || 0), 128);
   const existingNodeOptions = String(process.env.NODE_OPTIONS || "").trim();
-  if (existingNodeOptions.includes("--max-old-space-size=")) {
-    return {};
-  }
+  const boundedNodeOptions = existingNodeOptions
+    .replace(/--max-old-space-size(?:=|\s+)\d+/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
 
   return {
-    NODE_OPTIONS: `${existingNodeOptions} --max-old-space-size=${maxOldSpaceMb}`.trim()
+    NODE_OPTIONS: `${boundedNodeOptions} --max-old-space-size=${maxOldSpaceMb}`.trim()
   };
 }
 
@@ -512,7 +514,7 @@ function getWebhookEnrichmentWorkStats() {
 }
 
 function scheduleWebhookEnrichmentWorker({ force = false } = {}) {
-  if (!config.sync?.webhookEnrichmentEnabled) {
+  if (!config.sync?.webhookEnrichmentEnabled || !config.sync?.webhookEnrichmentWorkerEnabled) {
     return false;
   }
 
@@ -2806,14 +2808,17 @@ function shouldClearCachesForEnrichment(result = {}) {
 }
 
 async function runWebhookEnrichmentWorker() {
-  if (!config.sync?.webhookEnrichmentEnabled) {
+  if (!config.sync?.webhookEnrichmentEnabled || !config.sync?.webhookEnrichmentWorkerEnabled) {
     return {
       skipped: true,
       reason: "disabled"
     };
   }
 
-  const runId = store.claimSyncRun("system", "webhook-enrichment", 45);
+  const detachedRunId = Number(process.env.DETACHED_TASK_RUN_ID || 0);
+  const runId = detachedRunId > 0
+    ? detachedRunId
+    : store.claimSyncRun("system", "webhook-enrichment", getStandaloneSyncLockMinutes("webhook-enrichment"));
   if (!runId) {
     return {
       skipped: true,
@@ -4279,7 +4284,7 @@ async function main() {
     console.log(`TRO Case Watch listening on http://localhost:${config.server.port}`);
   });
 
-  if (config.sync?.webhookEnrichmentEnabled) {
+  if (config.sync?.webhookEnrichmentEnabled && config.sync?.webhookEnrichmentWorkerEnabled) {
     setTimeout(() => {
       scheduleWebhookEnrichmentWorker({ force: true });
     }, Math.min(Math.max(Number(config.sync?.webhookEnrichmentPollIntervalMs || 60 * 1000), 15 * 1000), 60 * 1000));

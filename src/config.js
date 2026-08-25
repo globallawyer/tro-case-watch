@@ -242,6 +242,10 @@ export const config = {
     workerCatalogSleepMs: envInt("WORKER_CATALOG_SLEEP_MS", 2000),
     workerCatalogBatchSize: envInt("WORKER_CATALOG_BATCH_SIZE", 4),
     webhookEnrichmentEnabled: envBool("WEBHOOK_ENRICHMENT_ENABLED", true),
+    webhookEnrichmentWorkerEnabled: envBool(
+      "WEBHOOK_ENRICHMENT_WORKER_ENABLED",
+      envBool("WEBHOOK_ENRICHMENT_ENABLED", true)
+    ),
     webhookEnrichmentProviders: envList("WEBHOOK_ENRICHMENT_PROVIDERS", ["signal-feed", "worldtro", "61tro", "recentfilings"]),
     webhookEnrichmentSettleDelayMs: envInt("WEBHOOK_ENRICHMENT_SETTLE_DELAY_MS", 90 * 1000),
     webhookEnrichmentLeaseTtlMs: envInt("WEBHOOK_ENRICHMENT_LEASE_TTL_MS", 15 * 60 * 1000),
