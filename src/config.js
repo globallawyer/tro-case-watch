@@ -301,7 +301,20 @@ export const config = {
     docketAlertSyncBootstrapDelayMs: envInt("COURTLISTENER_DOCKET_ALERT_SYNC_BOOTSTRAP_DELAY_MS", 90 * 1000),
     docketAlertSyncIntervalMs: envInt("COURTLISTENER_DOCKET_ALERT_SYNC_INTERVAL_MS", 6 * 60 * 60 * 1000),
     autoReupAlerts: envBool("COURTLISTENER_AUTO_REUP_ALERTS", true),
-    webhookSecret: env("COURTLISTENER_WEBHOOK_SECRET", "")
+    webhookSecret: env("COURTLISTENER_WEBHOOK_SECRET", ""),
+    webhookWorkerEnabled: envBool(
+      "COURTLISTENER_WEBHOOK_WORKER_ENABLED",
+      envBool("WEBHOOK_ENRICHMENT_WORKER_ENABLED", true)
+    ),
+    webhookMaxBodyBytes: envInt("COURTLISTENER_WEBHOOK_MAX_BODY_BYTES", 2 * 1024 * 1024),
+    webhookMaxPendingEvents: envInt("COURTLISTENER_WEBHOOK_MAX_PENDING_EVENTS", 500),
+    webhookMaxEventsPerRun: envInt("COURTLISTENER_WEBHOOK_MAX_EVENTS_PER_RUN", 5),
+    webhookLeaseTtlMs: envInt("COURTLISTENER_WEBHOOK_LEASE_TTL_MS", 5 * 60 * 1000),
+    webhookRetryDelayMs: envInt("COURTLISTENER_WEBHOOK_RETRY_DELAY_MS", 60 * 1000),
+    webhookMaxAttempts: envInt("COURTLISTENER_WEBHOOK_MAX_ATTEMPTS", 5),
+    webhookPollIntervalMs: envInt("COURTLISTENER_WEBHOOK_POLL_INTERVAL_MS", 5000),
+    webhookCompletedRetentionDays: envInt("COURTLISTENER_WEBHOOK_COMPLETED_RETENTION_DAYS", 14),
+    webhookFailedRetentionDays: envInt("COURTLISTENER_WEBHOOK_FAILED_RETENTION_DAYS", 30)
   },
   signalFeed: {
     enabled: envBool("SIGNAL_FEED_ENABLED", false),

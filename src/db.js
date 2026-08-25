@@ -2270,6 +2270,22 @@ export class Store {
         updated_at TEXT NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS courtlistener_webhook_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        idempotency_key TEXT NOT NULL UNIQUE,
+        event_type INTEGER,
+        payload_json TEXT NOT NULL,
+        is_probe INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'pending',
+        attempts INTEGER NOT NULL DEFAULT 0,
+        received_at TEXT NOT NULL,
+        available_at TEXT NOT NULL,
+        started_at TEXT,
+        processed_at TEXT,
+        result_json TEXT,
+        error_text TEXT
+      );
+
       CREATE TABLE IF NOT EXISTS translation_cache (
         cache_key TEXT PRIMARY KEY,
         provider TEXT NOT NULL,
@@ -2293,6 +2309,10 @@ export class Store {
       CREATE INDEX IF NOT EXISTS idx_sync_runs_started_at ON sync_runs(started_at DESC);
       CREATE INDEX IF NOT EXISTS idx_sync_runs_provider_status_started_at ON sync_runs(provider, status, started_at DESC);
       CREATE INDEX IF NOT EXISTS idx_sync_runs_provider_mode_status_started_at ON sync_runs(provider, mode, status, started_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_courtlistener_webhook_status_available
+        ON courtlistener_webhook_events(status, available_at, received_at);
+      CREATE INDEX IF NOT EXISTS idx_courtlistener_webhook_received
+        ON courtlistener_webhook_events(received_at DESC);
     `);
     ensureTableColumns(this.db, "cases", {
       is_watchlist: "INTEGER DEFAULT 0",
@@ -6378,6 +6398,266 @@ export class Store {
   getCheckpoint(key) {
     const row = this.db.prepare("SELECT value_json FROM checkpoints WHERE checkpoint_key = ?").get(key);
     return row ? parseJson(row.value_json, {}) : null;
+  }
+
+  enqueueCourtListenerWebhookEvent({
+    idempotencyKey,
+    eventType = null,
+    payload = {},
+    isProbe = false,
+    receivedAt = nowIso(),
+    maxPending = 0
+  } = {}) {
+    const normalizedKey = String(idempotencyKey || "").trim();
+    if (!normalizedKey) {
+      throw new Error("CourtListener webhook event requires an idempotency key");
+    }
+
+    const existing = this.db
+      .prepare("SELECT id, status FROM courtlistener_webhook_events WHERE idempotency_key = ? LIMIT 1")
+      .get(normalizedKey);
+    if (existing) {
+      return {
+        id: Number(existing.id || 0),
+        queued: false,
+        duplicate: true,
+        status: existing.status
+      };
+    }
+
+    const normalizedMaxPending = Math.max(Number(maxPending || 0), 0);
+    if (normalizedMaxPending > 0) {
+      const queuedCount = Number(
+        this.db
+          .prepare("SELECT COUNT(*) AS count FROM courtlistener_webhook_events WHERE status IN ('pending', 'processing')")
+          .get()?.count || 0
+      );
+      if (queuedCount >= normalizedMaxPending) {
+        return {
+          id: null,
+          queued: false,
+          duplicate: false,
+          status: "queue-full"
+        };
+      }
+    }
+
+    const result = this.db
+      .prepare(`
+        INSERT OR IGNORE INTO courtlistener_webhook_events (
+          idempotency_key,
+          event_type,
+          payload_json,
+          is_probe,
+          status,
+          attempts,
+          received_at,
+          available_at
+        ) VALUES (?, ?, ?, ?, 'pending', 0, ?, ?)
+      `)
+      .run(
+        normalizedKey,
+        Number(eventType || 0) || null,
+        toJson(payload, "{}"),
+        isProbe ? 1 : 0,
+        receivedAt,
+        receivedAt
+      );
+
+    if (Number(result.changes || 0) > 0) {
+      return {
+        id: Number(result.lastInsertRowid || 0),
+        queued: true,
+        duplicate: false,
+        status: "pending"
+      };
+    }
+
+    const raced = this.db
+      .prepare("SELECT id, status FROM courtlistener_webhook_events WHERE idempotency_key = ? LIMIT 1")
+      .get(normalizedKey);
+    return {
+      id: Number(raced?.id || 0) || null,
+      queued: false,
+      duplicate: Boolean(raced),
+      status: raced?.status || "not-queued"
+    };
+  }
+
+  claimCourtListenerWebhookEvent({
+    now = nowIso(),
+    leaseTtlMs = 5 * 60_000
+  } = {}) {
+    const leaseCutoff = new Date(Date.parse(now) - Math.max(Number(leaseTtlMs || 0), 60_000)).toISOString();
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db
+        .prepare(`
+          UPDATE courtlistener_webhook_events
+          SET status = 'pending',
+              available_at = ?,
+              started_at = NULL,
+              error_text = COALESCE(error_text, 'worker lease expired')
+          WHERE status = 'processing'
+            AND started_at < ?
+        `)
+        .run(now, leaseCutoff);
+
+      const row = this.db
+        .prepare(`
+          SELECT *
+          FROM courtlistener_webhook_events
+          WHERE status = 'pending'
+            AND available_at <= ?
+          ORDER BY received_at ASC, id ASC
+          LIMIT 1
+        `)
+        .get(now);
+
+      if (!row) {
+        this.db.exec("COMMIT");
+        return null;
+      }
+
+      this.db
+        .prepare(`
+          UPDATE courtlistener_webhook_events
+          SET status = 'processing',
+              attempts = attempts + 1,
+              started_at = ?,
+              error_text = NULL
+          WHERE id = ?
+        `)
+        .run(now, row.id);
+      this.db.exec("COMMIT");
+
+      return {
+        ...row,
+        id: Number(row.id || 0),
+        event_type: Number(row.event_type || 0) || null,
+        is_probe: Number(row.is_probe || 0) === 1,
+        attempts: Number(row.attempts || 0) + 1,
+        payload: parseJson(row.payload_json, {})
+      };
+    } catch (error) {
+      try {
+        this.db.exec("ROLLBACK");
+      } catch {}
+      throw error;
+    }
+  }
+
+  completeCourtListenerWebhookEvent(id, result = {}) {
+    const processedAt = nowIso();
+    const outcome = this.db
+      .prepare(`
+        UPDATE courtlistener_webhook_events
+        SET status = 'completed',
+            processed_at = ?,
+            result_json = ?,
+            error_text = NULL
+        WHERE id = ?
+          AND status = 'processing'
+      `)
+      .run(processedAt, toJson(result, "{}"), Number(id || 0));
+    return Number(outcome.changes || 0) > 0;
+  }
+
+  retryCourtListenerWebhookEvent(id, error, {
+    retryAfterMs = 60_000,
+    maxAttempts = 5
+  } = {}) {
+    const row = this.db
+      .prepare("SELECT attempts FROM courtlistener_webhook_events WHERE id = ? LIMIT 1")
+      .get(Number(id || 0));
+    if (!row) {
+      return null;
+    }
+
+    const attempts = Math.max(Number(row.attempts || 0), 0);
+    const failed = attempts >= Math.max(Number(maxAttempts || 0), 1);
+    const availableAt = new Date(Date.now() + Math.max(Number(retryAfterMs || 0), 10_000)).toISOString();
+    this.db
+      .prepare(`
+        UPDATE courtlistener_webhook_events
+        SET status = ?,
+            available_at = ?,
+            started_at = NULL,
+            processed_at = CASE WHEN ? = 'failed' THEN ? ELSE NULL END,
+            error_text = ?
+        WHERE id = ?
+      `)
+      .run(
+        failed ? "failed" : "pending",
+        availableAt,
+        failed ? "failed" : "pending",
+        failed ? nowIso() : null,
+        String(error?.message || error || "webhook processing failed").slice(0, 2000),
+        Number(id || 0)
+      );
+    return {
+      id: Number(id || 0),
+      attempts,
+      failed,
+      availableAt: failed ? null : availableAt
+    };
+  }
+
+  getCourtListenerWebhookEventStats({
+    now = nowIso(),
+    leaseTtlMs = 5 * 60_000
+  } = {}) {
+    const staleCutoff = new Date(Date.parse(now) - Math.max(Number(leaseTtlMs || 0), 60_000)).toISOString();
+    const counts = this.db
+      .prepare(`
+        SELECT
+          SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending_count,
+          SUM(CASE WHEN status = 'pending' AND available_at <= ? THEN 1 ELSE 0 END) AS ready_count,
+          SUM(CASE WHEN status = 'processing' THEN 1 ELSE 0 END) AS processing_count,
+          SUM(CASE WHEN status = 'processing' AND started_at < ? THEN 1 ELSE 0 END) AS stale_processing_count,
+          SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed_count,
+          SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed_count,
+          MIN(CASE WHEN status = 'pending' THEN received_at END) AS oldest_pending_at,
+          MAX(CASE WHEN is_probe = 0 THEN received_at END) AS last_real_received_at,
+          MAX(CASE WHEN is_probe = 1 THEN received_at END) AS last_probe_received_at,
+          MAX(CASE WHEN status = 'completed' THEN processed_at END) AS last_processed_at
+        FROM courtlistener_webhook_events
+      `)
+      .get(now, staleCutoff);
+    const oldestPendingMs = Date.parse(String(counts?.oldest_pending_at || ""));
+    const nowMs = Date.parse(String(now || ""));
+    return {
+      pendingCount: Number(counts?.pending_count || 0),
+      readyCount: Number(counts?.ready_count || 0),
+      processingCount: Number(counts?.processing_count || 0),
+      staleProcessingCount: Number(counts?.stale_processing_count || 0),
+      failedCount: Number(counts?.failed_count || 0),
+      completedCount: Number(counts?.completed_count || 0),
+      oldestPendingAt: counts?.oldest_pending_at || null,
+      oldestPendingAgeMs:
+        Number.isFinite(oldestPendingMs) && Number.isFinite(nowMs)
+          ? Math.max(nowMs - oldestPendingMs, 0)
+          : null,
+      lastRealReceivedAt: counts?.last_real_received_at || null,
+      lastProbeReceivedAt: counts?.last_probe_received_at || null,
+      lastProcessedAt: counts?.last_processed_at || null
+    };
+  }
+
+  pruneCourtListenerWebhookEvents({
+    completedRetentionDays = 14,
+    failedRetentionDays = 30
+  } = {}) {
+    const completedCutoff = new Date(Date.now() - Math.max(Number(completedRetentionDays || 0), 1) * 86_400_000).toISOString();
+    const failedCutoff = new Date(Date.now() - Math.max(Number(failedRetentionDays || 0), 1) * 86_400_000).toISOString();
+    const result = this.db
+      .prepare(`
+        DELETE FROM courtlistener_webhook_events
+        WHERE (status = 'completed' AND processed_at < ?)
+           OR (status = 'failed' AND processed_at < ?)
+      `)
+      .run(completedCutoff, failedCutoff);
+    return Number(result.changes || 0);
   }
 
   updateCheckpointAtomically(key, updater) {
