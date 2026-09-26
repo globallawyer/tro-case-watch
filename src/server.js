@@ -61,6 +61,7 @@ const mimeTypes = {
 const currentScriptPath = fileURLToPath(import.meta.url);
 const detachedTaskExitGraceMs = 30 * 1000;
 const detachedTaskKillGraceMs = 10 * 1000;
+const activeDetachedTaskModes = new Set();
 
 ensureSeedDatabase();
 
@@ -310,6 +311,16 @@ function spawnDetachedTask(args = [], extraEnv = {}) {
     ...extraEnv
   };
 
+  if (mode && activeDetachedTaskModes.has(mode)) {
+    console.warn(`[spawn-guard] skipped task=${mode} reason=process-running`);
+    return {
+      spawned: false,
+      mode,
+      reason: "process-running"
+    };
+  }
+
+  let preclaimedRunId = null;
   if (mode && canPreclaimDetachedTask(mode) && !env.DETACHED_TASK_RUN_ID) {
     const runId = store.claimSyncRun("system", mode, getDetachedTaskLeaseMinutes(mode));
     if (!runId) {
@@ -323,6 +334,7 @@ function spawnDetachedTask(args = [], extraEnv = {}) {
 
     env.DETACHED_TASK_RUN_ID = String(runId);
     env.DETACHED_TASK_MODE = mode;
+    preclaimedRunId = runId;
   }
 
   const child = spawn(process.execPath, [currentScriptPath, ...args], {
@@ -330,6 +342,18 @@ function spawnDetachedTask(args = [], extraEnv = {}) {
     env,
     detached: true,
     stdio: ["ignore", "inherit", "inherit"]
+  });
+  if (mode) {
+    activeDetachedTaskModes.add(mode);
+    const releaseMode = () => activeDetachedTaskModes.delete(mode);
+    child.once("exit", releaseMode);
+    child.once("error", releaseMode);
+  }
+  child.once("error", (error) => {
+    console.error(`[spawn-guard] failed task=${mode || "unknown"}: ${error.message}`);
+    if (preclaimedRunId) {
+      store.finishSyncRun(preclaimedRunId, "failed", {}, `spawn failed: ${error.message}`);
+    }
   });
   superviseDetachedTask(child, mode);
   child.unref();
@@ -2994,9 +3018,6 @@ async function runCourtListenerWebhookWorker() {
     };
     store.finishSyncRun(runId, "completed", stats);
 
-    if (stats.readyCount > 0) {
-      scheduleCourtListenerWebhookWorker({ force: true });
-    }
     return stats;
   } catch (error) {
     store.finishSyncRun(runId, "failed", {
@@ -3171,10 +3192,6 @@ async function runWebhookEnrichmentWorker() {
       leasedCount: queueStats.leasedCount
     };
     store.finishSyncRun(runId, "completed", stats);
-
-    if (queueStats.readyCount > 0) {
-      scheduleWebhookEnrichmentWorker({ force: true });
-    }
 
     return {
       ...stats,
