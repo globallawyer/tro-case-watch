@@ -35,6 +35,7 @@ import { DailyEmailReportService } from "./daily-report.js";
 import { TroDailyRoundupService } from "./tro-daily-roundup.js";
 import { loadTroDailyUpdates } from "./tro-daily-updates.js";
 import { getAvailableSystemMemoryMb } from "./system-memory.js";
+import { analyzeDocketSequence, getDocketSequenceValue } from "./docket-sequence.js";
 import {
   claimWebhookEnrichmentJobState,
   enqueueWebhookEnrichmentJobState,
@@ -162,6 +163,7 @@ const standaloneSyncTaskLockMinutes = new Map([
   ["catalog", 30],
   ["courtfeeds", 4],
   ["docket-completion", 4],
+  ["priority-refresh", 12],
   ["courtlistener-webhook-events", 3],
   ["webhook-enrichment", 6],
   ["recentfilings", 3],
@@ -3223,6 +3225,7 @@ function serializePublicEntry(entry = {}) {
     filed_at: entry.filed_at || null,
     entry_number: normalizeDisplayNumber(entry.entry_number),
     document_number: normalizeDisplayNumber(entry.document_number),
+    docket_sequence: getDocketSequenceValue(entry) || null,
     document_type: sanitizeEntryDocumentType(entry.document_type),
     description: sanitizePublicText(entry.description),
     description_zh: sanitizePublicText(entry.description_zh),
@@ -3251,67 +3254,36 @@ function serializePublicCaseSummary(item = {}) {
   };
 }
 
-function areEntryNumbersSequential(entries) {
-  if (!entries.length) return false;
-  const nums = entries
-    .map((e) => {
-      const raw = e.document_number ?? e.entry_number;
-      return raw != null ? Number(raw) : NaN;
-    })
-    .filter((n) => !isNaN(n) && n > 0);
-  // Need at least 3 numbered entries
-  if (nums.length < 3) return false;
-  // At least 80% of all entries must carry a number;
-  // if many entries lack numbers it means sources are mixed
-  if (nums.length / entries.length < 0.8) return false;
-  const sorted = [...nums].sort((a, b) => a - b);
-  let gaps = 0;
-  for (let i = 1; i < sorted.length; i++) {
-    if (sorted[i] - sorted[i - 1] !== 1) gaps++;
-  }
-  // Strict: tolerate at most 15 % non-consecutive pairs
-  return gaps / (sorted.length - 1) < 0.15;
-}
-
-function countKnownEntryNumberGaps(entries = []) {
-  const numbers = [...new Set(
-    entries
-      .map((entry) => String(entry.document_number ?? entry.entry_number ?? "").trim())
-      .filter((value) => /^\d+$/.test(value))
-      .map((value) => Number.parseInt(value, 10))
-      .filter((value) => Number.isFinite(value) && value > 0)
-  )].sort((left, right) => left - right);
-  if (!numbers.length) {
-    return 0;
-  }
-
-  const leadingGap = Math.max(numbers[0] - 1, 0);
-  const sequenceGap = Math.max(numbers.at(-1) - numbers[0] + 1 - numbers.length, 0);
-  return leadingGap + sequenceGap;
-}
-
 function serializePublicCaseDetail(item = {}) {
   const rawEntries = Array.isArray(item.entries) ? item.entries : [];
   const serializedEntries = rawEntries.map(serializePublicEntry);
   const latestDocketNumber = Number.parseInt(String(item.latest_docket_number || "").replace(/[^0-9].*$/, ""), 10);
   const knownDocketEntries = Math.max(
     Number(item.docket_count || 0),
-    Number.isFinite(latestDocketNumber) ? latestDocketNumber : 0
+    Number.isFinite(latestDocketNumber) ? latestDocketNumber : 0,
+    rawEntries.length
   );
   const docketEntriesCount = serializedEntries.length;
-  const knownSequenceGap = countKnownEntryNumberGaps(rawEntries);
+  const sequence = analyzeDocketSequence(rawEntries, {
+    upperBound: Number.isFinite(latestDocketNumber) ? latestDocketNumber : 0
+  });
   return {
     ...serializePublicCaseSummary(item),
     docket_entries_count: docketEntriesCount,
     known_docket_entries_count: knownDocketEntries,
-    docket_gap_count: Math.max(knownDocketEntries - docketEntriesCount, knownSequenceGap, 0),
+    docket_gap_count: Math.max(knownDocketEntries - docketEntriesCount, sequence.missingCount, 0),
+    numbered_docket_entries_count: sequence.numberedEntryCount,
+    unnumbered_docket_entries_count: sequence.unnumberedEntryCount,
+    docket_sequence_complete: !item.entries_truncated && sequence.isComplete,
+    docket_missing_ranges: item.entries_truncated ? [] : sequence.missingRanges,
+    docket_missing_ranges_truncated: !item.entries_truncated && sequence.missingRangesTruncated,
     entries_truncated: Boolean(item.entries_truncated),
     hydration_pending: item.hydration_pending
       ? {
           pending: Boolean(item.hydration_pending.pending)
         }
       : null,
-    entries_sequential: areEntryNumbersSequential(rawEntries),
+    entries_sequential: !item.entries_truncated && sequence.isComplete,
     entries: serializedEntries
   };
 }
@@ -4171,6 +4143,14 @@ async function main() {
       process.exit(0);
     }
 
+    if (normalizedMode === "priority-refresh") {
+      const result = await withStandaloneSyncTaskLock("priority-refresh", () =>
+        syncService.syncPriorityFeedRecent("recent")
+      );
+      printSyncOnlyResult("priority-refresh", result, { resultJson });
+      process.exit(0);
+    }
+
     if (normalizedMode === "catalog-until-idle") {
       const maxRoundsIndex = process.argv.indexOf("--max-rounds");
       const idleRoundsIndex = process.argv.indexOf("--idle-rounds");
@@ -4548,6 +4528,13 @@ async function main() {
       SIGNAL_FEED_PROVIDER_KEY,
       config.signalFeed.schedulerIntervalMs,
       config.signalFeed.schedulerBootstrapDelayMs
+    );
+  }
+  if (config.priorityFeed?.enabled) {
+    scheduleSourceMode(
+      "priority-refresh",
+      config.priorityFeed.schedulerIntervalMs,
+      config.priorityFeed.schedulerBootstrapDelayMs
     );
   }
   if (config.courtFeeds?.enabled) {

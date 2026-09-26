@@ -730,10 +730,26 @@ function timelineSourceSummary(entries) {
     .join(" · ");
 }
 
+function formatMissingDocketRanges(ranges = [], truncated = false) {
+  const labels = ranges
+    .map((range) => {
+      const start = Number(range?.start || 0);
+      const end = Number(range?.end || 0);
+      if (!start || !end) {
+        return null;
+      }
+      return start === end ? `#${start}` : `#${start}–${end}`;
+    })
+    .filter(Boolean);
+  if (!labels.length) {
+    return "";
+  }
+  return `${labels.join("、")}${truncated ? " 等" : ""}`;
+}
+
 function renderDetail(item) {
   const insights = item.insights || {};
   const entries = item.entries || [];
-  const entriesSequential = Boolean(item.entries_sequential);
   const entriesTruncated = Boolean(item.entries_truncated);
   const newestTimelineFiledAt = latestTimelineFiledAt(entries);
   const hasCaseLevelUpdateGap =
@@ -743,6 +759,10 @@ function renderDetail(item) {
   const hydrationPending = item.hydration_pending?.pending;
   const knownDocketEntries = Math.max(Number(item.known_docket_entries_count || 0), entries.length);
   const docketGapCount = Math.max(Number(item.docket_gap_count || 0), knownDocketEntries - entries.length, 0);
+  const missingRangeLabel = formatMissingDocketRanges(
+    item.docket_missing_ranges,
+    Boolean(item.docket_missing_ranges_truncated)
+  );
   const coveragePending = Boolean(hydrationPending || entriesTruncated || docketGapCount > 0);
   const timelineSummary = entries.length ? timelineSourceSummary(entries) : "当前只有案件级摘要";
   const summaryCards = [
@@ -803,6 +823,7 @@ function renderDetail(item) {
           <span class="tag-pill">${timelineSummary}</span>
           ${entriesTruncated ? '<span class="tag-pill">完整时间线继续加载中</span>' : ""}
           ${docketGapCount > 0 ? `<span class="tag-pill">已知缺口至少 ${docketGapCount} 条</span>` : ""}
+          ${missingRangeLabel ? `<span class="tag-pill">待补序号 ${missingRangeLabel}</span>` : ""}
         </div>
       </div>
     </div>
@@ -856,9 +877,8 @@ function renderDetail(item) {
               const signals = timelineSignals(entry)
                 .map((value) => `<span class="highlight-pill">${value}</span>`)
                 .join("");
-              const numPrefix = entriesSequential && (entry.document_number || entry.entry_number)
-                ? (entry.document_number || entry.entry_number) + " · "
-                : "";
+              const docketSequence = entry.docket_sequence || entry.entry_number || entry.document_number || "";
+              const numPrefix = docketSequence ? `#${docketSequence} · ` : "序号待补 · ";
               return `
                 <article class="timeline-item">
                   <div class="timeline-item-head">

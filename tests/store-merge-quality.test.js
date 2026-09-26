@@ -257,6 +257,82 @@ test("getCase collapses equivalent cross-source docket entries into one richer t
   }
 });
 
+test("coverage and timeline use docket entry number before attachment document number", () => {
+  const { store, cleanup } = createTempStore();
+
+  try {
+    const savedCase = store.upsertCase({
+      source_case_key: "case:pawd:26-cv-00651",
+      primary_source: "courtlistener",
+      source_case_id: "73194302",
+      court_id: "pawd",
+      court_name: "Western District of Pennsylvania",
+      case_name: "Example v. Schedule A Defendants",
+      docket_number: "2:26-cv-00651",
+      date_filed: "2026-04-15"
+    });
+
+    store.upsertDocketEntry({
+      case_id: savedCase.id,
+      source_entry_key: "courtlistener:248:exhibit-6",
+      primary_source: "courtlistener",
+      source_entry_id: "exhibit-6",
+      entry_number: "248.0",
+      document_number: "6.0",
+      filed_at: "2026-09-25",
+      description: "Exhibit 6 - Administrative Record"
+    });
+
+    const coverage = store.getEntryCoverageForCaseIds([savedCase.id]).get(savedCase.id);
+    const detail = store.getCase(savedCase.id);
+    assert.equal(coverage.firstNumber, 248);
+    assert.equal(coverage.lastNumber, 248);
+    assert.equal(detail.entries.length, 1);
+    assert.equal(detail.entries[0].entry_number, "248");
+  } finally {
+    cleanup();
+  }
+});
+
+test("limited case detail deduplicates sources before applying the display limit", () => {
+  const { store, cleanup } = createTempStore();
+
+  try {
+    const savedCase = store.upsertCase({
+      source_case_key: "case:pawd:26-cv-00651",
+      primary_source: "courtlistener",
+      source_case_id: "73194302",
+      court_id: "pawd",
+      court_name: "Western District of Pennsylvania",
+      case_name: "Example v. Schedule A Defendants",
+      docket_number: "2:26-cv-00651",
+      date_filed: "2026-04-15"
+    });
+
+    for (const number of [1, 2, 3]) {
+      for (const source of ["courtlistener", "worldtro", "courtfeed"]) {
+        store.upsertDocketEntry({
+          case_id: savedCase.id,
+          source_entry_key: `${source}:${number}`,
+          primary_source: source,
+          source_entry_id: `${source}-${number}`,
+          entry_number: String(number),
+          document_number: String(number),
+          filed_at: `2026-09-${20 + number}`,
+          description: `Docket entry ${number}`
+        });
+      }
+    }
+
+    const detail = store.getCase(savedCase.id, { recentEntriesLimit: 2 });
+    assert.equal(detail.entries.length, 2);
+    assert.equal(detail.entries_truncated, true);
+    assert.deepEqual(detail.entries.map((entry) => Number(entry.entry_number)), [3, 2]);
+  } finally {
+    cleanup();
+  }
+});
+
 test("restoreMissingFromBackup restores missing cases and docket entries by source keys", async () => {
   const backupDir = fs.mkdtempSync(path.join(os.tmpdir(), "tro-watch-backup-"));
   const liveDir = fs.mkdtempSync(path.join(os.tmpdir(), "tro-watch-live-"));

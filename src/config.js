@@ -2,7 +2,6 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { PRIORITY_FEED_BASE_URL, buildLegacyPriorityFeedEnvKey } from "./priority-feed.js";
-import { SIGNAL_FEED_PROVIDER_KEY } from "./providers/signal-feed.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(__dirname, "..");
@@ -247,7 +246,7 @@ export const config = {
       "WEBHOOK_ENRICHMENT_WORKER_ENABLED",
       envBool("WEBHOOK_ENRICHMENT_ENABLED", true)
     ),
-    webhookEnrichmentProviders: envList("WEBHOOK_ENRICHMENT_PROVIDERS", ["signal-feed", "worldtro", "61tro", "recentfilings"]),
+    webhookEnrichmentProviders: envList("WEBHOOK_ENRICHMENT_PROVIDERS", ["worldtro", "61tro", "recentfilings", "courtlistener", "pacermonitor"]),
     webhookEnrichmentSettleDelayMs: envInt("WEBHOOK_ENRICHMENT_SETTLE_DELAY_MS", 90 * 1000),
     webhookEnrichmentLeaseTtlMs: envInt("WEBHOOK_ENRICHMENT_LEASE_TTL_MS", 15 * 60 * 1000),
     webhookEnrichmentProviderDelayMs: envInt("WEBHOOK_ENRICHMENT_PROVIDER_DELAY_MS", 2000),
@@ -270,12 +269,11 @@ export const config = {
     docketCompletionSchedulerEnabled: envBool("DOCKET_COMPLETION_SCHEDULER_ENABLED", true),
     docketCompletionSchedulerIntervalMs: envInt("DOCKET_COMPLETION_SCHEDULER_INTERVAL_MS", 10 * 60 * 1000),
     docketCompletionSchedulerBootstrapDelayMs: envInt("DOCKET_COMPLETION_SCHEDULER_BOOTSTRAP_DELAY_MS", 2 * 60 * 1000),
-    docketCompletionMaxCasesPerRun: envInt("DOCKET_COMPLETION_MAX_CASES_PER_RUN", 3),
+    docketCompletionMaxCasesPerRun: envInt("DOCKET_COMPLETION_MAX_CASES_PER_RUN", 8),
     docketCompletionRetryDelayMs: envInt("DOCKET_COMPLETION_RETRY_DELAY_MS", 6 * 60 * 60 * 1000),
     docketCompletionQueueDelayMs: envInt("DOCKET_COMPLETION_QUEUE_DELAY_MS", 45 * 1000),
     docketCompletionRecentWindowDays: envInt("DOCKET_COMPLETION_RECENT_WINDOW_DAYS", 365),
     docketCompletionProviders: envList("DOCKET_COMPLETION_PROVIDERS", [
-      SIGNAL_FEED_PROVIDER_KEY,
       "worldtro",
       "courtlistener",
       "61tro",
@@ -350,7 +348,15 @@ export const config = {
     discoveryPages: envAnyList(["PRIORITY_FEED_DISCOVERY_PAGES", buildLegacyPriorityFeedEnvKey("DISCOVERY_PAGES")], [
       "/2026/",
       "/2025nianzuixintroanjian/"
-    ])
+    ]),
+    schedulerIntervalMs: envAnyInt(
+      ["PRIORITY_FEED_SCHEDULER_INTERVAL_MS", buildLegacyPriorityFeedEnvKey("SCHEDULER_INTERVAL_MS")],
+      20 * 60 * 1000
+    ),
+    schedulerBootstrapDelayMs: envAnyInt(
+      ["PRIORITY_FEED_SCHEDULER_BOOTSTRAP_DELAY_MS", buildLegacyPriorityFeedEnvKey("SCHEDULER_BOOTSTRAP_DELAY_MS")],
+      60 * 1000
+    )
   },
   courtFeeds: {
     enabled: envBool("COURT_FEEDS_ENABLED", true),

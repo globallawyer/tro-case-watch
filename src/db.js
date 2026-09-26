@@ -24,6 +24,7 @@ import {
   isPriorityFeedPrimarySource,
   sourceUrlUsesPriorityFeed
 } from "./priority-feed.js";
+import { getDocketSequenceValue } from "./docket-sequence.js";
 
 function nowIso() {
   return new Date().toISOString();
@@ -1690,7 +1691,7 @@ function areSemanticallyDuplicateEntries(left, right, familyCounts = new Map()) 
 }
 
 function normalizedEntryOrderKey(entry) {
-  const normalized = normalizeOrderText(entry.document_number) || normalizeOrderText(entry.entry_number) || "";
+  const normalized = getDocketSequenceValue(entry);
   if (!normalized) {
     return "";
   }
@@ -1741,7 +1742,7 @@ function buildStoredEntryDeduplicationKey(entry) {
 }
 
 function parseEntryOrderValue(entry) {
-  const candidates = [entry.document_number, entry.entry_number];
+  const candidates = [entry.entry_number, entry.document_number];
 
   for (const rawValue of candidates) {
     const text = normalizeOrderText(rawValue);
@@ -4691,20 +4692,21 @@ export class Store {
     const canonicalRow = mergeDuplicateCaseGroup(peerRows.map(buildCaseView));
     const peerIds = [...new Set(peerRows.map((candidate) => Number(candidate.id)).filter((value) => Number.isFinite(value) && value > 0))];
     const placeholders = peerIds.map(() => "?").join(", ");
+    const rawFetchLimit = normalizedLimit > 0 ? Math.max(normalizedLimit * 6, normalizedLimit + 1) : 0;
     const rawEntries = this.db
       .prepare(`
         SELECT *
         FROM docket_entries
         WHERE case_id IN (${placeholders})
         ORDER BY COALESCE(filed_at, created_at) DESC, id DESC
-        ${normalizedLimit > 0 ? "LIMIT ?" : ""}
+        ${rawFetchLimit > 0 ? "LIMIT ?" : ""}
       `)
-      .all(...peerIds, ...(normalizedLimit > 0 ? [normalizedLimit + 1] : []))
+      .all(...peerIds, ...(rawFetchLimit > 0 ? [rawFetchLimit + 1] : []))
       .map(hydrateEntry);
-    const entriesTruncated = normalizedLimit > 0 && rawEntries.length > normalizedLimit;
-    const entries = entriesTruncated ? rawEntries.slice(0, normalizedLimit) : rawEntries;
-
-    const displayEntries = dedupeEntries(entries);
+    const hasMoreRawEntries = rawFetchLimit > 0 && rawEntries.length > rawFetchLimit;
+    const dedupedEntries = dedupeEntries(hasMoreRawEntries ? rawEntries.slice(0, rawFetchLimit) : rawEntries);
+    const entriesTruncated = normalizedLimit > 0 && (hasMoreRawEntries || dedupedEntries.length > normalizedLimit);
+    const displayEntries = entriesTruncated ? dedupedEntries.slice(0, normalizedLimit) : dedupedEntries;
 
     const detail = applyAuthoritativeDocketPreference({
       ...canonicalRow,
@@ -5124,9 +5126,9 @@ export class Store {
     const coverage = new Map();
     const numericOrderSql = `
       CASE
-        WHEN TRIM(COALESCE(NULLIF(document_number, ''), NULLIF(entry_number, ''), '')) <> ''
-          AND TRIM(COALESCE(NULLIF(document_number, ''), NULLIF(entry_number, ''), '')) NOT GLOB '*[^0-9]*'
-        THEN CAST(COALESCE(NULLIF(document_number, ''), NULLIF(entry_number, '')) AS INTEGER)
+        WHEN TRIM(COALESCE(NULLIF(entry_number, ''), NULLIF(document_number, ''), '')) <> ''
+          AND TRIM(COALESCE(NULLIF(entry_number, ''), NULLIF(document_number, ''), '')) NOT GLOB '*[^0-9]*'
+        THEN CAST(COALESCE(NULLIF(entry_number, ''), NULLIF(document_number, '')) AS INTEGER)
         ELSE NULL
       END
     `;
