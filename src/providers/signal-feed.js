@@ -5,11 +5,257 @@ export const SIGNAL_FEED_PROVIDER_KEY = "signal-feed";
 
 function htmlDecode(value) {
   return String(value || "")
+    .replace(/&#x([0-9a-f]+);?/gi, (_, value) => {
+      try {
+        return String.fromCodePoint(Number.parseInt(value, 16));
+      } catch {
+        return _;
+      }
+    })
+    .replace(/&#(\d+);?/g, (_, value) => {
+      try {
+        return String.fromCodePoint(Number(value));
+      } catch {
+        return _;
+      }
+    })
+    .replace(/&nbsp;/gi, " ")
     .replace(/&quot;/g, '"')
     .replace(/&#39;|&apos;/g, "'")
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")
     .replace(/&amp;/g, "&");
+}
+
+function stripHtml(value) {
+  return htmlDecode(String(value || "")
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, " ")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/(?:p|div|li|h[1-6]|tr|td|section|article|button)>/gi, "\n")
+    .replace(/<[^>]+>/g, " "))
+    .replace(/[ \t\r\f]+/g, " ")
+    .replace(/\n\s+/g, "\n")
+    .trim();
+}
+
+function removeNonContentHtml(value) {
+  return String(value || "")
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, " ");
+}
+
+function readHtmlAttribute(tag, name) {
+  const pattern = new RegExp(`\\b${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)')`, "i");
+  const match = String(tag || "").match(pattern);
+  return match ? htmlDecode(match[1] ?? match[2] ?? "") : null;
+}
+
+function normalizeSignalDate(value) {
+  const raw = String(value || "").trim();
+  if (!raw) {
+    return null;
+  }
+  if (/^\d{4}-\d{2}-\d{2}T/.test(raw)) {
+    return raw.slice(0, 10);
+  }
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+    return raw;
+  }
+  const parsed = new Date(`${raw} 00:00:00 UTC`);
+  return Number.isFinite(parsed.getTime()) ? parsed.toISOString().slice(0, 10) : raw;
+}
+
+function parseDateFromText(value) {
+  const match = String(value || "").match(
+    /\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2},\s+20\d{2}\b|\b20\d{2}-\d{2}-\d{2}\b/i
+  );
+  return match ? normalizeSignalDate(match[0]) : null;
+}
+
+function parseLastDateFromText(value) {
+  const matches = [...String(value || "").matchAll(
+    /\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2},\s+20\d{2}\b|\b20\d{2}-\d{2}-\d{2}\b/gi
+  )];
+  return matches.length ? normalizeSignalDate(matches.at(-1)[0]) : null;
+}
+
+function extractTagValues(html, tagName) {
+  const pattern = new RegExp(`<${tagName}\\b[^>]*>([\\s\\S]*?)</${tagName}>`, "gi");
+  return [...String(html || "").matchAll(pattern)].map((match) => stripHtml(match[1])).filter(Boolean);
+}
+
+function readRenderedField(text, label) {
+  const lines = String(text || "")
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const normalizedLabel = String(label || "").trim().toLowerCase();
+  const index = lines.findIndex((line) => line.toLowerCase() === normalizedLabel);
+  if (index >= 0 && lines[index + 1]) {
+    return lines[index + 1];
+  }
+
+  const inline = String(text || "").match(new RegExp(`\\b${String(label).replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&")}\\b\\s+([^\\n]+)`, "i"));
+  return inline?.[1]?.trim() || null;
+}
+
+function detailFromItem(item, detailUrl) {
+  if (!item?.case_number) {
+    return null;
+  }
+
+  return {
+    docketId: item.docket_id || null,
+    docketNumber: normalizeDocketNumber(item.case_number),
+    caseName: item.case_name || null,
+    caseUrl: item.case_url || null,
+    detailUrl,
+    plaintiff: item.plaintiff || null,
+    plaintiffs: parseJsonArray(item.plaintiffs_json, item.plaintiff),
+    defendant: item.defendant || null,
+    defendants: item.defendant ? [item.defendant] : [],
+    courtId: item.court_id || null,
+    courtName: item.court || null,
+    dateFiled: normalizeSignalDate(item.case_date),
+    status: item.is_active === false ? "terminated" : "open",
+    judge: item.judge || null,
+    counsel: item.plaintiff_counsel || null,
+    counselFirm: item.plaintiff_counsel_firm || null,
+    entries: (Array.isArray(item.entries) ? item.entries : []).map((entry) => ({
+      entryId: entry.entry_id || entry.db_doc_id || null,
+      title: entry.title || null,
+      filedAt: normalizeSignalDate(entry.entry_date),
+      documentNumber: entry.doc_number ?? null,
+      documentUrl: entry.docLink || null,
+      downloadable: Boolean(entry.downloadable),
+      restricted: Boolean(entry.restricted),
+      attachments: (Array.isArray(entry.attachments) ? entry.attachments : []).map((attachment) => ({
+        id: attachment.id ?? null,
+        title: attachment.title || null,
+        number: attachment.att_number ?? null,
+        documentUrl: attachment.docLink || null,
+        downloadable: Boolean(attachment.downloadable),
+        restricted: Boolean(attachment.restricted)
+      }))
+    }))
+  };
+}
+
+function parseAstroCase(html, detailUrl) {
+  const islands = [...removeNonContentHtml(html).matchAll(/<astro-island\b[^>]*>/gi)];
+  for (const island of islands) {
+    const tag = island[0];
+    const propsValue = readHtmlAttribute(tag, "props");
+    if (!propsValue) {
+      continue;
+    }
+
+    try {
+      const props = unpackAstroValue(JSON.parse(propsValue));
+      const item = detailFromItem(props?.troCase, detailUrl);
+      if (item) {
+        return item;
+      }
+    } catch {
+      // Continue to the rendered HTML fallback when the island format changes.
+    }
+  }
+
+  return null;
+}
+
+function parseRenderedEntries(html, detailUrl) {
+  const source = removeNonContentHtml(html);
+  const headings = [...source.matchAll(/<h3\b[^>]*>([\s\S]*?)<\/h3>/gi)];
+  const occurrenceByKey = new Map();
+  const entries = [];
+
+  for (let index = 0; index < headings.length; index += 1) {
+    const heading = headings[index];
+    const title = stripHtml(heading[1]);
+    if (!title) {
+      continue;
+    }
+
+    const start = Number(heading.index || 0);
+    const prefix = source.slice(Math.max(0, start - 1400), start);
+    const filedAt = parseLastDateFromText(prefix.slice(-900));
+    if (!filedAt) {
+      continue;
+    }
+
+    const end = index + 1 < headings.length
+      ? Number(headings[index + 1].index || source.length)
+      : Math.min(source.length, start + 4000);
+    const block = source.slice(Math.max(0, start - 700), end);
+    const attachmentMatches = [...stripHtml(block).matchAll(
+      /Document\s+Attachment\s+(\d+)\s*:\s*([\s\S]*?)(?=Document\s+Attachment\s+\d+\s*:|Document\s*$|$)/gi
+    )];
+    const attachments = attachmentMatches.map((match) => ({
+      id: null,
+      title: String(match[2] || "").replace(/\s+/g, " ").trim() || null,
+      number: Number(match[1]) || null,
+      documentUrl: null,
+      downloadable: false,
+      restricted: false
+    }));
+    const documentUrlMatch = block.match(/href=["']([^"']+\.(?:pdf|docx?|txt)(?:\?[^"']*)?)["']/i);
+    const documentUrl = documentUrlMatch ? absoluteUrl(htmlDecode(documentUrlMatch[1]), detailUrl) : null;
+    const key = `${filedAt.slice(0, 10)}:${title.toLowerCase().replace(/\s+/g, " ").trim()}`;
+    const occurrence = Number(occurrenceByKey.get(key) || 0) + 1;
+    occurrenceByKey.set(key, occurrence);
+
+    entries.push({
+      entryId: `rendered:${key}:${occurrence}`,
+      title,
+      filedAt,
+      documentNumber: null,
+      documentUrl,
+      downloadable: Boolean(documentUrl),
+      restricted: false,
+      attachments
+    });
+  }
+
+  return entries;
+}
+
+function parseRenderedPublicDetail(html, detailUrl) {
+  const source = removeNonContentHtml(html);
+  const plainText = stripHtml(source);
+  const docketNumber = normalizeDocketNumber(
+    plainText.match(/\b\d+:20\d{2}-cv-\d+\b/i)?.[0] || ""
+  );
+  if (!docketNumber) {
+    return null;
+  }
+
+  const heading = extractTagValues(source, "h1")[0] || "";
+  const caseName = heading.replace(new RegExp(`^#?\\s*${docketNumber.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&")}\\s*`, "i"), "").trim() || heading || null;
+  const dateFiled = parseDateFromText(readRenderedField(plainText, "Filing Date") || "");
+  const plaintiff = readRenderedField(plainText, "Plaintiff");
+  const court = readRenderedField(plainText, "Court");
+  const entries = parseRenderedEntries(source, detailUrl);
+
+  return {
+    docketId: null,
+    docketNumber,
+    caseName,
+    caseUrl: detailUrl,
+    detailUrl,
+    plaintiff,
+    plaintiffs: plaintiff ? [plaintiff] : [],
+    defendants: [],
+    courtId: null,
+    courtName: court,
+    dateFiled,
+    status: "open",
+    judge: null,
+    counsel: null,
+    counselFirm: null,
+    entries
+  };
 }
 
 function normalizeDocketNumber(value) {
@@ -80,60 +326,7 @@ function parsePublicRows(html, publicCasesUrl) {
 }
 
 function parsePublicDetail(html, detailUrl) {
-  const islandMatch = String(html || "").match(
-    /<astro-island\b[^>]*component-url="[^"]*CaseDetail[^>]*\bprops="([^"]+)"/i
-  );
-  if (!islandMatch) {
-    return null;
-  }
-
-  let props;
-  try {
-    props = unpackAstroValue(JSON.parse(htmlDecode(islandMatch[1])));
-  } catch {
-    return null;
-  }
-
-  const item = props?.troCase;
-  if (!item?.case_number) {
-    return null;
-  }
-
-  return {
-    docketId: item.docket_id || null,
-    docketNumber: normalizeDocketNumber(item.case_number),
-    caseName: item.case_name || null,
-    caseUrl: item.case_url || null,
-    detailUrl,
-    plaintiff: item.plaintiff || null,
-    plaintiffs: parseJsonArray(item.plaintiffs_json, item.plaintiff),
-    defendant: item.defendant || null,
-    defendants: item.defendant ? [item.defendant] : [],
-    courtId: item.court_id || null,
-    courtName: item.court || null,
-    dateFiled: item.case_date || null,
-    status: item.is_active === false ? "terminated" : "open",
-    judge: item.judge || null,
-    counsel: item.plaintiff_counsel || null,
-    counselFirm: item.plaintiff_counsel_firm || null,
-    entries: (Array.isArray(item.entries) ? item.entries : []).map((entry) => ({
-      entryId: entry.entry_id || entry.db_doc_id || null,
-      title: entry.title || null,
-      filedAt: entry.entry_date || null,
-      documentNumber: entry.doc_number ?? null,
-      documentUrl: entry.docLink || null,
-      downloadable: Boolean(entry.downloadable),
-      restricted: Boolean(entry.restricted),
-      attachments: (Array.isArray(entry.attachments) ? entry.attachments : []).map((attachment) => ({
-        id: attachment.id ?? null,
-        title: attachment.title || null,
-        number: attachment.att_number ?? null,
-        documentUrl: attachment.docLink || null,
-        downloadable: Boolean(attachment.downloadable),
-        restricted: Boolean(attachment.restricted)
-      }))
-    }))
-  };
+  return parseAstroCase(html, detailUrl) || parseRenderedPublicDetail(html, detailUrl);
 }
 
 function parseJsonArray(rawValue, fallbackValue = null) {

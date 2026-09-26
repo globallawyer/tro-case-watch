@@ -1589,6 +1589,7 @@ function isCrossSourceDocketDedupSource(source = "") {
   }
 
   return (
+    normalized === SIGNAL_FEED_PROVIDER_KEY ||
     normalized === "courtlistener" ||
     normalized === "courtfeed" ||
     normalized === "61tro" ||
@@ -1646,6 +1647,18 @@ function areSemanticallyDuplicateEntries(left, right, familyCounts = new Map()) 
   const leftTokens = extractDistinctiveEntryTokens(left.description);
   const rightTokens = extractDistinctiveEntryTokens(right.description);
   const sharedTokens = intersectSets(leftTokens, rightTokens);
+  const shorterDescription = leftDescription.length <= rightDescription.length ? leftDescription : rightDescription;
+  const longerDescription = leftDescription.length > rightDescription.length ? leftDescription : rightDescription;
+  const shorterTokens = leftDescription.length <= rightDescription.length ? leftTokens : rightTokens;
+  if (
+    shorterDescription.length >= 24 &&
+    longerDescription.length >= shorterDescription.length + 30 &&
+    longerDescription.startsWith(shorterDescription) &&
+    shorterTokens.length >= 2
+  ) {
+    return true;
+  }
+
   const fuzzySharedTokenCount = Math.max(
     countFuzzySharedTokens(leftTokens, rightTokens),
     countFuzzySharedTokens(rightTokens, leftTokens)

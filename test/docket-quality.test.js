@@ -78,6 +78,43 @@ test("coverage counts canonical docket items instead of raw source rows", () => 
   }
 });
 
+test("TroHub full text replaces a title-only cross-source docket row", () => {
+  const { directory, store } = createStore();
+  try {
+    const saved = store.upsertCase(targetCase({
+      docket_number: "1:26-cv-26215",
+      source_case_key: "courtlistener:flsd:1:26-cv-26215",
+      court_id: "flsd",
+      court_name: "Southern District of Florida"
+    }));
+    const officialTitleOnly = docketEntry(saved.id, "courtlistener", 9, "Order on Motion for Miscellaneous Relief");
+    officialTitleOnly.filed_at = "2026-09-10";
+    store.upsertDocketEntry(officialTitleOnly);
+    store.upsertDocketEntry({
+      case_id: saved.id,
+      source_entry_key: "signal-feed:rendered:2026-09-10:order-on-motion-for-miscellaneous-relief:1",
+      primary_source: "signal-feed",
+      source_entry_id: "rendered:2026-09-10:order-on-motion-for-miscellaneous-relief:1",
+      document_type: "Docket Entry",
+      entry_number: null,
+      document_number: null,
+      filed_at: "2026-09-10",
+      description: "Order on Motion for Miscellaneous Relief. Granting the motion and directing the clerk to enter the attached order.",
+      absolute_url: "https://www.trohub.com/en/cases/example",
+      is_available: 0,
+      raw: {}
+    });
+
+    const detail = store.getCase(saved.id);
+    assert.equal(detail.entries.length, 1);
+    assert.match(detail.entries[0].description, /directing the clerk to enter the attached order/);
+    assert.equal(detail.entries[0].primary_source, "signal-feed");
+  } finally {
+    store.db.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("priority timeline refresh preserves complementary docket sources", async () => {
   const { directory, store } = createStore();
   try {
