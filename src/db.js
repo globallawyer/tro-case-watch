@@ -5148,6 +5148,13 @@ export class Store {
     const coverage = new Map();
     const numericOrderSql = `
       CASE
+        WHEN TRIM(COALESCE(entry_number, '')) = ''
+          AND json_valid(raw_json)
+          AND (
+            COALESCE(json_extract(raw_json, '$.document_type'), json_extract(raw_json, '$.documentType'), 0) = 2
+            OR CAST(COALESCE(json_extract(raw_json, '$.attachment_number'), json_extract(raw_json, '$.attachmentNumber'), 0) AS INTEGER) > 0
+          )
+        THEN NULL
         WHEN TRIM(COALESCE(NULLIF(entry_number, ''), NULLIF(document_number, ''), '')) <> ''
           AND TRIM(COALESCE(NULLIF(entry_number, ''), NULLIF(document_number, ''), '')) NOT GLOB '*[^0-9]*'
         THEN CAST(COALESCE(NULLIF(entry_number, ''), NULLIF(document_number, '')) AS INTEGER)

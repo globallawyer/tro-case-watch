@@ -72,6 +72,18 @@ test("different explicit numbers remain separate despite identical motion text",
   } finally { store.db.close(); fs.rmSync(directory, { recursive: true, force: true }); }
 });
 
+test("attachment-only document numbers do not inflate sequence coverage", () => {
+  const { directory, store } = createStore();
+  try {
+    const saved = store.upsertCase(targetCase());
+    store.upsertDocketEntry({ ...docketEntry(saved.id, "courtlistener", 6), entry_number: null,
+      raw: { document_type: 2, attachment_number: 1 } });
+    const coverage = store.getEntryCoverageForCaseIds([saved.id]).get(saved.id);
+    assert.equal(coverage.numberedEntries, 0);
+    assert.equal(coverage.lastNumber, 0);
+  } finally { store.db.close(); fs.rmSync(directory, { recursive: true, force: true }); }
+});
+
 test("same-day date and timestamp copies merge and sort by actual docket number", () => {
   const { directory, store } = createStore();
   try {
