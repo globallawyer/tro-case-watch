@@ -1300,7 +1300,8 @@ function dedupeEntries(entries) {
   const orderlessEntries = [];
 
   for (const entry of entries) {
-    const orderKey = normalizedEntryOrderKey(entry);
+    const numberKey = normalizedEntryOrderKey(entry);
+    const orderKey = numberKey ? `${numberKey}|${entryDateKey(entry)}` : "";
     if (!orderKey) {
       orderlessEntries.push(entry);
       continue;
@@ -1325,7 +1326,7 @@ function dedupeEntries(entries) {
   const dateBuckets = new Map();
 
   for (const entry of candidates.sort(compareEntriesForTimeline)) {
-    const bucketKey = String(entry.filed_at || entry.created_at || "");
+    const bucketKey = entryDateKey(entry);
     const bucket = dateBuckets.get(bucketKey) || [];
     let matchedIndex = -1;
 
@@ -1518,7 +1519,7 @@ function extractDistinctiveEntryTokens(value) {
 }
 
 function buildEntryFamilyKey(entry) {
-  const dateKey = String(entry?.filed_at || entry?.created_at || "");
+  const dateKey = entryDateKey(entry);
   const lead = tokenizeEntryDescription(entry?.description).slice(0, 12).join(" ");
   if (!dateKey || lead.split(" ").length < 6) {
     return "";
@@ -1582,6 +1583,10 @@ function entrySourcesDiffer(left, right) {
     String(left?.source || "") !== String(right?.source || "");
 }
 
+function entryDateKey(entry) {
+  return String(entry?.filed_at || entry?.created_at || "").slice(0, 10);
+}
+
 function isCrossSourceDocketDedupSource(source = "") {
   const normalized = String(source || "").trim().toLowerCase();
   if (!normalized) {
@@ -1607,8 +1612,8 @@ function areSemanticallyDuplicateEntries(left, right, familyCounts = new Map()) 
     return false;
   }
 
-  const leftDate = String(left.filed_at || left.created_at || "");
-  const rightDate = String(right.filed_at || right.created_at || "");
+  const leftDate = entryDateKey(left);
+  const rightDate = entryDateKey(right);
   if (!leftDate || leftDate !== rightDate) {
     return false;
   }
@@ -1617,6 +1622,10 @@ function areSemanticallyDuplicateEntries(left, right, familyCounts = new Map()) 
   const rightOrder = normalizedEntryOrderKey(right);
   if (leftOrder && rightOrder && leftOrder === rightOrder) {
     return true;
+  }
+  // Similar motion text never overrides two different published docket numbers.
+  if (leftOrder && rightOrder) {
+    return false;
   }
 
   const leftDescription = normalizeEntryDescription(left.description);
@@ -2020,7 +2029,7 @@ function compareEntriesForCanonicalRow(left, right) {
 }
 
 function compareEntriesForTimeline(left, right) {
-  const dateCompare = String(right.filed_at || right.created_at).localeCompare(String(left.filed_at || left.created_at));
+  const dateCompare = entryDateKey(right).localeCompare(entryDateKey(left));
   if (dateCompare !== 0) {
     return dateCompare;
   }

@@ -199,6 +199,16 @@ test("rendered TroHub detail pages preserve docket text and attachments", () => 
   assert.match(item.entries[1].attachments[0].title, /Civil Cover Sheet/);
 });
 
+test("rendered attachments never leak into the next docket entry", () => {
+  const html = `<h1>1:2026-cv-26215 Example v. Schedule A</h1>
+    <span>Sep 10, 2026</span><h3>COMPLAINT</h3>
+    <div>Document Attachment 1: Civil Cover Sheet</div>
+    <span>Sep 10, 2026</span><h3>ORDER granting motion to seal</h3><div>Document</div>`;
+  const item = signalFeedTest.parsePublicDetail(html, "https://example.test/cases/test");
+  assert.equal(item.entries[0].attachments.length, 1);
+  assert.equal(item.entries[1].attachments.length, 0);
+});
+
 test("Astro detail parsing accepts props before component metadata", () => {
   const props = JSON.stringify({
     troCase: {

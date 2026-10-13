@@ -188,7 +188,8 @@ function parseRenderedEntries(html, detailUrl) {
     const end = index + 1 < headings.length
       ? Number(headings[index + 1].index || source.length)
       : Math.min(source.length, start + 4000);
-    const block = source.slice(Math.max(0, start - 700), end);
+    // Only read attachments after this heading, never from the preceding entry.
+    const block = source.slice(start, end);
     const attachmentMatches = [...stripHtml(block).matchAll(
       /Document\s+Attachment\s+(\d+)\s*:\s*([\s\S]*?)(?=Document\s+Attachment\s+\d+\s*:|Document\s*$|$)/gi
     )];

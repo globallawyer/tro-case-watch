@@ -14,6 +14,9 @@ export class CourtListenerClient {
     this.pacerPassword = pacerConfig.password || "";
     this.pacerClientCode = pacerConfig.clientCode || "";
     this.rateLimitedUntil = 0;
+    this.docketEntriesMaxPages = Math.max(1, Number(config.docketEntriesMaxPages || 20));
+    this.docketEntriesMaxEntries = Math.max(100, Number(config.docketEntriesMaxEntries || 2000));
+    this.docketEntriesMaxRuntimeMs = Math.max(1000, Number(config.docketEntriesMaxRuntimeMs || 60000));
     this.capabilities = {
       docket: Boolean(this.apiToken) && this.enableDocketSync,
       docketEntries: Boolean(this.apiToken) && this.enableDocketSync,
@@ -79,11 +82,22 @@ export class CourtListenerClient {
 
     let nextUrl = `${this.baseUrl}/docket-entries/?docket=${encodeURIComponent(docketId)}&page_size=${pageSize}`;
     const entries = [];
+    const visited = new Set();
+    const startedAt = Date.now();
 
     while (nextUrl) {
+      const next = new URL(nextUrl, this.baseUrl);
+      if (next.origin !== new URL(this.baseUrl).origin || !next.pathname.endsWith("/docket-entries/")) {
+        throw new Error("Unexpected CourtListener pagination URL");
+      }
+      if (visited.has(next.toString()) || visited.size >= this.docketEntriesMaxPages ||
+          entries.length >= this.docketEntriesMaxEntries || Date.now() - startedAt >= this.docketEntriesMaxRuntimeMs) {
+        throw new Error("CourtListener docket pagination incomplete: bounded fetch limit reached");
+      }
+      visited.add(next.toString());
       let payload;
       try {
-        payload = await this.fetchJson(nextUrl, { requiresAuth: true });
+        payload = await this.fetchJson(next.toString(), { requiresAuth: true });
       } catch (error) {
         if (error.status === 403) {
           this.capabilities.docketEntries = false;
@@ -93,9 +107,6 @@ export class CourtListenerClient {
       }
       entries.push(...(payload.results || []));
       nextUrl = payload.next;
-      if (entries.length >= pageSize) {
-        break;
-      }
     }
 
     return entries;

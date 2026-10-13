@@ -1706,7 +1706,7 @@ export class CaseSyncService {
         const sourceEntryId = entry.entryId || `${item.docketId || normalizeDocketIdentity(docketNumber)}:${documentNumber || entry.filedAt || crypto.randomUUID()}`;
         const savedEntry = this.store.upsertDocketEntry({
           case_id: savedCase.id,
-          source_entry_key: `${SIGNAL_FEED_PROVIDER_KEY}:${sourceEntryId}`,
+          source_entry_key: `${SIGNAL_FEED_PROVIDER_KEY}:${savedCase.id}:${sourceEntryId}`,
           primary_source: SIGNAL_FEED_PROVIDER_KEY,
           source_entry_id: sourceEntryId,
           document_type: "Docket Entry",
@@ -1853,9 +1853,26 @@ export class CaseSyncService {
         return { enriched: false, reason: "fresh" };
       }
 
-      const item = await this.signalFeed.lookupByDocket(caseRow.docket_number);
+      const signalRaw = caseRow.raw?.signal_feed || {};
+      const item = signalRaw.detailUrl || signalRaw.docketId
+        ? await this.signalFeed.fetchKnownCase({
+            docketId: signalRaw.docketId,
+            detailUrl: signalRaw.detailUrl,
+            docketNumber: caseRow.docket_number,
+            courtId: caseRow.court_id,
+            courtName: caseRow.court_name,
+            caseName: caseRow.case_name,
+            dateFiled: caseRow.date_filed
+          })
+        : await this.signalFeed.lookupByDocket(caseRow.docket_number);
       if (!item) {
         return { enriched: false, reason: "not-found" };
+      }
+      if (normalizeDocketIdentity(item.docketNumber) !== normalizeDocketIdentity(caseRow.docket_number) ||
+          (item.courtId && caseRow.court_id && item.courtId !== caseRow.court_id) ||
+          (!(item.courtId && caseRow.court_id) && item.courtName && caseRow.court_name &&
+            !courtNamesLikelyMatch(caseRow.court_name, item.courtName))) {
+        return { enriched: false, reason: "identity-mismatch" };
       }
 
       const ingest = this.ingestSignalFeedItems([item]);
@@ -4861,7 +4878,7 @@ export class CaseSyncService {
     }
 
     const timestamp = new Date().toISOString();
-    this.store.deleteDocketEntriesBySourceForRelatedCases(caseRow, PRIORITY_FEED_ENTRY_SOURCE);
+    // A smaller upstream response must not delete already archived filings.
 
     const mergedRaw = mergePriorityFeedRaw(caseRow.raw, {
       url: payload.url,
@@ -5170,8 +5187,6 @@ export class CaseSyncService {
       };
     }
 
-    this.store.deleteDocketEntriesBySourceForRelatedCases(caseRow, "docketalarm");
-
     for (const entry of payload.entries) {
       const digest = crypto
         .createHash("sha1")
@@ -5183,7 +5198,7 @@ export class CaseSyncService {
         case_id: savedCase.id,
         source_entry_key: `docketalarm:${savedCase.id}:${entry.row_number || "na"}:${digest}`,
         primary_source: "docketalarm",
-        source_entry_id: String(entry.row_number || ""),
+        source_entry_id: String(entry.row_number || entry.raw?.id || digest),
         document_type: "Docket Alarm Docket Entry",
         entry_number: String(entry.row_number || ""),
         document_number: String(entry.row_number || ""),
@@ -5330,8 +5345,6 @@ export class CaseSyncService {
       };
     }
 
-    this.store.deleteDocketEntriesBySourceForRelatedCases(caseRow, "unicourt");
-
     for (const entry of payload.entries) {
       const digest = crypto
         .createHash("sha1")
@@ -5343,7 +5356,7 @@ export class CaseSyncService {
         case_id: savedCase.id,
         source_entry_key: `unicourt:${savedCase.id}:${entry.row_number || "na"}:${digest}`,
         primary_source: "unicourt",
-        source_entry_id: String(entry.row_number || ""),
+        source_entry_id: String(entry.row_number || entry.raw?.id || digest),
         document_type: "UniCourt Docket Entry",
         entry_number: String(entry.row_number || ""),
         document_number: String(entry.row_number || ""),
@@ -5521,7 +5534,9 @@ export class CaseSyncService {
           entry_number: valueOf(document.entry_number),
           document_number: valueOf(document.document_number),
           filed_at: valueOf(document.entry_date_filed, document.date_filed),
-          description: valueOf(document.short_description, document.description),
+          description: [document.description, document.short_description]
+            .filter((value) => typeof value === "string" && value.trim())
+            .sort((left, right) => right.length - left.length)[0] || null,
           absolute_url: this.courtListener.absoluteUrl(document.absolute_url),
           is_available: document.is_available ? 1 : 0,
           page_count: valueOf(document.page_count),
@@ -5629,7 +5644,7 @@ export class CaseSyncService {
     for (const entry of entries) {
       latestEntryNumber = higherOrderValue(
         latestEntryNumber,
-        valueOf(entry.document_number, entry.documentNumber, entry.entry_number, entry.entryNumber)
+        valueOf(entry.entry_number, entry.entryNumber, entry.document_number, entry.documentNumber)
       );
       latestFiledAt = laterIso(
         latestFiledAt,

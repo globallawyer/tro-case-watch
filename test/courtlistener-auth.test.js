@@ -3,6 +3,33 @@ import test from "node:test";
 
 import { CourtListenerClient } from "../src/providers/courtlistener.js";
 
+test("CourtListener retrieves all 125 docket entries across pages", async () => {
+  const client = new CourtListenerClient({ baseUrl: "https://example.test/api/rest/v4", apiToken: "test", enableDocketSync: true });
+  let calls = 0;
+  client.fetchJson = async () => {
+    calls += 1;
+    return { results: Array.from({ length: calls === 1 ? 100 : 25 }, (_, i) => ({ id: (calls - 1) * 100 + i })),
+      next: calls === 1 ? "https://example.test/api/rest/v4/docket-entries/?docket=1&cursor=next" : null };
+  };
+  assert.equal((await client.fetchDocketEntries(1)).length, 125);
+  assert.equal(calls, 2);
+});
+
+test("CourtListener rejects cyclic and cross-origin pagination instead of accepting partial data", async () => {
+  const client = new CourtListenerClient({ baseUrl: "https://example.test/api/rest/v4", apiToken: "test", enableDocketSync: true });
+  const url = "https://example.test/api/rest/v4/docket-entries/?docket=1&page_size=100";
+  client.fetchJson = async () => ({ results: [{ id: 1 }], next: url });
+  await assert.rejects(client.fetchDocketEntries(1), /pagination incomplete/);
+  client.fetchJson = async () => ({ results: [{ id: 1 }], next: "https://other.test/docket-entries/" });
+  await assert.rejects(client.fetchDocketEntries(1), /Unexpected/);
+});
+
+test("CourtListener page budgets fail visibly instead of declaring a truncated docket complete", async () => {
+  const client = new CourtListenerClient({ baseUrl: "https://example.test/api/rest/v4", apiToken: "test", enableDocketSync: true, docketEntriesMaxPages: 1 });
+  client.fetchJson = async () => ({ results: [{ id: 1 }], next: "https://example.test/api/rest/v4/docket-entries/?cursor=next" });
+  await assert.rejects(client.fetchDocketEntries(1), /pagination incomplete/);
+});
+
 test("public CourtListener searches do not send an API token", async () => {
   const originalFetch = globalThis.fetch;
   let authorization = null;

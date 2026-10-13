@@ -228,7 +228,7 @@ function extractDocketEntries(payload = {}) {
   return [];
 }
 
-function parseDocketEntries(payload, baseUrl) {
+export function parseDocketEntries(payload, baseUrl) {
   return extractDocketEntries(payload)
     .map((entry, index) => {
       const number = String(
@@ -264,7 +264,7 @@ function parseDocketEntries(payload, baseUrl) {
       }
 
       return {
-        row_number: number || String(index + 1),
+        row_number: number || null,
         filed_at: filedAt,
         description: description || `Docket entry ${index + 1}`,
         absolute_url: absoluteUrl(baseUrl, entry.url || entry.link || entry.documentUrl || entry.absolute_url),

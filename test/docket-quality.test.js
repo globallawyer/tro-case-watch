@@ -60,6 +60,75 @@ function docketEntry(caseId, source, number, description = `Docket entry ${numbe
   };
 }
 
+test("different explicit numbers remain separate despite identical motion text", () => {
+  const { directory, store } = createStore();
+  try {
+    const saved = store.upsertCase(targetCase());
+    for (const [source, number] of [["courtlistener", 10], ["signal-feed", 11]]) {
+      store.upsertDocketEntry({ ...docketEntry(saved.id, source, number,
+        "MOTION for extension of time by Example Brand regarding discovery deadlines and service [9]"), filed_at: "2026-05-01" });
+    }
+    assert.equal(store.getCase(saved.id).entries.length, 2);
+  } finally { store.db.close(); fs.rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("same-day date and timestamp copies merge and sort by actual docket number", () => {
+  const { directory, store } = createStore();
+  try {
+    const saved = store.upsertCase(targetCase());
+    store.upsertDocketEntry({ ...docketEntry(saved.id, "courtlistener", 10), filed_at: "2026-05-01" });
+    store.upsertDocketEntry({ ...docketEntry(saved.id, "signal-feed", 10), filed_at: "2026-05-01T12:00:00Z" });
+    store.upsertDocketEntry({ ...docketEntry(saved.id, "courtlistener", 11), filed_at: "2026-05-01" });
+    const entries = store.getCase(saved.id).entries;
+    assert.deepEqual(entries.map(x => x.entry_number), ["11", "10"]);
+  } finally { store.db.close(); fs.rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("partial mirror refresh preserves previous filings from the same source", async () => {
+  const { directory, store } = createStore();
+  try {
+    const saved = store.upsertCase(targetCase());
+    store.upsertDocketEntry(docketEntry(saved.id, PRIORITY_FEED_ENTRY_SOURCE, 1));
+    store.upsertDocketEntry(docketEntry(saved.id, PRIORITY_FEED_ENTRY_SOURCE, 2));
+    const service = new CaseSyncService({ config: { sync: {} }, store,
+      priorityFeed: { async enrichCase() { return { url: "https://example.test/case", entries: [{ row_number: "2", filed_at: "2026-04-12", description: "Docket entry 2" }] }; } } });
+    await service.syncSinglePriorityFeedCase(store.getCase(saved.id));
+    assert.deepEqual(new Set(store.getCase(saved.id).entries.map(x => x.entry_number)), new Set(["1", "2"]));
+  } finally { store.db.close(); fs.rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("rendered signal entries are scoped to their case even when titles and dates match", () => {
+  const { directory, store } = createStore();
+  try {
+    const service = new CaseSyncService({ config: { sync: {} }, store });
+    const result = service.ingestSignalFeedItems(["1:26-cv-26215", "1:26-cv-26216"].map((docketNumber) => ({
+      docketNumber, docketId: docketNumber, courtId: "flsd", courtName: "Southern District of Florida",
+      caseName: "Example Brand v. Schedule A Defendants", dateFiled: "2026-09-09",
+      entries: [{ entryId: "rendered:2026-09-10:order:1", title: "ORDER granting motion to seal", filedAt: "2026-09-10" }]
+    })));
+    assert.equal(result.casesUpserted, 2);
+    const rows = store.db.prepare("SELECT case_id,COUNT(*) AS n FROM docket_entries GROUP BY case_id").all();
+    assert.equal(rows.length, 2);
+    assert.ok(rows.every(x => x.n === 1));
+  } finally { store.db.close(); fs.rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("signal refresh uses a known detail URL and refuses a different court", async () => {
+  const { directory, store } = createStore();
+  try {
+    const saved = store.upsertCase(targetCase({ raw: { signal_feed: { detailUrl: "https://example.test/known-case" } } }));
+    const service = new CaseSyncService({ config: { sync: {} }, store,
+      signalFeed: { enabled: true,
+        async lookupByDocket() { throw new Error("must not search only recent cases"); },
+        async fetchKnownCase(candidate) {
+          assert.equal(candidate.detailUrl, "https://example.test/known-case");
+          return { docketNumber: candidate.docketNumber, courtId: "ilnd", entries: [] };
+        }
+      } });
+    assert.equal((await service.enrichCaseWithSignalFeed(saved.id, { force: true })).reason, "identity-mismatch");
+  } finally { store.db.close(); fs.rmSync(directory, { recursive: true, force: true }); }
+});
+
 test("coverage counts canonical docket items instead of raw source rows", () => {
   const { directory, store } = createStore();
   try {

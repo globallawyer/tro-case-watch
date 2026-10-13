@@ -815,7 +815,7 @@ function renderDetail(item) {
         <div class="timeline-toolbar-copy">
           <strong>站内直接查看案件时间线</strong>
           <p>以下 docket 已同步展示在本站，默认不要求跳转到外部来源才能看进展。</p>
-          ${coveragePending ? '<p class="focus-text">系统已识别到时间线缺口，正在后台按小批次继续补抓，不影响页面访问。</p>' : ""}
+          ${coveragePending ? '<p class="focus-text">当前时间线尚不完整；缺失条目须以法院记录核实。</p>' : ""}
         </div>
         <div class="timeline-toolbar-stats">
           <span class="tag-pill">最近案级节点 ${formatDate(item.latest_docket_filed_at || item.date_filed)}</span>
@@ -839,7 +839,7 @@ function renderDetail(item) {
         <div>
           <h3>站内 Docket 时间线</h3>
           <p>按时间倒序归档公开可见 docket 文本，适合卖家直接判断当前是否已签 TRO、是否进入 PI、是否有和解或结案信号。</p>
-          ${entriesTruncated ? '<p class="focus-text">为了先把页面打开，当前先展示最近一段时间线；完整 docket 会继续在后台补齐。</p>' : ""}
+          ${entriesTruncated ? '<p class="focus-text">当前先展示最近条目，已归档的完整时间线正在加载。</p>' : ""}
         </div>
       </div>
       ${
@@ -877,7 +877,9 @@ function renderDetail(item) {
               const signals = timelineSignals(entry)
                 .map((value) => `<span class="highlight-pill">${value}</span>`)
                 .join("");
-              const docketSequence = entry.docket_sequence || entry.entry_number || entry.document_number || "";
+              const docketSequence = Object.hasOwn(entry, "docket_sequence")
+                ? entry.docket_sequence || ""
+                : entry.entry_number || entry.document_number || "";
               const numPrefix = docketSequence ? `#${docketSequence} · ` : "序号待补 · ";
               return `
                 <article class="timeline-item">

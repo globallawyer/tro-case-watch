@@ -7,6 +7,11 @@ import {
   normalizeDocketSequenceValue
 } from "../src/docket-sequence.js";
 
+test("attachments never masquerade as parent docket entries", () => {
+  assert.equal(getDocketSequenceValue({ document_number: "6", raw: { document_type: 2, attachment_number: 1 } }), "");
+  assert.equal(getDocketSequenceValue({ entry_number: "248", document_number: "6", raw: { document_type: 2, attachment_number: 1 } }), "248");
+});
+
 test("docket sequence prefers entry number over attachment document number", () => {
   const entry = {
     entry_number: "248.0",
