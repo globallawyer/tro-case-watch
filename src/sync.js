@@ -5718,7 +5718,7 @@ export class CaseSyncService {
       docket_count: stabilizedDocketCount,
       last_seen_at: timestamp,
       last_synced_at: timestamp,
-      last_docket_sync_at: timestamp,
+      last_docket_sync_at: entries.length ? timestamp : caseRow.last_docket_sync_at,
       raw: mergedRaw
     });
 
@@ -5728,10 +5728,12 @@ export class CaseSyncService {
     }
 
     this.store.refreshCaseDocketSummary(caseRow.id);
-    this.store.touchCaseDocketSync(caseRow.id);
+    if (entries.length) {
+      this.store.touchCaseDocketSync(caseRow.id);
+    }
 
     return {
-      enriched: true,
+      enriched: entries.length > 0,
       reason: metadataOnlyMode ? "metadata-only" : entries.length ? "ok" : "empty"
     };
   }

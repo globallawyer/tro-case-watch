@@ -84,6 +84,25 @@ test("attachment-only document numbers do not inflate sequence coverage", () => 
   } finally { store.db.close(); fs.rmSync(directory, { recursive: true, force: true }); }
 });
 
+test("empty CourtListener responses never count as successful docket enrichment", async () => {
+  const { directory, store } = createStore();
+  try {
+    const saved = store.upsertCase(targetCase({ last_docket_sync_at: "2026-01-01T00:00:00Z" }));
+    const service = new CaseSyncService({ config: { sync: {} }, store,
+      courtListener: {
+        async fetchDocket() { return { docket_number: saved.docket_number }; },
+        async fetchDocketEntries() { return []; },
+        hasDocketEntriesAccess() { return true; },
+        hasDocketAlertAccess() { return false; },
+        absoluteUrl() { return null; }
+      } });
+    const result = await service.syncSingleCourtListenerDocket(saved);
+    assert.equal(result.enriched, false);
+    assert.equal(result.reason, "empty");
+    assert.equal(store.getCase(saved.id).last_docket_sync_at, saved.last_docket_sync_at);
+  } finally { store.db.close(); fs.rmSync(directory, { recursive: true, force: true }); }
+});
+
 test("same-day date and timestamp copies merge and sort by actual docket number", () => {
   const { directory, store } = createStore();
   try {
