@@ -35,6 +35,7 @@ import { DailyEmailReportService } from "./daily-report.js";
 import { TroDailyRoundupService } from "./tro-daily-roundup.js";
 import { loadTroDailyUpdates } from "./tro-daily-updates.js";
 import { getAvailableSystemMemoryMb } from "./system-memory.js";
+import { didEnrichmentComplete } from "./enrichment-outcome.js";
 import { analyzeDocketSequence, getDocketSequenceValue } from "./docket-sequence.js";
 import {
   claimWebhookEnrichmentJobState,
@@ -2800,7 +2801,9 @@ async function refreshCaseAcrossSources(caseId, {
         provider,
         ...(result && typeof result === "object" ? result : { result })
       });
-      completedProviders.push(provider);
+      if (didEnrichmentComplete(result)) {
+        completedProviders.push(provider);
+      }
       refreshCurrent();
       if (interProviderDelayMs > 0) {
         await wait(interProviderDelayMs);
@@ -2881,8 +2884,8 @@ async function refreshCaseAcrossSources(caseId, {
   }
 
   if (!stoppedReason && expandedProviders.includes(PRIORITY_FEED_SOURCE)) {
-    await runProvider(PRIORITY_FEED_SOURCE, async () => {
-      await syncService.enrichCaseWithPriorityFeed(caseId, {
+    await runProvider(PRIORITY_FEED_SOURCE, () => {
+      return syncService.enrichCaseWithPriorityFeed(caseId, {
         force: true
       });
     });

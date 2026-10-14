@@ -44,6 +44,16 @@ entry numbers and descriptions against the upstream snapshot. Check older source
 rows after a partial refresh to confirm they survive. Revisit historical signal
 cases to recover rows affected by old cross-case key collisions.
 
-On 2026-10-14, local regression tests pass. Production publication and historical
-re-ingestion must be verified separately; an unavailable SSH credential prevents
-these checks from being replaced by assumptions.
+On 2026-10-14, 72 local regression tests pass. The production checkout was updated
+from 62489c3 to 3e96612 through the hosting console, and app and worker were rebuilt
+and observed healthy. The public app.js SHA-256 matched the release exactly.
+The production code/config, online 840 MB SQLite backup, and previous image are
+retained under recovery/docket-quality-20261014-0235 and the rollback image tag.
+
+Bounded, free-source re-ingestion exposed remaining upstream limitations:
+CourtListener returned HTTP 429, and public signal discovery returned no case rows.
+Case 2523428 had 109 archived priority entries plus complementary sources; case
+5160485 had 69 title-only court-feed rows. The maximum known entry number is not
+the number of complete stored entries. Neither case is verified complete.
+No paid PACER fetching was enabled. Provider no-op results are now reported
+separately from completed enrichment instead of treating a skipped lookup as success.
