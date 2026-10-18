@@ -129,6 +129,47 @@ test("metadata-only signal results do not refresh the docket freshness clock", (
   } finally { store.db.close(); fs.rmSync(directory, { recursive: true, force: true }); }
 });
 
+test("lawfirm ingestion never merges the same short number across different courts", () => {
+  const { directory, store } = createStore();
+  try {
+    const original = store.upsertCase(targetCase({ docket_number: "26-cv-00651" }));
+    const service = new CaseSyncService({ config: { sync: {} }, store });
+    service.ingestLawFirmItems({ items: [{ sourceId: "61tro", sourceLabel: "61TRO", caseUrl: "https://61tro.com/index.php/detail/1.html", sourceCaseId: "1", courtId: "ilnd", courtName: "Northern District of Illinois", docketNumber: "26-cv-00651", caseName: "Different Brand v. Schedule A Defendants", dateFiled: "2026-10-16", entries: [] }] }, new Map());
+    assert.equal(store.getCase(original.id).court_id, "pawd");
+    assert.equal(store.getCase(original.id).case_name, "Example Brand v. Schedule A Defendants");
+  } finally { store.db.close(); fs.rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("unambiguous same-court mirror metadata preserves the known office number and freshness", () => {
+  const { directory, store } = createStore();
+  try {
+    const original = store.upsertCase(targetCase());
+    const service = new CaseSyncService({ config: { sync: {} }, store, lawFirms: { enabled: false } });
+    service.ingestLawFirmItems({ items: [{ sourceId: "61tro", sourceLabel: "61TRO", caseUrl: "https://61tro.com/index.php/detail/1.html", sourceCaseId: "1", courtId: "pawd", courtName: "Western District of Pennsylvania", docketNumber: "26-cv-00651", caseName: "Example Brand v. Schedule A Defendants", dateFiled: "2026-04-15", entries: [] }] }, new Map());
+    const row = store.getCase(original.id);
+    assert.equal(row.docket_number, "2:26-cv-00651");
+    assert.equal(row.raw["61tro"].syncedAt, null);
+    assert.ok(row.raw["61tro"].metadataCheckedAt);
+    assert.equal(store.getHydratedCases("2026-01-01").length, 1);
+    store.upsertCase(targetCase({ source_case_key: "other-office", docket_number: "3:26-cv-00651" }));
+    assert.equal(store.findCaseByCourtAndDocket({ courtId: "pawd", docketNumber: "26-cv-00651", caseName: row.case_name, allowMissingOffice: true }), null);
+  } finally { store.db.close(); fs.rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("completion cooldown exclusions cannot starve cases outside the newest candidate window", () => {
+  const { directory, store } = createStore();
+  try {
+    const oldest = store.upsertCase(targetCase({ latest_docket_filed_at: "2026-01-01", date_filed: "2026-01-01" }));
+    const excluded = [];
+    for (let index = 0; index < 360; index++) {
+      const row = store.upsertCase(targetCase({ source_case_key: `newer:${index}`, docket_number: `2:26-cv-${10000 + index}`, latest_docket_filed_at: "2026-10-18", date_filed: "2026-10-18" }));
+      excluded.push(row.id);
+    }
+    const candidates = store.getCasesNeedingSupplementalDocketSync(1, { startDate: "2026-01-01", excludeCaseIds: excluded });
+    assert.equal(candidates[0]?.id, oldest.id);
+  } finally { store.db.close(); fs.rmSync(directory, { recursive: true, force: true }); }
+});
+
 test("different explicit numbers remain separate despite identical motion text", () => {
   const { directory, store } = createStore();
   try {

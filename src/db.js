@@ -3116,7 +3116,7 @@ export class Store {
     return index;
   }
 
-  findCaseByCourtAndDocket({ courtId = "", courtName = "", docketNumber = "", startDate = "2025-01-01" } = {}) {
+  findCaseByCourtAndDocket({ courtId = "", courtName = "", docketNumber = "", startDate = "2025-01-01", allowMissingOffice = false, caseName = "" } = {}) {
     const docketKey = normalizeDocketIdentity(docketNumber);
     if (!docketKey) {
       return null;
@@ -3124,8 +3124,15 @@ export class Store {
 
     const courtIdKey = normalizeLookupText(courtId);
     const courtNameKey = normalizeCourtLookupText(courtName);
+    const leader = normalizeLookupText(String(caseName).split(/\s+v\.?\s+/i)[0]);
     const matches = this.getFastPathDocketCases(startDate, docketNumber)
-      .filter((row) => normalizeDocketIdentity(row.docket_number) === docketKey)
+      .filter((row) => {
+        const rowKey = normalizeDocketIdentity(row.docket_number);
+        if (rowKey === docketKey) return true;
+        return allowMissingOffice && (courtIdKey || courtNameKey) && !/^\d+:/.test(docketKey) &&
+          rowKey.replace(/^\d+:/, "") === docketKey && leader.length >= 8 &&
+          normalizeLookupText(String(row.case_name).split(/\s+v\.?\s+/i)[0]) === leader;
+      })
       .filter((row) => {
         if (!courtIdKey && !courtNameKey) {
           return true;
@@ -5856,11 +5863,12 @@ export class Store {
         WHERE date(date_filed) >= date(?)
           AND docket_number IS NOT NULL
           AND TRIM(docket_number) <> ''
+          AND id NOT IN (SELECT CAST(value AS INTEGER) FROM json_each(?))
           AND ${buildTargetedDocketCoverageClause()}
         ORDER BY ${CASE_PRIORITY_ACTIVITY_SQL} DESC
         LIMIT ?
       `)
-      .all(String(startDate || "2025-01-01"), candidatePoolSize)
+      .all(String(startDate || "2025-01-01"), JSON.stringify([...excludedIds]), candidatePoolSize)
       .map(buildCaseView)
       .filter((row) => !excludedIds.has(Number(row.id)));
     const entryCounts = this.getEntryCoverageForCaseIds(candidateRows.map((row) => row.id));

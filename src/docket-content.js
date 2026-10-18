@@ -2,7 +2,8 @@ export const TITLE_ONLY_DOCKET_LABELS = [
   "docket entry", "complaint", "summons", "temporary restraining order",
   "leave to file document", "motion", "order", "notice", "judgment", "minute entry",
   "civil cover sheet", "cover sheet", "corporate disclosure statement",
-  "certificate of service", "return of service", "notice of appearance"
+  "certificate of service", "return of service", "notice of appearance",
+  "seal document", "file excess pages", "order on motion for leave to file"
 ];
 
 export function getDocketContentStatus(entry = {}) {

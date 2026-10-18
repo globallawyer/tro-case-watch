@@ -2720,7 +2720,10 @@ export class CaseSyncService {
           courtName: item.courtName,
           docketNumber: item.docketNumber
         }) ||
-        this.store.findCaseByDocketNumber(item.docketNumber, getDiscoveryStartDate(this.config)) ||
+        this.store.findCaseByCourtAndDocket({
+          courtId: item.courtId, courtName: item.courtName, docketNumber: item.docketNumber,
+          caseName: item.caseName, allowMissingOffice: true, startDate: getDiscoveryStartDate(this.config)
+        }) ||
         null;
       const existedBeforeRun = Boolean(existingCase?.id) && !createdCaseIds.has(Number(existingCase.id));
       const tags = this.augmentLawFirmTags(item, this.classifyLawFirmItem(item));
@@ -2755,7 +2758,8 @@ export class CaseSyncService {
             courtName: item.courtName || null,
             dateFiled: item.dateFiled || null,
             entryCount: asArray(item.entries).length,
-            syncedAt: item.syncedAt || timestamp,
+            syncedAt: asArray(item.entries).length ? (item.syncedAt || timestamp) : (existingCase?.raw?.law_firm_sites?.[item.sourceId]?.syncedAt || null),
+            metadataCheckedAt: timestamp,
             note: sourceResult.note || null,
             rawMeta: item.rawMeta || {}
           }
@@ -2766,7 +2770,8 @@ export class CaseSyncService {
           sourceCaseId: item.sourceCaseId,
           title: item.title || item.caseName || null,
           entryCount: asArray(item.entries).length,
-          syncedAt: item.syncedAt || timestamp
+          syncedAt: asArray(item.entries).length ? (item.syncedAt || timestamp) : (existingCase?.raw?.[item.sourceId]?.syncedAt || null),
+          metadataCheckedAt: timestamp
         }
       };
 
@@ -2781,7 +2786,7 @@ export class CaseSyncService {
         court_id: item.courtId || existingCase?.court_id || null,
         court_name: item.courtName || existingCase?.court_name || null,
         case_name: item.caseName || existingCase?.case_name || null,
-        docket_number: item.docketNumber || existingCase?.docket_number || null,
+        docket_number: existingCase?.docket_number || item.docketNumber || null,
         date_filed:
           existingCase?.date_filed ||
           item.dateFiled ||

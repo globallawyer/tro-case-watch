@@ -53,6 +53,8 @@ function normalizePdfTitle(value) {
 }
 
 function parseUsDate(value) {
+  const iso = cleanText(value).match(/\b(20\d{2}-\d{2}-\d{2})\b/);
+  if (iso) return iso[1];
   const match = String(value || "").match(/\b(\d{1,2})\/(\d{1,2})\/(\d{4})\b/);
   if (!match) {
     return null;
@@ -480,6 +482,8 @@ function build61troLookupHints({ caseName = "", plaintiffs = [], firms = [] } = 
 }
 
 function extract61troTextValue(html, label) {
+  const modern = String(html || "").match(new RegExp(`class=["'][^"']*\\bdi-label\\b[^"']*["'][^>]*>\\s*${label}\\s*<\\/div>\\s*<div[^>]*>([\\s\\S]*?)<\\/div>`, "i"));
+  if (modern) return cleanText(modern[1]);
   const match = String(html || "").match(new RegExp(`${label}[：:]([\\s\\S]*?)<\\/span>`, "i"));
   return cleanText(match?.[1] || "");
 }
@@ -628,6 +632,20 @@ function parse61troEntries(html) {
   const entries = [];
   let index = 0;
 
+  for (const match of String(html || "").matchAll(/<div\b[^>]*class=["'][^"']*\btl-item\b[^"']*["'][^>]*>([\s\S]*?)(?=<div\b[^>]*class=["'][^"']*\btl-item\b|<aside\b|<\/section>|$)/gi)) {
+    const block = match[1];
+    const description = cleanText(block.match(/class=["'][^"']*\btl-title\b[^"']*["'][^>]*>([\s\S]*?)<\/div>/i)?.[1] || "");
+    const filedAt = parseUsDate(block.match(/class=["'][^"']*\btl-date\b[^"']*["'][^>]*>([\s\S]*?)<\/div>/i)?.[1] || "");
+    if (!description) continue;
+    const sourceEntryId = match[0].match(/data-info-id=["'](\d+)["']/i)?.[1];
+    entries.push({
+      sourceEntryId: sourceEntryId || `${filedAt || "unknown"}:${normalizeLookupText(description)}`,
+      entryNumber: null, documentNumber: null, documentType: "Docket Entry",
+      description, filedAt, absoluteUrl: null
+    });
+  }
+  if (entries.length) return entries;
+
   for (const match of String(html || "").matchAll(/<div class="layui-timeline-item">([\s\S]*?)<\/div>\s*<\/div>/gi)) {
     const block = match[1];
     const filedAt = parseUsDate(String(block).match(/layui-timeline-title">([\s\S]*?)<\/h3>/i)?.[1] || "");
@@ -656,7 +674,7 @@ function parse61troEntries(html) {
   return entries;
 }
 
-function parse61troCasePage(html, url, source) {
+export function parse61troCasePage(html, url, source) {
   const title = cleanText(String(html || "").match(/<title>([\s\S]*?)<\/title>/i)?.[1] || "");
   if (/页面未找到|页面不存在|安全验证|访问验证|page not found|404 not found|access denied/i.test(title)) return null;
   const docketNumber =
@@ -667,9 +685,10 @@ function parse61troCasePage(html, url, source) {
   }
 
   const caseName =
+    cleanText(String(html || "").match(/<section[^>]*class=["'][^"']*\bcase-hero\b[^"']*["'][^>]*>[\s\S]*?<h1[^>]*>([\s\S]*?)<\/h1>/i)?.[1] || "") ||
     cleanText(String(html || "").match(/<div class="post__options">[\s\S]*?<h4>([\s\S]*?)<\/h4>/i)?.[1] || "") ||
     cleanCaseName(title);
-  const rawCourtName = extract61troTextValue(html, "法院");
+  const rawCourtName = extract61troTextValue(html, "所属法院") || extract61troTextValue(html, "法院");
   const courtMeta = resolve61troCourtMeta(url, rawCourtName);
   const entries = parse61troEntries(html);
   const latestEntry = entries[0] || entries[entries.length - 1] || null;
@@ -678,14 +697,14 @@ function parse61troCasePage(html, url, source) {
     .filter((entry) => entry?.filedAt)
     .sort((left, right) => String(left.filedAt || "").localeCompare(String(right.filedAt || "")))[0] || null;
   const updatedAt = cleanText(String(html || "").match(/最近更新：([\d-]{10})/i)?.[1] || "");
-  const brand = extract61troTextValue(html, "品牌");
-  const state = extract61troTextValue(html, "州");
-  const lawFirm = extract61troTextValue(html, "律所");
+  const brand = extract61troTextValue(html, "维权品牌") || extract61troTextValue(html, "品牌");
+  const state = extract61troTextValue(html, "所在州") || extract61troTextValue(html, "州");
+  const lawFirm = extract61troTextValue(html, "原告律所") || extract61troTextValue(html, "律所");
 
   return {
     sourceId: source.id,
     sourceLabel: source.label,
-    lawFirm: source.lawFirm,
+    lawFirm: lawFirm && lawFirm !== "-" ? lawFirm : null,
     sourceCaseId: url,
     caseUrl: normalizePageUrl(url),
     title,
@@ -694,7 +713,7 @@ function parse61troCasePage(html, url, source) {
     courtCode: "",
     courtId: courtMeta.courtId || null,
     courtName: courtMeta.courtName || rawCourtName || "",
-    dateFiled: earliestEntry?.filedAt || null,
+    dateFiled: parseUsDate(extract61troTextValue(html, "立案日期")) || earliestEntry?.filedAt || null,
     summary: latestEntry?.description || `最近更新：${updatedAt || "未知"}`,
     latestDocketNumber: null,
     entries,
@@ -1332,6 +1351,16 @@ export class LawFirmClient {
   }
 
   async lookup61troByDocket(source, docketNumber, { courtName = "", caseName = "", plaintiffs = [], firms = [] } = {}) {
+    const currentSearch = `${source.baseUrl}/index.php/tro.html?q=${encodeURIComponent(build61troSearchTerms(docketNumber)[0])}`;
+    try {
+      const html = await this.fetchText(currentSearch);
+      const links = extract61troDetailLinks(html, source.baseUrl).filter((link) =>
+        normalizeDocketLookupCoreKey(link.title) === normalizeDocketLookupCoreKey(docketNumber));
+      const item = await findMatching61troItemFromDetailCandidates(this, source, links, docketNumber, { courtName });
+      if (item) return item;
+    } catch {
+      // Older deployments may only expose the legacy routes below.
+    }
     for (const detailUrl of build61troDirectViewCandidateUrls(source, docketNumber, { courtName })) {
       let pageHtml = "";
       try {
