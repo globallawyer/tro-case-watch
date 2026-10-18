@@ -1,4 +1,5 @@
 import { PRIORITY_FEED_BASE_URL, PRIORITY_FEED_PUBLIC_LABEL, getPriorityFeedRaw, sourceUrlUsesPriorityFeed } from "../priority-feed.js";
+import { parseDocketDate } from "../docket-date.js";
 
 function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -134,14 +135,7 @@ function deriveStateCode(caseRow) {
   return null;
 }
 
-function parseDate(value) {
-  const match = String(value || "").match(/(\d{2})\/(\d{2})\/(\d{4})/);
-  if (!match) {
-    return null;
-  }
-
-  return `${match[3]}-${match[1]}-${match[2]}`;
-}
+function parseDate(value) { return parseDocketDate(value); }
 
 function buildShortDocket(year, serial) {
   const normalizedYear = String(year || "").replace(/[^\d]/g, "");

@@ -25,7 +25,8 @@ import {
   sourceUrlUsesPriorityFeed
 } from "./priority-feed.js";
 import { getDocketSequenceValue } from "./docket-sequence.js";
-import { docketContentScore, TITLE_ONLY_DOCKET_LABELS } from "./docket-content.js";
+import { docketContentScore, getDocketContentStatus } from "./docket-content.js";
+import { normalizeDocketFiledAt } from "./docket-date.js";
 
 function nowIso() {
   return new Date().toISOString();
@@ -1295,6 +1296,7 @@ function hydrateEntry(row) {
 
   return {
     ...row,
+    filed_at: normalizeDocketFiledAt(row.filed_at),
     raw: parseJson(row.raw_json, {})
   };
 }
@@ -1753,7 +1755,8 @@ function buildStoredEntryDeduplicationKey(entry) {
   }
 
   const absoluteUrl = normalizeEntryUrlKey(entry?.absolute_url);
-  if (absoluteUrl) {
+  const caseLevelUrl = /\/(?:public\/case|cases?|docket|detail|view\/id)\/|\/case-[^/]*\.html|DktRpt\.pl/i.test(absoluteUrl);
+  if (absoluteUrl && (!caseLevelUrl || /\.(?:pdf|docx?)(?:$|[?#])/i.test(absoluteUrl))) {
     return `${caseId}|${primarySource}|url:${absoluteUrl}`;
   }
 
@@ -1988,6 +1991,9 @@ function mergeDisplayEntries(existing = null, incoming = null) {
 
 function buildMergedDocketEntryRecord(existing = null, record = {}, timestamp = nowIso()) {
   const mergedRaw = mergeNestedObjects(existing?.raw || {}, record.raw || {});
+  const existingFiledAt = normalizeDocketFiledAt(existing?.filed_at);
+  const incomingFiledAt = normalizeDocketFiledAt(record.filed_at);
+  if (record.filed_at && !incomingFiledAt) mergedRaw.rejected_filed_at = record.filed_at;
   return {
     case_id: Number(record.case_id || existing?.case_id || 0),
     source_entry_key: record.source_entry_key || existing?.source_entry_key,
@@ -1996,7 +2002,7 @@ function buildMergedDocketEntryRecord(existing = null, record = {}, timestamp = 
     document_type: pickPreferredEntryType(existing?.document_type, record.document_type),
     entry_number: pickPreferredEntryNumber(existing?.entry_number, record.entry_number),
     document_number: pickPreferredEntryNumber(existing?.document_number, record.document_number),
-    filed_at: laterIso(existing?.filed_at, record.filed_at) || existing?.filed_at || record.filed_at || null,
+    filed_at: laterIso(existingFiledAt, incomingFiledAt),
     description: pickPreferredEntryDescription(existing?.description, record.description),
     description_zh: existing?.description_zh || record.description_zh || null,
     absolute_url: pickPreferredEntryUrl(existing?.absolute_url, record.absolute_url),
@@ -3506,7 +3512,7 @@ export class Store {
       case_name_zh: preferLongerNormalizedValue(existing?.case_name_zh, record.case_name_zh, normalizeText),
       docket_number: pickPreferredDocketNumber(existing?.docket_number, record.docket_number),
       docket_url: record.docket_url || existing?.docket_url || null,
-      date_filed: record.date_filed || existing?.date_filed || null,
+      date_filed: normalizeDocketFiledAt(record.date_filed) || normalizeDocketFiledAt(existing?.date_filed),
       date_terminated: record.date_terminated || existing?.date_terminated || null,
       cause: record.cause || existing?.cause || null,
       nature_of_suit: record.nature_of_suit || existing?.nature_of_suit || null,
@@ -3525,7 +3531,7 @@ export class Store {
         record.recent_activity_summary_zh,
         normalizeText
       ),
-      latest_docket_filed_at: laterIso(record.latest_docket_filed_at, existing?.latest_docket_filed_at),
+      latest_docket_filed_at: laterIso(normalizeDocketFiledAt(record.latest_docket_filed_at), normalizeDocketFiledAt(existing?.latest_docket_filed_at)),
       latest_docket_number: higherOrderValue(record.latest_docket_number, existing?.latest_docket_number),
       docket_count: Math.max(Number(record.docket_count ?? 0), Number(existing?.docket_count ?? 0)),
       last_seen_at: laterIso(record.last_seen_at, existing?.last_seen_at),
@@ -5176,8 +5182,17 @@ export class Store {
 
     const chunkSize = 900;
     const coverage = new Map();
+    if (!this.docketContentFunctionRegistered) {
+      this.db.function("docket_has_descriptive_content", { deterministic: true }, (description, descriptionZh, documentType) =>
+        getDocketContentStatus({ description, description_zh: descriptionZh, document_type: documentType }) === "descriptive" ? 1 : 0);
+      this.docketContentFunctionRegistered = true;
+    }
     const numericOrderSql = `
       CASE
+        WHEN primary_source = 'courtfeed' AND json_valid(raw_json)
+          AND COALESCE(json_extract(raw_json, '$.sequenceNumber'), '') <> ''
+          AND COALESCE(json_extract(raw_json, '$.documentNumber'), '') = ''
+        THEN NULL
         WHEN TRIM(COALESCE(entry_number, '')) = ''
           AND json_valid(raw_json)
           AND (
@@ -5198,13 +5213,7 @@ export class Store {
         ELSE 'text:' || COALESCE(filed_at, '') || '|' || lower(trim(COALESCE(description, '')))
       END
     `;
-    const contentTextSql = "trim(COALESCE(NULLIF(description, ''), description_zh, ''))";
-    const titleOnlyLabelsSql = TITLE_ONLY_DOCKET_LABELS.map((label) => `'${label.replaceAll("'", "''")}'`).join(", ");
-    const substantiveSql = `${contentTextSql} <> ''
-      AND ${contentTextSql} NOT LIKE '[%]'
-      AND lower(${contentTextSql}) <> lower(trim(COALESCE(document_type, '')))
-      AND lower(${contentTextSql}) NOT IN (${titleOnlyLabelsSql})
-      AND NOT (lower(${contentTextSql}) GLOB 'docket entry [0-9]*' AND substr(lower(${contentTextSql}), 14) NOT GLOB '*[^0-9]*')`;
+    const substantiveSql = "docket_has_descriptive_content(description, description_zh, document_type) = 1";
 
     for (let index = 0; index < ids.length; index += chunkSize) {
       const chunk = ids.slice(index, index + chunkSize);
@@ -6043,7 +6052,8 @@ export class Store {
         );
         const currentYearGapWeight = getCurrentYearGapPriorityWeight(row, coverage, expectedEntries);
         const gap = Math.max(0, expectedEntries - coverage.totalEntries);
-        const syncedAt = row.raw?.pacermonitor?.syncedAt ? Date.parse(row.raw.pacermonitor.syncedAt) : 0;
+        const attemptAt = row.raw?.pacermonitor?.checkedAt || row.raw?.pacermonitor?.syncedAt;
+        const syncedAt = attemptAt ? Date.parse(attemptAt) : 0;
         const state = String(row.raw?.pacermonitor?.state || "").toLowerCase();
         const isBlockedFresh =
           (state === "challenge" || state === "rate_limited") &&

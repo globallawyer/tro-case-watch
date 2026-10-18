@@ -1,4 +1,5 @@
-import { normalizeDocket, normalizeText } from "../insights.js";
+import { normalizeDocket, normalizeText, normalizeDocketIdentity } from "../insights.js";
+import { parseDocketDate } from "../docket-date.js";
 
 function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -24,13 +25,34 @@ function cleanText(value) {
   return decodeHtml(stripTags(value)).replace(/\s+/g, " ").trim();
 }
 
-function parseFiledAt(value) {
-  const match = String(value || "").match(/\b(\d{2})\/(\d{2})\/(\d{4})\b/);
-  if (!match) {
-    return null;
-  }
-
-  return `${match[3]}-${match[1]}-${match[2]}`;
+export function verifyPacerMonitorIdentity(html, caseRow) {
+  const title = cleanText(String(html).match(/<title>([\s\S]*?)<\/title>/i)?.[1] || "");
+  const docketMatch = title.match(/\(((?:\d+:)?(?:20)?\d{2}-cv-\d{3,6})\)/i);
+  const docket = docketMatch?.[1];
+  if (!docket) return null;
+  const actualDocket = normalizeDocketIdentity(docket);
+  const expectedDocket = normalizeDocketIdentity(caseRow.docket_number);
+  const missingOffice = !/^\d+:/.test(expectedDocket);
+  if (actualDocket !== expectedDocket && !(missingOffice && actualDocket.replace(/^\d+:/, "") === expectedDocket)) return null;
+  const court = title.slice(docketMatch.index + docketMatch[0].length);
+  const courtWords = value => normalizeText(expandCourtAbbreviations(value)).replace(/[^a-z0-9]+/g, " ").split(/\s+/)
+    .filter(word => word && !["united", "states", "district", "court", "of", "the"].includes(word)).sort().join(" ");
+  const expectedCourt = courtWords(caseRow.court_name || "");
+  const actualCourt = courtWords(court);
+  const caseName = title.slice(0, docketMatch.index).trim();
+  if (!expectedCourt) return null;
+  if (missingOffice) {
+    const leader = value => normalizeText(String(value).split(/\s+v\.?\s+/i)[0]).replace(/[^a-z0-9]/g, "");
+    const expectedLeader = leader(caseRow.case_name);
+    const actualLeader = leader(caseName);
+    if (expectedLeader.length < 8 || expectedLeader !== actualLeader) return null;
+    if (!expectedCourt.split(" ").every(word => actualCourt.split(" ").includes(word))) return null;
+  } else if (actualCourt !== expectedCourt) return null;
+  const district = { northern: "nd", southern: "sd", eastern: "ed", western: "wd", central: "cd", middle: "md" };
+  const direction = actualCourt.split(" ").find(word => district[word]);
+  const stateCode = String(caseRow.court_id || "").slice(0, 2);
+  return { docketNumber: actualDocket, caseName, courtName: court.replace(/^[,\s]+/, "").trim(),
+    courtId: stateCode.length === 2 ? stateCode + (direction ? district[direction] : "d") : null };
 }
 
 function canonicalizeUrl(value) {
@@ -322,9 +344,10 @@ export class PacerMonitorAdapter {
     const caseUrl = lookup.url;
     const page = await this.fetchPage(caseUrl);
     const text = page.text || "";
-    if (page.status === 429 || this.isChallengePage(text)) {
+    const blockedState = lookupBlockedState(page) || (this.isChallengePage(text) ? "challenge" : null);
+    if (blockedState) {
       return {
-        state: page.status === 429 ? "rate_limited" : "challenge",
+        state: blockedState,
         url: caseUrl,
         title: this.extractTitle(text),
         entries: [],
@@ -335,7 +358,7 @@ export class PacerMonitorAdapter {
     const payload = this.parseCasePage(text, caseUrl, caseRow);
     return {
       ...payload,
-      state: payload.entries.length ? "ok" : "empty",
+      state: payload.state || (payload.entries.length ? "ok" : "empty"),
       syncedAt: new Date().toISOString()
     };
   }
@@ -457,14 +480,24 @@ export class PacerMonitorAdapter {
   }
 
   parseCasePage(html, pageUrl, caseRow) {
+    const identity = caseRow.docket_number ? verifyPacerMonitorIdentity(html, caseRow) : null;
+    if (caseRow.docket_number && !identity) {
+      return { url: pageUrl, title: this.extractTitle(html), entries: [], state: "identity-mismatch" };
+    }
     const entries = [];
     let lastEntry = null;
-    const rowPattern = /<tr[^>]*class="([^"]*\bdocketItem(?:Row|RowService|AttachService)\b[^"]*)"[^>]*>([\s\S]*?)<\/tr>/gi;
+    let headerDate = null;
+    const rowPattern = /<tr[^>]*class="([^"]*\b(?:docketHeaderRow|docketItem(?:Row|RowService|AttachService))\b[^"]*)"[^>]*>([\s\S]*?)<\/tr>/gi;
     let match;
 
     while ((match = rowPattern.exec(html)) !== null) {
       const className = String(match[1] || "");
       const rowHtml = String(match[2] || "");
+      if (/\bdocketHeaderRow\b/.test(className)) {
+        headerDate = parseDocketDate(cleanText(rowHtml));
+        lastEntry = null;
+        continue;
+      }
       const number = cleanText(
         rowHtml.match(/<td[^>]*class="[^"]*\bdocketItemNum\b[^"]*"[^>]*>([\s\S]*?)<\/td>/i)?.[1]
       );
@@ -476,12 +509,17 @@ export class PacerMonitorAdapter {
         continue;
       }
 
-      if (className.includes("docketItemAttachService") && lastEntry) {
-        lastEntry.description = `${lastEntry.description} 附件: ${text}`;
+      if (className.includes("docketItemAttachService")) {
+        if (lastEntry) lastEntry.description = `${lastEntry.description} 附件: ${text}`;
         continue;
       }
 
-      const filedAt = parseFiledAt(text);
+      const dateCell = rowHtml.match(/<td[^>]*class=["'][^"']*\bdocketItemDate\b[^"']*["'][^>]*>([\s\S]*?)<\/td>/i)?.[0] || "";
+      const dateAttributes = [...dateCell.matchAll(/(?:datetime|data-date|data-filed-at|title)=["']([^"']+)["']/gi)]
+        .map(item => decodeHtml(item[1]));
+      // Only explicit years are accepted; an ongoing case can span several years.
+      const filedAt = [cleanText(dateCell), ...dateAttributes, headerDate]
+        .map(parseDocketDate).find(Boolean) || null;
       const entry = {
         row_number: number || null,
         filed_at: filedAt,
@@ -501,6 +539,7 @@ export class PacerMonitorAdapter {
       title,
       metaDescription: metaDescription || null,
       caseName: caseRow.case_name || null,
+      identity,
       entries
     };
   }

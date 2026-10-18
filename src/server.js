@@ -2488,7 +2488,8 @@ function shouldHydratePacerMonitorOnDemand(item = {}) {
     return false;
   }
 
-  const syncedAt = item.raw?.pacermonitor?.syncedAt ? Date.parse(item.raw.pacermonitor.syncedAt) : 0;
+  const attemptAt = item.raw?.pacermonitor?.checkedAt || item.raw?.pacermonitor?.syncedAt;
+  const syncedAt = attemptAt ? Date.parse(attemptAt) : 0;
   const state = String(item.raw?.pacermonitor?.state || "").toLowerCase();
   const retryHours =
     state === "challenge" || state === "rate_limited"
@@ -3244,7 +3245,7 @@ function serializePublicEntry(entry = {}) {
   return {
     id: entry.id,
     filed_at: entry.filed_at || null,
-    entry_number: normalizeDisplayNumber(entry.entry_number),
+    entry_number: getDocketSequenceValue(entry) ? normalizeDisplayNumber(entry.entry_number) : null,
     document_number: normalizeDisplayNumber(entry.document_number),
     docket_sequence: getDocketSequenceValue(entry) || null,
     content_status: getDocketContentStatus(entry),

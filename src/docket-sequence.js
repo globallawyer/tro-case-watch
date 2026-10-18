@@ -17,6 +17,7 @@ export function normalizeDocketSequenceValue(value) {
 
 export function getDocketSequenceValue(entry = {}) {
   const raw = entry.raw || {};
+  if (entry.primary_source === "courtfeed" && raw.sequenceNumber && !raw.documentNumber) return "";
   const documentType = raw.document_type ?? raw.documentType;
   const isAttachment = Number(documentType) === 2 ||
     Number(raw.attachment_number || raw.attachmentNumber || 0) > 0;

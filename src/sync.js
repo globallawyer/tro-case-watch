@@ -2371,7 +2371,7 @@ export class CaseSyncService {
         primary_source: "courtfeed",
         source_entry_id: item.sequenceNumber || item.documentNumber || item.guid,
         document_type: item.documentType || "Court RSS Entry",
-        entry_number: item.documentNumber || item.sequenceNumber || null,
+        entry_number: item.documentNumber || null,
         document_number: item.documentNumber || null,
         filed_at: item.filedAt,
         description: item.description || item.documentType || item.title,
@@ -4326,7 +4326,8 @@ export class CaseSyncService {
         return { enriched: false, reason: "not-applicable" };
       }
 
-      const syncedAt = caseRow.raw?.pacermonitor?.syncedAt ? Date.parse(caseRow.raw.pacermonitor.syncedAt) : 0;
+      const attemptAt = caseRow.raw?.pacermonitor?.checkedAt || caseRow.raw?.pacermonitor?.syncedAt;
+      const syncedAt = attemptAt ? Date.parse(attemptAt) : 0;
       const state = String(caseRow.raw?.pacermonitor?.state || "").toLowerCase();
       const retryHours =
         state === "challenge" || state === "rate_limited"
@@ -4337,7 +4338,7 @@ export class CaseSyncService {
       const staleAfterMs = retryHours * 60 * 60 * 1000;
 
       if (!force && syncedAt && Date.now() - syncedAt < staleAfterMs) {
-        return { enriched: false, reason: "fresh" };
+        return { enriched: false, reason: state === "ok" ? "fresh" : "cooldown" };
       }
 
       return this.syncSinglePacerMonitorCase(caseRow);
@@ -5018,17 +5019,20 @@ export class CaseSyncService {
     if (!payload) {
       return { enriched: false, reason: "not-applicable" };
     }
+    const identity = payload.entries?.length ? payload.identity : null;
 
     const mergedRaw = {
       ...(caseRow.raw || {}),
       pacermonitor: {
         ...(caseRow.raw?.pacermonitor || {}),
-        caseUrl: payload.url || caseRow.raw?.pacermonitor?.caseUrl || null,
+        caseUrl: payload.state === "identity-mismatch" ? (caseRow.raw?.pacermonitor?.caseUrl || null) : (payload.url || caseRow.raw?.pacermonitor?.caseUrl || null),
         title: payload.title || null,
         metaDescription: payload.metaDescription || null,
-        rowCount: payload.entries?.length || 0,
+        rowCount: payload.entries?.length || caseRow.raw?.pacermonitor?.rowCount || 0,
+        lastAttemptEntryCount: payload.entries?.length || 0,
         state: payload.state || "empty",
-        syncedAt: payload.syncedAt || timestamp
+        checkedAt: payload.syncedAt || timestamp,
+        syncedAt: payload.entries?.length ? (payload.syncedAt || timestamp) : (caseRow.raw?.pacermonitor?.syncedAt || null)
       }
     };
 
@@ -5038,10 +5042,10 @@ export class CaseSyncService {
       source_case_id: caseRow.source_case_id,
       courtlistener_docket_id: caseRow.courtlistener_docket_id,
       pacer_case_id: caseRow.pacer_case_id,
-      court_id: caseRow.court_id,
-      court_name: caseRow.court_name,
-      case_name: caseRow.case_name,
-      docket_number: caseRow.docket_number,
+      court_id: identity?.courtId || caseRow.court_id,
+      court_name: identity?.courtName || caseRow.court_name,
+      case_name: identity?.caseName || caseRow.case_name,
+      docket_number: identity?.docketNumber || caseRow.docket_number,
       date_filed: caseRow.date_filed,
       date_terminated: caseRow.date_terminated,
       cause: caseRow.cause,
@@ -5049,7 +5053,7 @@ export class CaseSyncService {
       status: caseRow.status,
       tags_marker: caseRow.tags_marker,
       docket_url: caseRow.docket_url,
-      source_urls: [...(caseRow.source_urls || []), payload.url].filter(Boolean),
+      source_urls: [...(caseRow.source_urls || []), payload.state === "identity-mismatch" ? null : payload.url].filter(Boolean),
       plaintiffs: caseRow.plaintiffs || [],
       defendants: caseRow.defendants || [],
       recent_activity_summary: payload.entries?.[0]?.description || caseRow.recent_activity_summary,
