@@ -9,6 +9,9 @@ test("content quality distinguishes titles from substantive short docket text", 
   assert.equal(getDocketContentStatus({ description: "[Temporary Restraining Order]" }), "title-only");
   assert.equal(getDocketContentStatus({ description: "Report on Filing of Patent/Trademark Action", document_type: "Report on Filing of Patent/Trademark Action" }), "title-only");
   assert.equal(getDocketContentStatus({ description: "ORDER: Defendant must respond by October 20." }), "descriptive");
+  assert.equal(getDocketContentStatus({ description: "CIVIL Cover Sheet", document_type: "Docket Entry" }), "title-only");
+  assert.equal(getDocketContentStatus({ description: "Docket entry 125" }), "title-only");
+  assert.equal(getDocketContentStatus({ description: "ATTORNEY Appearance for Plaintiff Eicher Motors Limited by Michael A. Hierl" }), "descriptive");
 });
 
 test("priority source verification pages are failures rather than empty dockets", () => {

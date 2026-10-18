@@ -104,6 +104,20 @@ test("a continuous run of RSS titles still needs content completion", () => {
   } finally { store.db.close(); fs.rmSync(directory, { recursive: true, force: true }); }
 });
 
+test("coverage retains generic cover sheets and numbered placeholder labels as content gaps", () => {
+  const { directory, store } = createStore();
+  try {
+    const saved = store.upsertCase(targetCase());
+    store.upsertDocketEntry(docketEntry(saved.id, "signal-feed", 1, "CIVIL Cover Sheet"));
+    store.upsertDocketEntry(docketEntry(saved.id, "signal-feed", 2, "Docket entry 2"));
+    store.upsertDocketEntry(docketEntry(saved.id, "signal-feed", 3, "ORDER: Defendant must respond by October 20."));
+    const coverage = store.getEntryCoverageForCaseIds([saved.id]).get(saved.id);
+    assert.equal(coverage.descriptiveEntries, 1);
+    assert.equal(coverage.titleOnlyEntries, 2);
+    assert.equal(coverage.hasContentGap, true);
+  } finally { store.db.close(); fs.rmSync(directory, { recursive: true, force: true }); }
+});
+
 test("metadata-only signal results do not refresh the docket freshness clock", () => {
   const { directory, store } = createStore();
   try {

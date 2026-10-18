@@ -3,6 +3,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 const { Store } = await import(pathToFileURL(path.join(process.cwd(), "src/db.js")));
 const { analyzeDocketSequence, getDocketSequenceValue } = await import(pathToFileURL(path.join(process.cwd(), "src/docket-sequence.js")));
+const { getDocketContentStatus } = await import(pathToFileURL(path.join(process.cwd(), "src/docket-content.js")));
 
 const db = new DatabaseSync("/app/data/tro-watch.sqlite", { readOnly: true });
 const store = Object.create(Store.prototype);
@@ -25,6 +26,7 @@ const output = cases.map((row) => {
     entries: entries.map((entry) => ({
       id: entry.id, number: getDocketSequenceValue(entry), filed: entry.filed_at,
       source: entry.primary_source, text: entry.description, url: entry.absolute_url,
+      documentType: entry.document_type, contentStatus: getDocketContentStatus(entry),
       raw: entry.raw
     }))
   };

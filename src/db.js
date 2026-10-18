@@ -25,7 +25,7 @@ import {
   sourceUrlUsesPriorityFeed
 } from "./priority-feed.js";
 import { getDocketSequenceValue } from "./docket-sequence.js";
-import { docketContentScore } from "./docket-content.js";
+import { docketContentScore, TITLE_ONLY_DOCKET_LABELS } from "./docket-content.js";
 
 function nowIso() {
   return new Date().toISOString();
@@ -5192,10 +5192,12 @@ export class Store {
       END
     `;
     const contentTextSql = "trim(COALESCE(NULLIF(description, ''), description_zh, ''))";
+    const titleOnlyLabelsSql = TITLE_ONLY_DOCKET_LABELS.map((label) => `'${label.replaceAll("'", "''")}'`).join(", ");
     const substantiveSql = `${contentTextSql} <> ''
       AND ${contentTextSql} NOT LIKE '[%]'
       AND lower(${contentTextSql}) <> lower(trim(COALESCE(document_type, '')))
-      AND lower(${contentTextSql}) NOT IN ('docket entry', 'complaint', 'summons', 'temporary restraining order', 'leave to file document', 'motion', 'order', 'notice', 'judgment', 'minute entry')`;
+      AND lower(${contentTextSql}) NOT IN (${titleOnlyLabelsSql})
+      AND NOT (lower(${contentTextSql}) GLOB 'docket entry [0-9]*' AND substr(lower(${contentTextSql}), 14) NOT GLOB '*[^0-9]*')`;
 
     for (let index = 0; index < ids.length; index += chunkSize) {
       const chunk = ids.slice(index, index + chunkSize);

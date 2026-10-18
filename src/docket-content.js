@@ -1,3 +1,10 @@
+export const TITLE_ONLY_DOCKET_LABELS = [
+  "docket entry", "complaint", "summons", "temporary restraining order",
+  "leave to file document", "motion", "order", "notice", "judgment", "minute entry",
+  "civil cover sheet", "cover sheet", "corporate disclosure statement",
+  "certificate of service", "return of service", "notice of appearance"
+];
+
 export function getDocketContentStatus(entry = {}) {
   const text = String(entry.description || entry.description_zh || "").trim();
   if (!text) return "missing";
@@ -5,7 +12,8 @@ export function getDocketContentStatus(entry = {}) {
   const type = String(entry.document_type || "").trim();
   if (/^\[[^\[\]\n]+\]$/.test(text) ||
       (type && plain.toLowerCase() === type.toLowerCase()) ||
-      /^(?:docket entry(?:\s+\d+)?|complaint|summons|temporary restraining order|leave to file document|motion|order|notice|judgment|minute entry)$/i.test(plain)) {
+      TITLE_ONLY_DOCKET_LABELS.includes(plain.toLowerCase()) ||
+      /^docket entry\s+\d+$/i.test(plain)) {
     return "title-only";
   }
   return "descriptive";

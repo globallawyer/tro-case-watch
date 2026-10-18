@@ -3308,7 +3308,7 @@ function serializePublicCaseDetail(item = {}) {
           pending: Boolean(item.hydration_pending.pending)
         }
       : null,
-    entries_sequential: !item.entries_truncated && sequence.isComplete,
+    entries_sequential: !item.entries_truncated && sequence.isComplete && sequence.unnumberedEntryCount === 0,
     entries: serializedEntries
   };
 }
