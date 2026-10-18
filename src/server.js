@@ -36,6 +36,7 @@ import { TroDailyRoundupService } from "./tro-daily-roundup.js";
 import { loadTroDailyUpdates } from "./tro-daily-updates.js";
 import { getAvailableSystemMemoryMb } from "./system-memory.js";
 import { didEnrichmentComplete } from "./enrichment-outcome.js";
+import { getDocketContentStatus } from "./docket-content.js";
 import { analyzeDocketSequence, getDocketSequenceValue } from "./docket-sequence.js";
 import {
   claimWebhookEnrichmentJobState,
@@ -3246,6 +3247,7 @@ function serializePublicEntry(entry = {}) {
     entry_number: normalizeDisplayNumber(entry.entry_number),
     document_number: normalizeDisplayNumber(entry.document_number),
     docket_sequence: getDocketSequenceValue(entry) || null,
+    content_status: getDocketContentStatus(entry),
     document_type: sanitizeEntryDocumentType(entry.document_type),
     description: sanitizePublicText(entry.description),
     description_zh: sanitizePublicText(entry.description_zh),
@@ -3290,11 +3292,14 @@ function serializePublicCaseDetail(item = {}) {
   return {
     ...serializePublicCaseSummary(item),
     docket_entries_count: docketEntriesCount,
+    docket_text_entries_count: rawEntries.filter((entry) => getDocketContentStatus(entry) === "descriptive").length,
+    docket_title_only_count: rawEntries.filter((entry) => getDocketContentStatus(entry) !== "descriptive").length,
     known_docket_entries_count: knownDocketEntries,
     docket_gap_count: Math.max(knownDocketEntries - docketEntriesCount, sequence.missingCount, 0),
     numbered_docket_entries_count: sequence.numberedEntryCount,
     unnumbered_docket_entries_count: sequence.unnumberedEntryCount,
-    docket_sequence_complete: !item.entries_truncated && sequence.isComplete,
+    docket_sequence_complete: !item.entries_truncated && sequence.isComplete && sequence.unnumberedEntryCount === 0,
+    docket_content_complete: !item.entries_truncated && rawEntries.length > 0 && rawEntries.every((entry) => getDocketContentStatus(entry) === "descriptive"),
     docket_missing_ranges: item.entries_truncated ? [] : sequence.missingRanges,
     docket_missing_ranges_truncated: !item.entries_truncated && sequence.missingRangesTruncated,
     entries_truncated: Boolean(item.entries_truncated),

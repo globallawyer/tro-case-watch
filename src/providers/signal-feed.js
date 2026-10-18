@@ -443,8 +443,10 @@ export class SignalFeedClient {
             ? await this.fetchApiEntries(candidate)
             : null;
         items.push({ ...candidate, ...(detail || {}) });
-        if (detail) {
+        if (detail?.entries?.length) {
           hydratedItems += 1;
+        } else {
+          hydrationFailures["no-entries"] = Number(hydrationFailures["no-entries"] || 0) + 1;
         }
       } catch (error) {
         const code = failureCode(error);

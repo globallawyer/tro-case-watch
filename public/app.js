@@ -763,7 +763,9 @@ function renderDetail(item) {
     item.docket_missing_ranges,
     Boolean(item.docket_missing_ranges_truncated)
   );
-  const coveragePending = Boolean(hydrationPending || entriesTruncated || docketGapCount > 0);
+  const titleOnlyCount = Number(item.docket_title_only_count || 0);
+  const textCount = Number(item.docket_text_entries_count ?? entries.length);
+  const coveragePending = Boolean(hydrationPending || entriesTruncated || docketGapCount > 0 || titleOnlyCount > 0 || item.unnumbered_docket_entries_count > 0);
   const timelineSummary = entries.length ? timelineSourceSummary(entries) : "当前只有案件级摘要";
   const summaryCards = [
     { label: "Plaintiff / Brand", value: formatPlaintiffBrandValue(item) },
@@ -771,11 +773,9 @@ function renderDetail(item) {
     { label: "程序阶段", value: insights.status?.label || "持续观察" },
     { label: "被告数量", value: insights.defendant_count || 0 },
     {
-      label: "Docket 完整度",
+      label: "Docket 归档情况",
       value: entries.length
-        ? knownDocketEntries > entries.length
-          ? `已归档 ${entries.length} / 已知至少 ${knownDocketEntries}`
-          : `已归档 ${entries.length} 条`
+        ? `${entriesTruncated ? "当前加载" : "已归档"} ${entries.length} 条 · 带正文 ${textCount} 条`
         : "仅案件摘要"
     }
   ];
@@ -824,6 +824,8 @@ function renderDetail(item) {
           ${entriesTruncated ? '<span class="tag-pill">完整时间线继续加载中</span>' : ""}
           ${docketGapCount > 0 ? `<span class="tag-pill">已知缺口至少 ${docketGapCount} 条</span>` : ""}
           ${missingRangeLabel ? `<span class="tag-pill">待补序号 ${missingRangeLabel}</span>` : ""}
+          ${item.latest_docket_number ? `<span class="tag-pill">最高已知编号 #${item.latest_docket_number}，非已抓取数量</span>` : ""}
+          ${titleOnlyCount ? `<span class="tag-pill">${titleOnlyCount} 条仅有标题或通知，正文待补</span>` : ""}
         </div>
       </div>
     </div>
@@ -838,7 +840,7 @@ function renderDetail(item) {
       <div class="timeline-head">
         <div>
           <h3>站内 Docket 时间线</h3>
-          <p>按时间倒序归档公开可见 docket 文本，适合卖家直接判断当前是否已签 TRO、是否进入 PI、是否有和解或结案信号。</p>
+          <p>已知编号按 docket 编号倒序排列；未核实编号的记录列在后面并按日期倒序，不推算或补造法院编号。</p>
           ${entriesTruncated ? '<p class="focus-text">当前先展示最近条目，已归档的完整时间线正在加载。</p>' : ""}
         </div>
       </div>
@@ -889,7 +891,8 @@ function renderDetail(item) {
                   </div>
                   <h3>${numPrefix}${displayEntryType(entry)}</h3>
                   ${signals ? `<div class="tag-row timeline-tags">${signals}</div>` : ""}
-                  <p>${entry.description || entry.description_zh}</p>
+                  <p>${entry.description || entry.description_zh || "正文尚未取得"}</p>
+                  ${entry.content_status && entry.content_status !== "descriptive" ? '<p class="focus-text">当前仅有标题或通知，尚未取得 docket 正文，不代表完整记录。</p>' : ""}
                   ${entry.description_zh && entry.description ? `<p class="timeline-zh">${entry.description_zh}</p>` : ""}
                   <p class="timeline-source-note">来源已归档到本站，如需转换成中文，请在Chrome浏览器右键点击翻译</p>
                 </article>

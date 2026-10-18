@@ -60,6 +60,61 @@ function docketEntry(caseId, source, number, description = `Docket entry ${numbe
   };
 }
 
+test("official numbers stay descending even when mirror filing dates disagree", () => {
+  const { directory, store } = createStore();
+  try {
+    const saved = store.upsertCase(targetCase());
+    store.upsertDocketEntry({ ...docketEntry(saved.id, "courtlistener", 10, "ORDER: response due October 20"), filed_at: "2026-05-01" });
+    store.upsertDocketEntry({ ...docketEntry(saved.id, "worldtro", 9, "MOTION by Example Brand for expedited discovery"), filed_at: "2026-05-03" });
+    store.upsertDocketEntry({ ...docketEntry(saved.id, "61tro", 8, "NOTICE by Example Brand of filing"), entry_number: null, document_number: null, filed_at: "2026-05-05" });
+    assert.deepEqual(store.getCase(saved.id).entries.map((entry) => entry.entry_number), ["10", "9", null]);
+  } finally { store.db.close(); fs.rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("verified detailed source upgrades an unambiguous state-only catalog identity", () => {
+  const { directory, store } = createStore();
+  try {
+    const saved = store.upsertCase(targetCase({ source_case_key: "catalog:il:26-cv-12687", primary_source: "worldtro", court_id: "il", court_name: "Illinois", docket_number: "26-cv-12687", case_name: "Eicher Motors Limited", docket_count: 0 }));
+    const item = { docketId: "verified-case", docketNumber: "1:26-cv-12687", courtId: "ilnd", courtName: "Northern District of Illinois", plaintiff: "Eicher Motors Limited", caseName: "Eicher Motors Limited v. Schedule A Defendants", dateFiled: "2026-10-16", entries: [{ entryId: "entry-1", documentNumber: 1, filedAt: "2026-10-16", title: "COMPLAINT filed by Eicher Motors Limited. Filing fee paid." }] };
+    assert.equal(store.findCatalogPlaceholderForCase(item).id, saved.id);
+    assert.equal(store.findCatalogPlaceholderForCase({ ...item, courtId: "nysd" }), null);
+    assert.equal(store.findCatalogPlaceholderForCase({ ...item, plaintiff: "Different Plaintiff" }), null);
+    const service = new CaseSyncService({ config: { sync: {} }, store });
+    assert.equal(service.ingestSignalFeedItems([item]).docketEntriesUpserted, 1);
+    const refreshed = store.getCase(saved.id);
+    assert.equal(refreshed.court_id, "ilnd");
+    assert.equal(refreshed.docket_number, "1:26-cv-12687");
+    assert.equal(refreshed.entries.length, 1);
+  } finally { store.db.close(); fs.rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("a continuous run of RSS titles still needs content completion", () => {
+  const { directory, store } = createStore();
+  try {
+    const saved = store.upsertCase(targetCase({ date_filed: "2026-10-16", docket_count: 20, latest_docket_number: "20" }));
+    for (let number = 1; number <= 20; number++) {
+      store.upsertDocketEntry({ ...docketEntry(saved.id, "courtfeed", number, "[Temporary Restraining Order]"), filed_at: "2026-10-16" });
+    }
+    const coverage = store.getEntryCoverageForCaseIds([saved.id]).get(saved.id);
+    assert.equal(coverage.hasContinuityGap, false);
+    assert.equal(coverage.descriptiveEntries, 0);
+    assert.equal(coverage.titleOnlyEntries, 20);
+    assert.equal(coverage.hasContentGap, true);
+    assert.ok(store.getCasesNeedingSupplementalDocketSync(10).some((row) => row.id === saved.id));
+  } finally { store.db.close(); fs.rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("metadata-only signal results do not refresh the docket freshness clock", () => {
+  const { directory, store } = createStore();
+  try {
+    const saved = store.upsertCase(targetCase());
+    const service = new CaseSyncService({ config: { sync: {} }, store });
+    service.ingestSignalFeedItems([{ docketId: "metadata", docketNumber: saved.docket_number, courtId: saved.court_id, courtName: saved.court_name, caseName: saved.case_name, entries: [] }]);
+    assert.equal(store.getCase(saved.id).raw.signal_feed.syncedAt, null);
+    assert.equal(store.getCase(saved.id).last_docket_sync_at, null);
+  } finally { store.db.close(); fs.rmSync(directory, { recursive: true, force: true }); }
+});
+
 test("different explicit numbers remain separate despite identical motion text", () => {
   const { directory, store } = createStore();
   try {

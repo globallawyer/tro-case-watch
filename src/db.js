@@ -25,6 +25,7 @@ import {
   sourceUrlUsesPriorityFeed
 } from "./priority-feed.js";
 import { getDocketSequenceValue } from "./docket-sequence.js";
+import { docketContentScore } from "./docket-content.js";
 
 function nowIso() {
   return new Date().toISOString();
@@ -424,11 +425,14 @@ function getCoverageGapPressure(coverage = {}) {
     ? Math.max(0, lastNumber - firstNumber + 1 - numberedEntries)
     : 0;
   const smallDocketGap = totalEntries < 6 ? 6 - totalEntries : 0;
+  const contentGap = Number(coverage.titleOnlyEntries || 0);
   return {
     leadingGap,
     sequenceGap,
     smallDocketGap,
-    gapPriorityScore: leadingGap + sequenceGap + smallDocketGap,
+    contentGap,
+    hasContentGap: contentGap > 0,
+    gapPriorityScore: leadingGap + sequenceGap + smallDocketGap + contentGap,
     hasContinuityGap: leadingGap > 0 || sequenceGap > 0
   };
 }
@@ -1869,6 +1873,8 @@ function entryContentRank(entry) {
 }
 
 function pickPreferredEntryDescription(existingValue, incomingValue) {
+  const quality = docketContentScore({ description: incomingValue }) - docketContentScore({ description: existingValue });
+  if (quality) return quality > 0 ? incomingValue : existingValue;
   return preferLongerNormalizedValue(existingValue, incomingValue, normalizeEntryDescription);
 }
 
@@ -2005,6 +2011,8 @@ function buildMergedDocketEntryRecord(existing = null, record = {}, timestamp = 
 }
 
 function compareEntriesForCanonicalRow(left, right) {
+  const qualityCompare = docketContentScore(right) - docketContentScore(left);
+  if (qualityCompare) return qualityCompare;
   const authorityCompare = entryAuthorityRank(right.primary_source) - entryAuthorityRank(left.primary_source);
   if (authorityCompare !== 0) {
     return authorityCompare;
@@ -2029,11 +2037,6 @@ function compareEntriesForCanonicalRow(left, right) {
 }
 
 function compareEntriesForTimeline(left, right) {
-  const dateCompare = entryDateKey(right).localeCompare(entryDateKey(left));
-  if (dateCompare !== 0) {
-    return dateCompare;
-  }
-
   const leftOrder = parseEntryOrderValue(left);
   const rightOrder = parseEntryOrderValue(right);
   if (leftOrder !== null || rightOrder !== null) {
@@ -2042,6 +2045,9 @@ function compareEntriesForTimeline(left, right) {
       return numericCompare;
     }
   }
+
+  const dateCompare = entryDateKey(right).localeCompare(entryDateKey(left));
+  if (dateCompare !== 0) return dateCompare;
 
   const sourceCompare = entrySourceRank(right) - entrySourceRank(left);
   if (sourceCompare !== 0) {
@@ -3130,6 +3136,23 @@ export class Store {
         );
       });
 
+    return matches.length === 1 ? matches[0] : null;
+  }
+
+  findCatalogPlaceholderForCase(item = {}) {
+    const courtId = String(item.courtId || "").toLowerCase();
+    if (!/^[a-z]{2}(?:nd|sd|ed|wd|md|cd|d)$/.test(courtId) || !/^\d+:/.test(item.docketNumber || "")) return null;
+    const nameKey = (value) => normalizeLookupText(value).replace(/[^a-z0-9]/g, "");
+    const plaintiff = nameKey(item.plaintiff || String(item.caseName || "").split(/\s+v\.?\s+/i)[0]);
+    if (plaintiff.length < 8) return null;
+    const suffix = normalizeDocketIdentity(item.docketNumber).replace(/^\d+:/, "");
+    const matches = this.getFastPathDocketCases("2025-01-01", suffix).filter((row) => {
+      const name = nameKey(row.case_name);
+      return row.court_id === courtId.slice(0, 2) && !/^\d+:/.test(row.docket_number || "") &&
+        isPriorityFeedPrimarySource(row.primary_source) &&
+        normalizeDocketIdentity(row.docket_number) === suffix &&
+        (name.includes(plaintiff) || (name.length >= 8 && plaintiff.includes(name)));
+    });
     return matches.length === 1 ? matches[0] : null;
   }
 
@@ -5168,6 +5191,11 @@ export class Store {
         ELSE 'text:' || COALESCE(filed_at, '') || '|' || lower(trim(COALESCE(description, '')))
       END
     `;
+    const contentTextSql = "trim(COALESCE(NULLIF(description, ''), description_zh, ''))";
+    const substantiveSql = `${contentTextSql} <> ''
+      AND ${contentTextSql} NOT LIKE '[%]'
+      AND lower(${contentTextSql}) <> lower(trim(COALESCE(document_type, '')))
+      AND lower(${contentTextSql}) NOT IN ('docket entry', 'complaint', 'summons', 'temporary restraining order', 'leave to file document', 'motion', 'order', 'notice', 'judgment', 'minute entry')`;
 
     for (let index = 0; index < ids.length; index += chunkSize) {
       const chunk = ids.slice(index, index + chunkSize);
@@ -5178,6 +5206,7 @@ export class Store {
             case_id,
             COUNT(*) AS raw_entries,
             COUNT(DISTINCT ${canonicalEntrySql}) AS total_entries,
+            COUNT(DISTINCT CASE WHEN ${substantiveSql} THEN ${canonicalEntrySql} END) AS descriptive_entries,
             SUM(CASE WHEN primary_source = 'courtlistener' THEN 1 ELSE 0 END) AS courtlistener_entries,
             SUM(CASE WHEN primary_source = '${PRIORITY_FEED_ENTRY_SOURCE}' THEN 1 ELSE 0 END) AS priority_entries,
             SUM(CASE WHEN primary_source = 'pacermonitor' THEN 1 ELSE 0 END) AS pacermonitor_entries,
@@ -5194,6 +5223,8 @@ export class Store {
       for (const row of rows) {
         const baseCoverage = {
           totalEntries: Number(row.total_entries || 0),
+          descriptiveEntries: Number(row.descriptive_entries || 0),
+          titleOnlyEntries: Math.max(0, Number(row.total_entries || 0) - Number(row.descriptive_entries || 0)),
           rawEntries: Number(row.raw_entries || 0),
           courtlistenerEntries: Number(row.courtlistener_entries || 0),
           priorityFeedEntries: Number(row.priority_entries || 0),
@@ -5862,7 +5893,7 @@ export class Store {
         const totalEntries = Number(coverage.totalEntries || 0);
         const gap = Math.max(0, expectedEntries - totalEntries);
         const missingPriorityFeedCoverage = priorityFeedRowCount > 0 && totalEntries < priorityFeedRowCount;
-        const shouldSync = hasCivilDocketNumber && (gap > 0 || missingPriorityFeedCoverage || hasContinuityGap);
+        const shouldSync = hasCivilDocketNumber && (gap > 0 || missingPriorityFeedCoverage || hasContinuityGap || coverage.hasContentGap);
 
         let priority = missingPriorityFeedCoverage
           ? 0

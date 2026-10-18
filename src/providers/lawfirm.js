@@ -658,10 +658,10 @@ function parse61troEntries(html) {
 
 function parse61troCasePage(html, url, source) {
   const title = cleanText(String(html || "").match(/<title>([\s\S]*?)<\/title>/i)?.[1] || "");
+  if (/页面未找到|页面不存在|安全验证|访问验证|page not found|404 not found|access denied/i.test(title)) return null;
   const docketNumber =
     parseDocketNumber(String(html || "").match(/<div class="post__title">[\s\S]*?<h2>([\s\S]*?)<\/h2>/i)?.[1] || "") ||
-    parseDocketNumber(title) ||
-    parseDocketNumber(url);
+    parseDocketNumber(title);
   if (!docketNumber) {
     return null;
   }

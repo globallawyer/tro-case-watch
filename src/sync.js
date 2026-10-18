@@ -1620,7 +1620,7 @@ export class CaseSyncService {
 
       const primaryKey = buildCourtDocketKey(item.courtId, docketNumber);
       const fallbackKey = buildCourtDocketKey(item.courtName, docketNumber);
-      const existingCase = this.findDiscoveryCase(caseIndex, {
+      const existingCase = this.store.findCatalogPlaceholderForCase(item) || this.findDiscoveryCase(caseIndex, {
         courtId: item.courtId,
         courtName: item.courtName,
         docketNumber
@@ -1658,7 +1658,8 @@ export class CaseSyncService {
           counsel: item.counsel || null,
           counselFirm: item.counselFirm || null,
           entryCount: entries.length,
-          syncedAt: timestamp,
+          syncedAt: entries.length ? timestamp : existingCase?.raw?.signal_feed?.syncedAt || null,
+          metadataCheckedAt: timestamp,
           refreshFailureAt: null,
           refreshFailureCode: null,
           refreshRetryAt: null
@@ -1789,8 +1790,8 @@ export class CaseSyncService {
             courtName: caseRow.court_name,
             dateFiled: caseRow.date_filed
           });
-          if (!item) {
-            const failure = "not-found";
+          if (!item?.entries?.length) {
+            const failure = item ? "no-entries" : "not-found";
             refreshFailures[failure] = Number(refreshFailures[failure] || 0) + 1;
             this.store.recordSignalFeedRefreshFailure(caseRow.id, {
               code: failure,
@@ -1868,16 +1869,18 @@ export class CaseSyncService {
       if (!item) {
         return { enriched: false, reason: "not-found" };
       }
-      if (normalizeDocketIdentity(item.docketNumber) !== normalizeDocketIdentity(caseRow.docket_number) ||
+      const verifiedPlaceholder = this.store.findCatalogPlaceholderForCase(item)?.id === caseRow.id;
+      if (!verifiedPlaceholder && (normalizeDocketIdentity(item.docketNumber) !== normalizeDocketIdentity(caseRow.docket_number) ||
           (item.courtId && caseRow.court_id && item.courtId !== caseRow.court_id) ||
           (!(item.courtId && caseRow.court_id) && item.courtName && caseRow.court_name &&
-            !courtNamesLikelyMatch(caseRow.court_name, item.courtName))) {
+            !courtNamesLikelyMatch(caseRow.court_name, item.courtName)))) {
         return { enriched: false, reason: "identity-mismatch" };
       }
 
       const ingest = this.ingestSignalFeedItems([item]);
       return {
-        enriched: ingest.casesUpserted > 0 || ingest.docketEntriesUpserted > 0,
+        enriched: ingest.docketEntriesUpserted > 0,
+        metadataUpdated: ingest.casesUpserted > 0,
         casesUpserted: ingest.casesUpserted,
         docketEntriesUpserted: ingest.docketEntriesUpserted
       };
@@ -3749,12 +3752,13 @@ export class CaseSyncService {
       this.store.refreshCaseDocketSummary(caseId);
 
       return {
-        enriched: Boolean(ingest.casesUpserted || ingest.docketEntriesUpserted),
+        enriched: ingest.docketEntriesUpserted > 0,
+        metadataUpdated: ingest.casesUpserted > 0,
         reason:
           ingest.docketEntriesUpserted > 0
             ? "entries"
             : ingest.casesUpserted > 0
-              ? "case"
+              ? "metadata-only"
               : "matched",
         casesUpserted: Number(ingest.casesUpserted || 0),
         docketEntriesUpserted: Number(ingest.docketEntriesUpserted || 0)

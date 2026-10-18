@@ -417,6 +417,11 @@ export class CatalogClient {
   }
 
   parseCasePage(html, pageUrl, meta) {
+    if (/<title>\s*(?:安全验证|访问验证|Security Verification|Just a moment)/i.test(html) || /name=["']slider_token["']/i.test(html)) {
+      const error = new Error("Priority source requires human verification; no docket data received");
+      error.code = "SOURCE_CHALLENGE";
+      throw error;
+    }
     const canonicalUrl = new URL(pageUrl);
     canonicalUrl.search = "";
     canonicalUrl.hash = "";
