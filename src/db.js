@@ -5287,10 +5287,40 @@ export class Store {
     for (let index = 0; index < ids.length; index += chunkSize) {
       const chunk = ids.slice(index, index + chunkSize);
       const placeholders = chunk.map(() => "?").join(", ");
-      let caseId = null;
-      let group = [];
-      const flush = () => {
-        if (!group.length) return;
+      const metadata = this.db.prepare(`SELECT id,court_id,court_name,docket_number FROM cases WHERE id IN (${placeholders})`).all(...chunk);
+      const groups = new Map();
+      const needles = new Set();
+      for (const row of metadata) {
+        const key = buildCanonicalCaseGroupKey(row) || `id:${row.id}`;
+        if (!groups.has(key)) groups.set(key, { requested: [], peers: new Set() });
+        groups.get(key).requested.push(Number(row.id));
+        groups.get(key).peers.add(Number(row.id));
+        needles.add(String(row.docket_number || ""));
+        for (const needle of buildDocketSearchNeedles(row.docket_number).exactNeedles) needles.add(needle);
+        const identity = normalizeDocketIdentity(row.docket_number);
+        needles.add(identity);
+        needles.add(identity.replace(/^(\d+:)?(\d{2})-/, (_, office = "", year) => `${office}20${year}-`));
+      }
+      // Resolve same-identity source copies through the docket index, not one
+      // table scan per case. Never join a short number to an unknown office.
+      const needleList = [...needles].filter(Boolean);
+      for (let offset = 0; offset < needleList.length; offset += chunkSize) {
+        const part = needleList.slice(offset, offset + chunkSize);
+        for (const peer of this.db.prepare(`SELECT id,court_id,court_name,docket_number FROM cases
+          WHERE docket_number IN (${part.map(() => "?").join(",")})`).iterate(...part)) {
+          groups.get(buildCanonicalCaseGroupKey(peer))?.peers.add(Number(peer.id));
+        }
+      }
+      // Each query is an indexed case-id lookup. Do not sort the whole batch's
+      // raw JSON by a computed group key, which can exhaust the worker's memory.
+      for (const coverageGroup of groups.values()) {
+        const peerIds = [...coverageGroup.peers];
+        const group = [];
+        for (const row of this.db.prepare(`SELECT * FROM docket_entries
+          WHERE case_id IN (${peerIds.map(() => "?").join(",")}) ORDER BY case_id,id`).iterate(...peerIds)) {
+          group.push(hydrateEntry(row));
+        }
+        if (!group.length) continue;
         const entries = dedupeEntries(group);
         const numbers = [...new Set(entries.map(getIntegerDocketSequence).filter(n => n !== null))];
         const descriptive = entries.filter(entry => getDocketContentStatus(entry) === "descriptive").length;
@@ -5307,23 +5337,12 @@ export class Store {
           firstNumber: numbers.length ? Math.min(...numbers) : 0,
           lastNumber: numbers.length ? Math.max(...numbers) : 0
         };
-        coverage.set(caseId, {
+        const result = {
           ...baseCoverage,
           ...getCoverageGapPressure(baseCoverage)
-        });
-      };
-      // Keep at most one case in memory, rather than materializing a batch of
-      // raw JSON. Coverage and the UI now share the same canonical timeline.
-      for (const row of this.db.prepare(`SELECT * FROM docket_entries
-        WHERE case_id IN (${placeholders}) ORDER BY case_id, id`).iterate(...chunk)) {
-        if (caseId !== Number(row.case_id)) {
-          flush();
-          caseId = Number(row.case_id);
-          group = [];
-        }
-        group.push(hydrateEntry(row));
+        };
+        for (const requestedId of coverageGroup.requested) coverage.set(requestedId, result);
       }
-      flush();
     }
 
     return coverage;

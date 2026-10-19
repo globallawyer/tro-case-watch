@@ -1,14 +1,22 @@
 import { DatabaseSync } from "node:sqlite";
 import { Store } from "../src/db.js";
 import { getWebhookEnrichmentQueueStats } from "../src/webhook-enrichment.js";
+import { normalizeDocketIdentity } from "../src/insights.js";
 
 const db = new DatabaseSync(process.env.DB_PATH || "/app/data/tro-watch.sqlite", { readOnly: true });
 const store = Object.create(Store.prototype);
 store.db = db;
 try {
-  const cases = db.prepare(`SELECT id, docket_number, court_id, date_filed FROM cases
+  const candidates = db.prepare(`SELECT id, docket_number, court_id, date_filed FROM cases
     WHERE is_seller_watch=1 AND date_filed <= date('now')
-    ORDER BY date_filed DESC, id DESC LIMIT 20`).all();
+    ORDER BY date_filed DESC, id DESC LIMIT 200`).all();
+  const identities = new Set();
+  const cases = candidates.filter(row => {
+    const key = `${row.court_id || row.id}|${normalizeDocketIdentity(row.docket_number)}`;
+    if (identities.has(key)) return false;
+    identities.add(key);
+    return true;
+  }).slice(0, 20);
   const reference = db.prepare("SELECT id,docket_number,court_id,date_filed FROM cases WHERE id=2585078").get();
   const coverage = store.getEntryCoverageForCaseIds([...cases.map(row => row.id), reference?.id].filter(Boolean));
   const queue = store.getCheckpoint("system:webhook-enrichment-queue") || {};

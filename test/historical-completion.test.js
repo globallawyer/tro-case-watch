@@ -44,6 +44,34 @@ test("historical lookup does not follow a foreign-origin case link", async () =>
   assert.equal(await client.lookupByDocket("1:26-cv-04482"), null);
 });
 
+test("coverage includes same-case source copies outside the candidate list without crossing court or office", () => withStore(store => {
+  const empty = store.upsertCase(caseRecord({ source_case_key: "empty-copy" }));
+  const rich = store.upsertCase(caseRecord({ source_case_key: "rich-copy", primary_source: "signal-feed" }));
+  const otherOffice = store.upsertCase(caseRecord({ source_case_key: "other-office", docket_number: "2:26-cv-04482" }));
+  const otherCourt = store.upsertCase(caseRecord({ source_case_key: "other-court", court_id: "nysd", court_name: "Southern District of New York" }));
+  store.upsertDocketEntry(entry(rich.id, "rich-text", "signal-feed", "1", "COMPLAINT: Plaintiff alleges infringement of the trademarks listed in Exhibit A."));
+  store.upsertDocketEntry(entry(otherOffice.id, "other-office-text", "signal-feed", "99", "ORDER: This unrelated case must not enter the target case timeline."));
+  store.upsertDocketEntry(entry(otherCourt.id, "other-court-text", "signal-feed", "98", "ORDER: This unrelated court must remain separate."));
+  const coverage = store.getEntryCoverageForCaseIds([empty.id]).get(empty.id);
+  assert.equal(coverage.totalEntries, store.getCase(empty.id).entries.length);
+  assert.equal(coverage.descriptiveEntries, 1);
+  assert.equal(coverage.lastNumber, 1);
+  const both = store.getEntryCoverageForCaseIds([empty.id, rich.id]);
+  assert.deepEqual(both.get(empty.id), both.get(rich.id));
+}));
+
+test("coverage joins normalized full-year copies but never guesses an absent office", () => withStore(store => {
+  const saved = store.upsertCase(caseRecord());
+  const fullYear = store.upsertCase(caseRecord({ source_case_key: "full-year" }));
+  store.db.prepare("UPDATE cases SET docket_number=? WHERE id=?").run("1:2026-cv-04482", fullYear.id);
+  const noOffice = store.upsertCase(caseRecord({ source_case_key: "unknown-office", docket_number: "26-cv-04482" }));
+  store.upsertDocketEntry(entry(fullYear.id, "full-year-text", "signal-feed", "1", "ORDER: The Court directs the parties to file their joint report."));
+  store.upsertDocketEntry(entry(noOffice.id, "unknown-office-text", "signal-feed", "77", "ORDER: Office identity is not verified for this separate record."));
+  const coverage = store.getEntryCoverageForCaseIds([saved.id]).get(saved.id);
+  assert.equal(coverage.totalEntries, 1);
+  assert.equal(coverage.lastNumber, 1);
+}));
+
 test("mirror row 34 can align to real docket 35 only through a unique text match", () => withStore(store => {
   const saved = store.upsertCase(caseRecord());
   const text = "PRELIMINARY INJUNCTION signed by Judge Example; notice mailed to all parties.";
