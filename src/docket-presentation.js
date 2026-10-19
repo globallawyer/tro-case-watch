@@ -16,14 +16,17 @@ export function docketTimelineTime(entry = {}) {
 
 export function getDocketPresentationPolicy(entries = [], { truncated = false } = {}) {
   const sequence = analyzeDocketSequence(entries);
-  const datedNumbers = entries.filter(entry => getIntegerDocketSequence(entry) && entry.filed_at)
-    .map(entry => ({ number: getIntegerDocketSequence(entry), day: String(entry.filed_at).slice(0, 10) }))
-    .sort((left, right) => left.number - right.number);
-  let latestDay = "";
+  const chronologicalNumbers = entries.map(entry => ({ number: getIntegerDocketSequence(entry), time: docketTimelineTime(entry) }))
+    .filter(entry => entry.number !== null)
+    .sort((left, right) => {
+      const difference = right.time - left.time;
+      return Number.isNaN(difference) || !difference ? right.number - left.number : difference;
+    });
+  let previousNumber = Infinity;
   let dateConflict = false;
-  for (const entry of datedNumbers) {
-    if (latestDay && entry.day < latestDay) dateConflict = true;
-    latestDay = entry.day > latestDay ? entry.day : latestDay;
+  for (const entry of chronologicalNumbers) {
+    if (entry.number > previousNumber) dateConflict = true;
+    previousNumber = entry.number;
   }
   const unverified = entries.some(hasUnverifiedMirrorNumber);
   return {

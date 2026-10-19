@@ -115,6 +115,8 @@ test("number display hides gaps and date conflicts, not legitimate unnumbered no
   const entry = (number, date) => ({ entry_number: String(number), filed_at: date, raw: {}, primary_source: "signal-feed" });
   assert.equal(getDocketPresentationPolicy([entry(1, "2026-01-01"), entry(3, "2026-02-01")]).hideNumbers, true);
   assert.equal(getDocketPresentationPolicy([entry(1, "2026-02-01"), entry(2, "2026-01-01")]).hideNumbers, true);
+  assert.equal(getDocketPresentationPolicy([entry(1, "2026-02-01T12:00:00Z"), entry(2, "2026-02-01T00:00:00Z")]).hideNumbers, true);
+  assert.equal(getDocketPresentationPolicy([entry(1, "2026-02-01"), entry(2, null)]).hideNumbers, true);
   assert.equal(getDocketPresentationPolicy([entry(1, "2026-01-01"), entry(2, "2026-02-01"), { filed_at: "2026-02-01", raw: {} }]).hideNumbers, false);
 });
 
