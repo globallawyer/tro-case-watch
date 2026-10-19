@@ -2072,7 +2072,9 @@ function mergeDisplayEntries(existing = null, incoming = null) {
   const canonical = compareEntriesForCanonicalRow(existing, incoming) <= 0 ? existing : incoming;
   const primary = isPrimaryDocketEntry(canonical);
   const supplemental = canonical === existing ? incoming : existing;
-  const supplementalBody = primary && getDocketContentStatus(canonical) !== "descriptive" && getDocketContentStatus(supplemental) === "descriptive";
+  const borrowedBody = primary && Boolean(canonical.raw?.body_supplement_source);
+  const supplementalBody = primary && (borrowedBody || getDocketContentStatus(canonical) !== "descriptive") && getDocketContentStatus(supplemental) === "descriptive";
+  const body = borrowedBody && String(canonical.description || "").length >= String(supplemental.description || "").length ? canonical : supplemental;
   const mergedSources = mergeArraysNormalized(
     Array.isArray(existing?.raw?.merged_sources) ? existing.raw.merged_sources : [],
     Array.isArray(incoming?.raw?.merged_sources) ? incoming.raw.merged_sources : [],
@@ -2083,13 +2085,13 @@ function mergeDisplayEntries(existing = null, incoming = null) {
     ...canonical,
     primary_source: canonical?.primary_source || pickPreferredDisplayPrimarySource(existing?.primary_source, incoming?.primary_source),
     source_entry_id: canonical?.source_entry_id || existing?.source_entry_id || incoming?.source_entry_id || null,
-    document_type: supplementalBody ? canonical.description || canonical.document_type : canonical?.document_type || pickPreferredEntryType(existing?.document_type, incoming?.document_type),
+    document_type: supplementalBody ? canonical.raw?.primary_title || canonical.description || canonical.document_type : canonical?.document_type || pickPreferredEntryType(existing?.document_type, incoming?.document_type),
     entry_number: primary ? getDocketSequenceValue(canonical) || null : pickPreferredEntryNumber(existing?.entry_number, incoming?.entry_number),
     document_number: primary ? getDocketSequenceValue(canonical) || null : pickPreferredEntryNumber(existing?.document_number, incoming?.document_number),
     filed_at: canonical?.filed_at || existing?.filed_at || incoming?.filed_at || null,
-    description: supplementalBody ? supplemental.description : primary ? canonical.description || supplemental.description || null : docketContentScore(existing) !== docketContentScore(incoming)
+    description: supplementalBody ? body.description : primary ? canonical.description || supplemental.description || null : docketContentScore(existing) !== docketContentScore(incoming)
       ? canonical.description : pickPreferredEntryDescription(existing?.description, incoming?.description),
-    description_zh: supplementalBody ? supplemental.description_zh || null : primary ? canonical.description_zh || (!canonical.description ? supplemental.description_zh : null) || null
+    description_zh: supplementalBody ? body.description_zh || null : primary ? canonical.description_zh || (!canonical.description ? supplemental.description_zh : null) || null
       : pickPreferredEntryDescription(existing?.description_zh, incoming?.description_zh),
     absolute_url: canonical?.absolute_url || pickPreferredEntryUrl(existing?.absolute_url, incoming?.absolute_url),
     is_available: primary ? canonical.is_available ?? supplemental.is_available ?? null : pickPreferredNumericValue(existing?.is_available, incoming?.is_available),
@@ -2097,7 +2099,10 @@ function mergeDisplayEntries(existing = null, incoming = null) {
     pacer_doc_id: primary ? canonical.pacer_doc_id || supplemental.pacer_doc_id || null : preferLongerNormalizedValue(existing?.pacer_doc_id, incoming?.pacer_doc_id) || null,
     raw: mergeNestedObjects(supplemental?.raw || {}, canonical?.raw || {}, {
       merged_sources: mergedSources,
-      ...(supplementalBody ? { primary_title: canonical.description || null, body_supplement_source: supplemental.primary_source } : {}),
+      ...(primary ? {
+        primary_title: supplementalBody ? canonical.raw?.primary_title || canonical.description || null : canonical.raw?.primary_title || null,
+        body_supplement_source: supplementalBody ? body.raw?.body_supplement_source || body.primary_source : canonical.raw?.body_supplement_source || null
+      } : {}),
       merged_entry_ids: [...new Set([existing.id, incoming.id,
         ...(existing.raw?.merged_entry_ids || []), ...(incoming.raw?.merged_entry_ids || [])].filter(Boolean))]
     })

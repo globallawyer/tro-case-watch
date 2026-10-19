@@ -78,6 +78,20 @@ test("a primary title is retained as the heading while a matched auxiliary body 
   assert.equal(entry.raw.body_supplement_source, "signal-feed");
 }));
 
+test("borrowed explanation provenance survives further merging and ends when genuine primary text arrives", () => withStore(({ store, row, save }) => {
+  save("aux-one", "courtlistener", "1", "ORDER: A short auxiliary explanation.");
+  save("primary", "worldtro", "1", "Order");
+  save("aux-two", "signal-feed", "1", "ORDER: A more detailed auxiliary explanation with the complete response deadline and parties identified.");
+  let entry = store.getCase(row.id).entries[0];
+  assert.match(entry.description, /more detailed/);
+  assert.equal(entry.raw.body_supplement_source, "signal-feed");
+  assert.equal(entry.raw.primary_title, "Order");
+  save("primary", "worldtro", "1", "ORDER: Primary explanation now available.");
+  entry = store.getCase(row.id).entries[0];
+  assert.equal(entry.description, "ORDER: Primary explanation now available.");
+  assert.equal(entry.raw.body_supplement_source, null);
+}));
+
 test("unique unnumbered primary text replaces its auxiliary variant without trusting table position", () => withStore(({ store, row, save }) => {
   const text = "MOTION by Example Brand for preliminary injunction against Store Alpha and Store Beta identified in Exhibit A";
   save("aux", "courtlistener", "30", `${text}, with supporting exhibits and counsel declaration.`);
