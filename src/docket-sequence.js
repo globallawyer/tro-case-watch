@@ -1,3 +1,5 @@
+import { getRssDocketEvidence } from "./docket-rss.js";
+
 export function normalizeDocketSequenceValue(value) {
   const text = String(value ?? "").trim();
   if (!text) {
@@ -17,6 +19,8 @@ export function normalizeDocketSequenceValue(value) {
 
 export function getDocketSequenceValue(entry = {}) {
   const raw = entry.raw || {};
+  const rss = getRssDocketEvidence(entry);
+  if (rss) return rss.number === "0" ? "" : rss.number;
   if (entry.primary_source === "courtfeed" && raw.sequenceNumber && !raw.documentNumber) return "";
   const documentType = raw.document_type ?? raw.documentType;
   const isAttachment = Number(documentType) === 2 ||

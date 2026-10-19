@@ -1,3 +1,5 @@
+import { getRssDocketEvidence } from "./docket-rss.js";
+
 export const TITLE_ONLY_DOCKET_LABELS = [
   "docket entry", "complaint", "summons", "temporary restraining order",
   "leave to file document", "motion", "order", "notice", "judgment", "minute entry",
@@ -14,7 +16,7 @@ export function getDocketContentStatus(entry = {}) {
   const plain = mainText.replace(/^\[|\]$/g, "").replace(/\s+/g, " ").trim();
   const type = String(entry.document_type || "").trim();
   if (/^\[[^\[\]\n]+\]$/.test(mainText) ||
-      /^\[court-rss:[^\]]+\]/i.test(text) ||
+      getRssDocketEvidence(entry) ||
       (type && plain.toLowerCase() === type.toLowerCase()) ||
       TITLE_ONLY_DOCKET_LABELS.includes(plain.toLowerCase()) ||
       /^docket entry\s+\d+$/i.test(plain)) {

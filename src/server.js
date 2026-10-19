@@ -3245,8 +3245,8 @@ function serializePublicEntry(entry = {}) {
   return {
     id: entry.id,
     filed_at: entry.filed_at || null,
-    entry_number: getDocketSequenceValue(entry) ? normalizeDisplayNumber(entry.entry_number) : null,
-    document_number: normalizeDisplayNumber(entry.document_number),
+    entry_number: getDocketSequenceValue(entry) || null,
+    document_number: getDocketSequenceValue(entry) || null,
     docket_sequence: getDocketSequenceValue(entry) || null,
     content_status: getDocketContentStatus(entry),
     document_type: sanitizeEntryDocumentType(entry.document_type),

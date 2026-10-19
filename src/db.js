@@ -24,7 +24,8 @@ import {
   isPriorityFeedPrimarySource,
   sourceUrlUsesPriorityFeed
 } from "./priority-feed.js";
-import { getDocketSequenceValue } from "./docket-sequence.js";
+import { getDocketSequenceValue, getIntegerDocketSequence } from "./docket-sequence.js";
+import { getRssDocketEvidence } from "./docket-rss.js";
 import { docketContentScore, getDocketContentStatus } from "./docket-content.js";
 import { normalizeDocketFiledAt } from "./docket-date.js";
 
@@ -1294,11 +1295,13 @@ function hydrateEntry(row) {
     return null;
   }
 
-  return {
+  const entry = {
     ...row,
     filed_at: normalizeDocketFiledAt(row.filed_at),
     raw: parseJson(row.raw_json, {})
   };
+  const rss = getRssDocketEvidence(entry);
+  return rss ? { ...entry, entry_number: rss.number || null, document_number: rss.number || null } : entry;
 }
 
 function dedupeEntries(entries) {
@@ -1307,7 +1310,7 @@ function dedupeEntries(entries) {
 
   for (const entry of entries) {
     const numberKey = normalizedEntryOrderKey(entry);
-    const orderKey = numberKey ? `${numberKey}|${entryDateKey(entry)}` : "";
+    const orderKey = numberKey || "";
     if (!orderKey) {
       orderlessEntries.push(entry);
       continue;
@@ -1590,7 +1593,7 @@ function entrySourcesDiffer(left, right) {
 }
 
 function entryDateKey(entry) {
-  return String(entry?.filed_at || entry?.created_at || "").slice(0, 10);
+  return String(entry?.filed_at || "").slice(0, 10);
 }
 
 function isCrossSourceDocketDedupSource(source = "") {
@@ -1618,12 +1621,6 @@ function areSemanticallyDuplicateEntries(left, right, familyCounts = new Map()) 
     return false;
   }
 
-  const leftDate = entryDateKey(left);
-  const rightDate = entryDateKey(right);
-  if (!leftDate || leftDate !== rightDate) {
-    return false;
-  }
-
   const leftOrder = normalizedEntryOrderKey(left);
   const rightOrder = normalizedEntryOrderKey(right);
   if (leftOrder && rightOrder && leftOrder === rightOrder) {
@@ -1633,6 +1630,10 @@ function areSemanticallyDuplicateEntries(left, right, familyCounts = new Map()) 
   if (leftOrder && rightOrder) {
     return false;
   }
+
+  const leftDate = entryDateKey(left);
+  const rightDate = entryDateKey(right);
+  if (!leftDate || leftDate !== rightDate) return false;
 
   const leftDescription = normalizeEntryDescription(left.description);
   const rightDescription = normalizeEntryDescription(right.description);
@@ -1771,7 +1772,7 @@ function buildStoredEntryDeduplicationKey(entry) {
 }
 
 function parseEntryOrderValue(entry) {
-  const candidates = [entry.entry_number, entry.document_number];
+  const candidates = [getDocketSequenceValue(entry)];
 
   for (const rawValue of candidates) {
     const text = normalizeOrderText(rawValue);
@@ -4244,6 +4245,11 @@ export class Store {
   }
 
   upsertDocketEntry(record) {
+    const rss = getRssDocketEvidence(record);
+    if (rss) {
+      record = { ...record, entry_number: rss.number || null, document_number: rss.number || null,
+        raw: { ...(record.raw || {}), source_row_number: record.raw?.source_row_number ?? record.entry_number } };
+    }
     const timestamp = nowIso();
     const exactExisting = hydrateEntry(
       this.db.prepare("SELECT * FROM docket_entries WHERE source_entry_key = ?").get(record.source_entry_key)
@@ -5185,27 +5191,12 @@ export class Store {
     if (!this.docketContentFunctionRegistered) {
       this.db.function("docket_has_descriptive_content", { deterministic: true }, (description, descriptionZh, documentType) =>
         getDocketContentStatus({ description, description_zh: descriptionZh, document_type: documentType }) === "descriptive" ? 1 : 0);
+      this.db.function("docket_integer_sequence", { deterministic: true }, (entryNumber, documentNumber, source, description, descriptionZh, rawJson) =>
+        getIntegerDocketSequence({ entry_number: entryNumber, document_number: documentNumber, primary_source: source,
+          description, description_zh: descriptionZh, raw: parseJson(rawJson, {}) }));
       this.docketContentFunctionRegistered = true;
     }
-    const numericOrderSql = `
-      CASE
-        WHEN primary_source = 'courtfeed' AND json_valid(raw_json)
-          AND COALESCE(json_extract(raw_json, '$.sequenceNumber'), '') <> ''
-          AND COALESCE(json_extract(raw_json, '$.documentNumber'), '') = ''
-        THEN NULL
-        WHEN TRIM(COALESCE(entry_number, '')) = ''
-          AND json_valid(raw_json)
-          AND (
-            COALESCE(json_extract(raw_json, '$.document_type'), json_extract(raw_json, '$.documentType'), 0) = 2
-            OR CAST(COALESCE(json_extract(raw_json, '$.attachment_number'), json_extract(raw_json, '$.attachmentNumber'), 0) AS INTEGER) > 0
-          )
-        THEN NULL
-        WHEN TRIM(COALESCE(NULLIF(entry_number, ''), NULLIF(document_number, ''), '')) <> ''
-          AND TRIM(COALESCE(NULLIF(entry_number, ''), NULLIF(document_number, ''), '')) NOT GLOB '*[^0-9]*'
-        THEN CAST(COALESCE(NULLIF(entry_number, ''), NULLIF(document_number, '')) AS INTEGER)
-        ELSE NULL
-      END
-    `;
+    const numericOrderSql = "official_number";
     const canonicalEntrySql = `
       CASE
         WHEN ${numericOrderSql} IS NOT NULL
@@ -5213,13 +5204,19 @@ export class Store {
         ELSE 'text:' || COALESCE(filed_at, '') || '|' || lower(trim(COALESCE(description, '')))
       END
     `;
-    const substantiveSql = "docket_has_descriptive_content(description, description_zh, document_type) = 1";
+    const substantiveSql = "has_descriptive_content = 1";
 
     for (let index = 0; index < ids.length; index += chunkSize) {
       const chunk = ids.slice(index, index + chunkSize);
       const placeholders = chunk.map(() => "?").join(", ");
       const rows = this.db
         .prepare(`
+          WITH entry_facts AS MATERIALIZED (
+            SELECT case_id, primary_source, filed_at, description,
+              docket_integer_sequence(entry_number, document_number, primary_source, description, description_zh, raw_json) AS official_number,
+              docket_has_descriptive_content(description, description_zh, document_type) AS has_descriptive_content
+            FROM docket_entries WHERE case_id IN (${placeholders})
+          )
           SELECT
             case_id,
             COUNT(*) AS raw_entries,
@@ -5232,8 +5229,7 @@ export class Store {
             COUNT(DISTINCT ${numericOrderSql}) AS numbered_entries,
             MIN(${numericOrderSql}) AS first_number,
             MAX(${numericOrderSql}) AS last_number
-          FROM docket_entries
-          WHERE case_id IN (${placeholders})
+          FROM entry_facts
           GROUP BY case_id
         `)
         .all(...chunk);
