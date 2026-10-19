@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import crypto from "node:crypto";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import {
@@ -24,7 +25,7 @@ import {
   isPriorityFeedPrimarySource,
   sourceUrlUsesPriorityFeed
 } from "./priority-feed.js";
-import { getDocketSequenceValue, getIntegerDocketSequence } from "./docket-sequence.js";
+import { getDocketSequenceValue, getIntegerDocketSequence, hasUnverifiedMirrorNumber } from "./docket-sequence.js";
 import { getRssDocketEvidence } from "./docket-rss.js";
 import { docketContentScore, getDocketContentStatus } from "./docket-content.js";
 import { normalizeDocketFiledAt } from "./docket-date.js";
@@ -1305,12 +1306,53 @@ function hydrateEntry(row) {
 }
 
 function dedupeEntries(entries) {
+  const publishedByText = new Map();
+  const publishedLabels = [];
+  const fingerprint = entry => normalizeEntryDescription(String(entry.description || "")
+    .split(/\s+(?:附件[:：]|\(?Attachments?:)/i)[0].replace(/\s+翻译\s*$/, ""));
+  for (const entry of entries) {
+    if (!getDocketSequenceValue(entry) || hasUnverifiedMirrorNumber(entry)) continue;
+    if (getDocketContentStatus(entry) !== "descriptive") publishedLabels.push(entry);
+    const key = fingerprint(entry);
+    if (!key) continue;
+    const matches = publishedByText.get(key) || [];
+    matches.push(entry);
+    publishedByText.set(key, matches);
+  }
+  entries = entries.map(entry => {
+    if (!hasUnverifiedMirrorNumber(entry)) return entry;
+    let matches = (publishedByText.get(fingerprint(entry)) || []).filter(candidate =>
+      !entry.filed_at || !candidate.filed_at || entryDateKey(entry) === entryDateKey(candidate));
+    if (!matches.length && entryDateKey(entry)) {
+      // Generic labels corroborate a row position only with an exact filing
+      // date and a unique same-day label match on both sides.
+      matches = publishedLabels.filter(candidate => {
+        const number = getDocketSequenceValue(candidate);
+        const label = fingerprint(candidate);
+        const labelMatches = row => label === "complaint"
+          ? fingerprint(row).startsWith("complaint ") : fingerprint(row).includes(label);
+        if (!number || hasUnverifiedMirrorNumber(candidate) || getDocketContentStatus(candidate) === "descriptive" ||
+            number !== normalizeOrderText(entry.raw.row_number) || entryDateKey(candidate) !== entryDateKey(entry) ||
+            (label.split(" ").length < 2 && label !== "complaint") || !labelMatches(entry)) return false;
+        return entries.filter(row => hasUnverifiedMirrorNumber(row) && entryDateKey(row) === entryDateKey(entry) &&
+          labelMatches(row)).length === 1;
+      });
+    }
+    const numbers = new Set(matches.map(getDocketSequenceValue));
+    if (numbers.size !== 1) return { ...entry, entry_number: null, document_number: null };
+    const number = [...numbers][0];
+    return { ...entry, entry_number: number, document_number: number,
+      filed_at: entry.filed_at || matches.find(candidate => candidate.filed_at)?.filed_at || null,
+      raw: { ...entry.raw, verified_document_number: number } };
+  });
   const orderCollapsed = new Map();
   const orderlessEntries = [];
 
   for (const entry of entries) {
     const numberKey = normalizedEntryOrderKey(entry);
-    const orderKey = numberKey || "";
+    const text = normalizeEntryDescription(entry.description);
+    const orderKey = numberKey || (!hasUnverifiedMirrorNumber(entry) && entryDateKey(entry) && text.length >= 80 &&
+      getDocketContentStatus(entry) === "descriptive" ? `event:${entryDateKey(entry)}|${text}` : "");
     if (!orderKey) {
       orderlessEntries.push(entry);
       continue;
@@ -1321,6 +1363,20 @@ function dedupeEntries(entries) {
   }
 
   const candidates = [...orderCollapsed.values(), ...orderlessEntries];
+  const redundantStubs = new Set();
+  for (let index = 0; index < candidates.length; index++) {
+    const entry = candidates[index];
+    const label = normalizeEntryDescription(entry.description);
+    if (getDocketSequenceValue(entry) || !entryDateKey(entry) ||
+        !["case assigned", "clerks notice"].includes(label)) continue;
+    const matches = candidates.map((row, i) => ({ row, i })).filter(({ row, i }) => i !== index &&
+      entrySourcesDiffer(row, entry) && !getDocketSequenceValue(row) && entryDateKey(row) === entryDateKey(entry) &&
+      getDocketContentStatus(row) === "descriptive" && normalizeEntryDescription(row.description).startsWith(`${label} `));
+    if (matches.length === 1) {
+      candidates[matches[0].i] = mergeDisplayEntries(matches[0].row, entry);
+      redundantStubs.add(index);
+    }
+  }
   const familyCounts = new Map();
   for (const entry of candidates) {
     const familyKey = buildEntryFamilyKey(entry);
@@ -1334,7 +1390,11 @@ function dedupeEntries(entries) {
   const deduped = [];
   const dateBuckets = new Map();
 
-  for (const entry of candidates.sort(compareEntriesForTimeline)) {
+  for (const entry of candidates.filter((_, i) => !redundantStubs.has(i)).sort(compareEntriesForTimeline)) {
+    if (hasUnverifiedMirrorNumber(entry)) {
+      deduped.push(entry);
+      continue;
+    }
     const bucketKey = entryDateKey(entry);
     const bucket = dateBuckets.get(bucketKey) || [];
     let matchedIndex = -1;
@@ -1475,7 +1535,7 @@ const ENTRY_GENERIC_TOKENS = new Set([
 
 function tokenizeEntryDescription(value) {
   return String(value || "")
-    .replace(/\b([A-Za-z]+)'s\b/g, "$1s")
+    .replace(/\b([A-Za-z]+)'s\b/gi, "$1s")
     .toLowerCase()
     .replace(/[\u4e00-\u9fff]+/g, " ")
     .replace(/&/g, " and ")
@@ -1630,6 +1690,7 @@ function areSemanticallyDuplicateEntries(left, right, familyCounts = new Map()) 
   if (leftOrder && rightOrder) {
     return false;
   }
+  if (hasUnverifiedMirrorNumber(left) || hasUnverifiedMirrorNumber(right)) return false;
 
   const leftDate = entryDateKey(left);
   const rightDate = entryDateKey(right);
@@ -1982,7 +2043,8 @@ function mergeDisplayEntries(existing = null, incoming = null) {
     entry_number: pickPreferredEntryNumber(existing?.entry_number, incoming?.entry_number),
     document_number: pickPreferredEntryNumber(existing?.document_number, incoming?.document_number),
     filed_at: canonical?.filed_at || existing?.filed_at || incoming?.filed_at || null,
-    description: pickPreferredEntryDescription(existing?.description, incoming?.description),
+    description: docketContentScore(existing) !== docketContentScore(incoming)
+      ? canonical.description : pickPreferredEntryDescription(existing?.description, incoming?.description),
     description_zh: pickPreferredEntryDescription(existing?.description_zh, incoming?.description_zh),
     absolute_url: canonical?.absolute_url || pickPreferredEntryUrl(existing?.absolute_url, incoming?.absolute_url),
     is_available: pickPreferredNumericValue(existing?.is_available, incoming?.is_available),
@@ -2008,7 +2070,9 @@ function buildMergedDocketEntryRecord(existing = null, record = {}, timestamp = 
     entry_number: pickPreferredEntryNumber(existing?.entry_number, record.entry_number),
     document_number: pickPreferredEntryNumber(existing?.document_number, record.document_number),
     filed_at: laterIso(existingFiledAt, incomingFiledAt),
-    description: pickPreferredEntryDescription(existing?.description, record.description),
+    description: existing && docketContentScore(existing) !== docketContentScore(record)
+      ? (docketContentScore(record) > docketContentScore(existing) ? record.description : existing.description)
+      : pickPreferredEntryDescription(existing?.description, record.description),
     description_zh: existing?.description_zh || record.description_zh || null,
     absolute_url: pickPreferredEntryUrl(existing?.absolute_url, record.absolute_url),
     is_available: pickPreferredNumericValue(existing?.is_available, record.is_available),
@@ -2302,6 +2366,11 @@ export class Store {
         finished_at TEXT,
         stats_json TEXT,
         error_text TEXT
+      );
+
+      CREATE TABLE IF NOT EXISTS docket_completion_scan (
+        case_id INTEGER PRIMARY KEY REFERENCES cases(id) ON DELETE CASCADE,
+        evaluated_at TEXT NOT NULL
       );
 
       CREATE TABLE IF NOT EXISTS checkpoints (
@@ -4125,6 +4194,11 @@ export class Store {
     };
 
     const sourceEntryId = String(record?.source_entry_id || "").trim();
+    const mirror = hasUnverifiedMirrorNumber(record);
+    if (mirror) {
+      pushRows(this.db.prepare("SELECT * FROM docket_entries WHERE case_id = ? AND primary_source = ?")
+        .all(normalizedCaseId, primarySource));
+    }
     if (getRssDocketEvidence(record) && isPriorityFeedPrimarySource(primarySource)) {
       // Legacy row-position IDs cannot identify an event after a mirror inserts
       // newer rows. Reconcile only RSS evidence within this indexed case scope.
@@ -4161,6 +4235,12 @@ export class Store {
     }
 
     const targetKey = buildStoredEntryDeduplicationKey(record);
+    if (mirror) {
+      const matches = [...rowsById.values()].filter(row => hasUnverifiedMirrorNumber(row) &&
+        normalizeEntryDescription(row.description) === normalizeEntryDescription(record.description) &&
+        (!row.filed_at || !record.filed_at || entryDateKey(row) === entryDateKey(record)));
+      return matches.length === 1 ? matches : [];
+    }
     return [...rowsById.values()]
       .filter((row) => !targetKey || buildStoredEntryDeduplicationKey(row) === targetKey)
       .sort(compareEntriesForCanonicalRow);
@@ -4262,6 +4342,9 @@ export class Store {
         source_entry_id: isPriorityFeedPrimarySource(record.primary_source)
           ? `rss:${rss.notificationId || `document:${rss.number}`}` : record.source_entry_id,
         raw: { ...(record.raw || {}), source_row_number: record.raw?.source_row_number ?? record.entry_number } };
+    } else if (hasUnverifiedMirrorNumber(record)) {
+      const identity = crypto.createHash("sha1").update(`${record.filed_at || ""}|${normalizeEntryDescription(record.description)}`).digest("hex");
+      record = { ...record, source_entry_id: `mirror:${identity}`, entry_number: null, document_number: null };
     }
     const timestamp = nowIso();
     const exactExisting = hydrateEntry(
@@ -5201,71 +5284,46 @@ export class Store {
 
     const chunkSize = 900;
     const coverage = new Map();
-    if (!this.docketContentFunctionRegistered) {
-      this.db.function("docket_has_descriptive_content", { deterministic: true }, (description, descriptionZh, documentType) =>
-        getDocketContentStatus({ description, description_zh: descriptionZh, document_type: documentType }) === "descriptive" ? 1 : 0);
-      this.db.function("docket_integer_sequence", { deterministic: true }, (entryNumber, documentNumber, source, description, descriptionZh, rawJson) =>
-        getIntegerDocketSequence({ entry_number: entryNumber, document_number: documentNumber, primary_source: source,
-          description, description_zh: descriptionZh, raw: parseJson(rawJson, {}) }));
-      this.docketContentFunctionRegistered = true;
-    }
-    const numericOrderSql = "official_number";
-    const canonicalEntrySql = `
-      CASE
-        WHEN ${numericOrderSql} IS NOT NULL
-        THEN 'number:' || CAST(${numericOrderSql} AS TEXT)
-        ELSE 'text:' || COALESCE(filed_at, '') || '|' || lower(trim(COALESCE(description, '')))
-      END
-    `;
-    const substantiveSql = "has_descriptive_content = 1";
-
     for (let index = 0; index < ids.length; index += chunkSize) {
       const chunk = ids.slice(index, index + chunkSize);
       const placeholders = chunk.map(() => "?").join(", ");
-      const rows = this.db
-        .prepare(`
-          WITH entry_facts AS MATERIALIZED (
-            SELECT case_id, primary_source, filed_at, description,
-              docket_integer_sequence(entry_number, document_number, primary_source, description, description_zh, raw_json) AS official_number,
-              docket_has_descriptive_content(description, description_zh, document_type) AS has_descriptive_content
-            FROM docket_entries WHERE case_id IN (${placeholders})
-          )
-          SELECT
-            case_id,
-            COUNT(*) AS raw_entries,
-            COUNT(DISTINCT ${canonicalEntrySql}) AS total_entries,
-            COUNT(DISTINCT CASE WHEN ${substantiveSql} THEN ${canonicalEntrySql} END) AS descriptive_entries,
-            SUM(CASE WHEN primary_source = 'courtlistener' THEN 1 ELSE 0 END) AS courtlistener_entries,
-            SUM(CASE WHEN primary_source = '${PRIORITY_FEED_ENTRY_SOURCE}' THEN 1 ELSE 0 END) AS priority_entries,
-            SUM(CASE WHEN primary_source = 'pacermonitor' THEN 1 ELSE 0 END) AS pacermonitor_entries,
-            MAX(filed_at) AS latest_entry_filed_at,
-            COUNT(DISTINCT ${numericOrderSql}) AS numbered_entries,
-            MIN(${numericOrderSql}) AS first_number,
-            MAX(${numericOrderSql}) AS last_number
-          FROM entry_facts
-          GROUP BY case_id
-        `)
-        .all(...chunk);
-
-      for (const row of rows) {
+      let caseId = null;
+      let group = [];
+      const flush = () => {
+        if (!group.length) return;
+        const entries = dedupeEntries(group);
+        const numbers = [...new Set(entries.map(getIntegerDocketSequence).filter(n => n !== null))];
+        const descriptive = entries.filter(entry => getDocketContentStatus(entry) === "descriptive").length;
         const baseCoverage = {
-          totalEntries: Number(row.total_entries || 0),
-          descriptiveEntries: Number(row.descriptive_entries || 0),
-          titleOnlyEntries: Math.max(0, Number(row.total_entries || 0) - Number(row.descriptive_entries || 0)),
-          rawEntries: Number(row.raw_entries || 0),
-          courtlistenerEntries: Number(row.courtlistener_entries || 0),
-          priorityFeedEntries: Number(row.priority_entries || 0),
-          pacermonitorEntries: Number(row.pacermonitor_entries || 0),
-          latestEntryFiledAt: row.latest_entry_filed_at || null,
-          numberedEntries: Number(row.numbered_entries || 0),
-          firstNumber: Number(row.first_number || 0),
-          lastNumber: Number(row.last_number || 0)
+          totalEntries: entries.length,
+          descriptiveEntries: descriptive,
+          titleOnlyEntries: entries.length - descriptive,
+          rawEntries: group.length,
+          courtlistenerEntries: group.filter(entry => entry.primary_source === "courtlistener").length,
+          priorityFeedEntries: group.filter(entry => isPriorityFeedPrimarySource(entry.primary_source)).length,
+          pacermonitorEntries: group.filter(entry => entry.primary_source === "pacermonitor").length,
+          latestEntryFiledAt: entries.reduce((latest, entry) => laterIso(latest, entry.filed_at), null),
+          numberedEntries: numbers.length,
+          firstNumber: numbers.length ? Math.min(...numbers) : 0,
+          lastNumber: numbers.length ? Math.max(...numbers) : 0
         };
-        coverage.set(Number(row.case_id), {
+        coverage.set(caseId, {
           ...baseCoverage,
           ...getCoverageGapPressure(baseCoverage)
         });
+      };
+      // Keep at most one case in memory, rather than materializing a batch of
+      // raw JSON. Coverage and the UI now share the same canonical timeline.
+      for (const row of this.db.prepare(`SELECT * FROM docket_entries
+        WHERE case_id IN (${placeholders}) ORDER BY case_id, id`).iterate(...chunk)) {
+        if (caseId !== Number(row.case_id)) {
+          flush();
+          caseId = Number(row.case_id);
+          group = [];
+        }
+        group.push(hydrateEntry(row));
       }
+      flush();
     }
 
     return coverage;
@@ -5864,7 +5922,7 @@ export class Store {
 
   getCasesNeedingSupplementalDocketSync(
     limit,
-    { recentWindowDays = 120, startDate = "2025-01-01", excludeCaseIds = [] } = {}
+    { recentWindowDays = 120, startDate = "2025-01-01", excludeCaseIds = [], evaluationTime = null } = {}
   ) {
     const recentCutoff = Date.now() - recentWindowDays * 24 * 60 * 60 * 1000;
     const candidatePoolSize = Math.max(limit * 120, 360);
@@ -5876,20 +5934,33 @@ export class Store {
 
     const candidateRows = this.db
       .prepare(`
-        SELECT *
+        SELECT cases.*
         FROM cases
+        LEFT JOIN docket_completion_scan scan ON scan.case_id = cases.id
         WHERE date(date_filed) >= date(?)
           AND docket_number IS NOT NULL
           AND TRIM(docket_number) <> ''
           AND id NOT IN (SELECT CAST(value AS INTEGER) FROM json_each(?))
           AND ${buildTargetedDocketCoverageClause()}
-        ORDER BY ${CASE_PRIORITY_ACTIVITY_SQL} DESC
+        ORDER BY COALESCE(scan.evaluated_at, '') ASC, ${CASE_PRIORITY_ACTIVITY_SQL} DESC
         LIMIT ?
       `)
       .all(String(startDate || "2025-01-01"), JSON.stringify([...excludedIds]), candidatePoolSize)
       .map(buildCaseView)
       .filter((row) => !excludedIds.has(Number(row.id)));
     const entryCounts = this.getEntryCoverageForCaseIds(candidateRows.map((row) => row.id));
+    if (evaluationTime && Number.isFinite(Date.parse(evaluationTime))) {
+      this.db.exec("SAVEPOINT docket_completion_scan_batch");
+      try {
+        const mark = this.db.prepare(`INSERT INTO docket_completion_scan(case_id,evaluated_at) VALUES(?,?)
+          ON CONFLICT(case_id) DO UPDATE SET evaluated_at=excluded.evaluated_at`);
+        for (const row of candidateRows) mark.run(row.id, evaluationTime);
+        this.db.exec("RELEASE docket_completion_scan_batch");
+      } catch (error) {
+        this.db.exec("ROLLBACK TO docket_completion_scan_batch; RELEASE docket_completion_scan_batch");
+        throw error;
+      }
+    }
 
     return candidateRows
       .map((row) => {

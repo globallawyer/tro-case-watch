@@ -1,4 +1,10 @@
 import { getRssDocketEvidence } from "./docket-rss.js";
+import { isPriorityFeedPrimarySource } from "./priority-feed.js";
+
+export function hasUnverifiedMirrorNumber(entry = {}) {
+  return isPriorityFeedPrimarySource(entry.primary_source) && entry.raw?.row_number != null &&
+    !entry.raw?.verified_document_number && !getRssDocketEvidence(entry);
+}
 
 export function normalizeDocketSequenceValue(value) {
   const text = String(value ?? "").trim();
@@ -21,6 +27,8 @@ export function getDocketSequenceValue(entry = {}) {
   const raw = entry.raw || {};
   const rss = getRssDocketEvidence(entry);
   if (rss) return rss.number === "0" ? "" : rss.number;
+  if (raw.verified_document_number) return normalizeDocketSequenceValue(raw.verified_document_number);
+  if (hasUnverifiedMirrorNumber(entry)) return "";
   if (entry.primary_source === "courtfeed" && raw.sequenceNumber && !raw.documentNumber) return "";
   const documentType = raw.document_type ?? raw.documentType;
   const isAttachment = Number(documentType) === 2 ||

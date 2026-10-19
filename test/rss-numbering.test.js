@@ -61,7 +61,7 @@ test("legacy wrong mirror numbers merge with their real filing without rewriting
 }));
 
 test("one official number merges across source date disagreements without replacing rich text", () => withStore((store, id) => {
-  insert(store, id, "title", "2", "Notice", "2026-10-16");
+  insert(store, id, "title", "2", "Notice", "2026-10-16", "courtlistener");
   insert(store, id, "body", "2", "NOTICE: All parties must file their corporate disclosure statements within seven days.", "2026-10-15", "pacermonitor");
   const entries = store.getCase(id).entries;
   assert.equal(entries.length, 1);

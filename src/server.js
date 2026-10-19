@@ -37,7 +37,7 @@ import { loadTroDailyUpdates } from "./tro-daily-updates.js";
 import { getAvailableSystemMemoryMb } from "./system-memory.js";
 import { didEnrichmentComplete } from "./enrichment-outcome.js";
 import { getDocketContentStatus } from "./docket-content.js";
-import { analyzeDocketSequence, getDocketSequenceValue } from "./docket-sequence.js";
+import { analyzeDocketSequence, getDocketSequenceValue, hasUnverifiedMirrorNumber } from "./docket-sequence.js";
 import {
   claimWebhookEnrichmentJobState,
   enqueueWebhookEnrichmentJobState,
@@ -3248,6 +3248,7 @@ function serializePublicEntry(entry = {}) {
     entry_number: getDocketSequenceValue(entry) || null,
     document_number: getDocketSequenceValue(entry) || null,
     docket_sequence: getDocketSequenceValue(entry) || null,
+    sequence_status: getDocketSequenceValue(entry) ? "numbered" : hasUnverifiedMirrorNumber(entry) ? "unverified" : "unnumbered",
     content_status: getDocketContentStatus(entry),
     document_type: sanitizeEntryDocumentType(entry.document_type),
     description: sanitizePublicText(entry.description),
@@ -3300,6 +3301,7 @@ function serializePublicCaseDetail(item = {}) {
     numbered_docket_entries_count: sequence.numberedEntryCount,
     unnumbered_docket_entries_count: sequence.unnumberedEntryCount,
     docket_sequence_complete: !item.entries_truncated && sequence.isComplete && sequence.unnumberedEntryCount === 0,
+    docket_numbered_sequence_complete: !item.entries_truncated && sequence.isComplete,
     docket_content_complete: !item.entries_truncated && rawEntries.length > 0 && rawEntries.every((entry) => getDocketContentStatus(entry) === "descriptive"),
     docket_missing_ranges: item.entries_truncated ? [] : sequence.missingRanges,
     docket_missing_ranges_truncated: !item.entries_truncated && sequence.missingRangesTruncated,

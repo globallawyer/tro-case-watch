@@ -234,7 +234,7 @@ test("partial mirror refresh preserves previous filings from the same source", a
     const service = new CaseSyncService({ config: { sync: {} }, store,
       priorityFeed: { async enrichCase() { return { url: "https://example.test/case", entries: [{ row_number: "2", filed_at: "2026-04-12", description: "Docket entry 2" }] }; } } });
     await service.syncSinglePriorityFeedCase(store.getCase(saved.id));
-    assert.deepEqual(new Set(store.getCase(saved.id).entries.map(x => x.entry_number)), new Set(["1", "2"]));
+    assert.deepEqual(new Set(store.getCase(saved.id).entries.map(x => x.description)), new Set(["Docket entry 1", "Docket entry 2"]));
   } finally { store.db.close(); fs.rmSync(directory, { recursive: true, force: true }); }
 });
 
@@ -352,7 +352,7 @@ test("priority timeline refresh preserves complementary docket sources", async (
     assert.equal(result.enriched, true);
     assert.deepEqual(
       store.getCase(saved.id).entries.map((entry) => Number(entry.document_number)).sort((a, b) => a - b),
-      [1, 2, 3]
+      [0, 0, 3]
     );
     assert.equal(
       store.db.prepare("SELECT COUNT(*) AS count FROM docket_entries WHERE case_id = ? AND primary_source = 'courtlistener'").get(saved.id).count,

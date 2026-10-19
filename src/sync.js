@@ -1703,7 +1703,7 @@ export class CaseSyncService {
       casesUpserted += 1;
 
       for (const entry of entries) {
-        const documentNumber = entry.documentNumber ?? null;
+        const documentNumber = Number(entry.documentNumber) > 0 ? entry.documentNumber : null;
         const sourceEntryId = entry.entryId || `${item.docketId || normalizeDocketIdentity(docketNumber)}:${documentNumber || entry.filedAt || crypto.randomUUID()}`;
         const savedEntry = this.store.upsertDocketEntry({
           case_id: savedCase.id,
@@ -1713,7 +1713,7 @@ export class CaseSyncService {
           document_type: "Docket Entry",
           entry_number: documentNumber,
           document_number: documentNumber,
-          filed_at: entry.filedAt || item.dateFiled || null,
+          filed_at: entry.filedAt || null,
           description: entry.title || "Docket entry",
           absolute_url: entry.documentUrl || null,
           is_available: entry.documentUrl && !entry.restricted ? 1 : 0,
@@ -1731,6 +1731,7 @@ export class CaseSyncService {
           docketEntriesUpserted += 1;
         }
       }
+      if (entries.length) this.store.refreshCaseDocketSummary(savedCase.id, { touchUpdatedAt: false, exactDocketCount: true });
 
       for (const key of [primaryKey, fallbackKey].filter(Boolean)) {
         caseIndex.set(key, savedCase);
@@ -1865,7 +1866,7 @@ export class CaseSyncService {
             caseName: caseRow.case_name,
             dateFiled: caseRow.date_filed
           })
-        : await this.signalFeed.lookupByDocket(caseRow.docket_number);
+        : await this.signalFeed.lookupByDocket(caseRow.docket_number, { courtId: caseRow.court_id });
       if (!item) {
         return { enriched: false, reason: "not-found" };
       }
@@ -2543,7 +2544,8 @@ export class CaseSyncService {
     const candidates = this.store.getCasesNeedingSupplementalDocketSync(maxCases, {
       recentWindowDays: Math.max(Number(syncConfig.docketCompletionRecentWindowDays || 0), 30),
       startDate: getDiscoveryStartDate(this.config),
-      excludeCaseIds: [...excludedIds]
+      excludeCaseIds: [...excludedIds],
+      evaluationTime: nowIso
     });
     const queueDelayMs = Math.max(Number(syncConfig.docketCompletionQueueDelayMs || 0), 15 * 1000);
     const queuedCaseIds = [];
@@ -4849,9 +4851,11 @@ export class CaseSyncService {
     if (!payload || !payload.entries.length) {
       const timestamp = new Date().toISOString();
       const mergedRaw = mergePriorityFeedRaw(caseRow.raw, {
-        syncedAt: timestamp,
-        rowCount: 0,
-        missing: true
+        checkedAt: timestamp,
+        syncedAt: getPriorityFeedRaw(caseRow)?.syncedAt || null,
+        rowCount: getPriorityFeedRaw(caseRow)?.rowCount || 0,
+        missing: !payload,
+        state: payload ? "empty" : "not-found"
       });
 
       this.store.upsertCase({
@@ -4900,6 +4904,8 @@ export class CaseSyncService {
       year: payload.year,
       serial: payload.serial,
       matchQuality: payload.matchQuality || null,
+      missing: false,
+      checkedAt: timestamp,
       syncedAt: payload.syncedAt || timestamp
     });
 
@@ -4925,7 +4931,7 @@ export class CaseSyncService {
       defendants: caseRow.defendants || [],
       recent_activity_summary: payload.entries[0]?.description || caseRow.recent_activity_summary,
       latest_docket_filed_at: payload.entries[0]?.filed_at || caseRow.latest_docket_filed_at,
-      latest_docket_number: payload.entries[0]?.row_number || caseRow.latest_docket_number,
+      latest_docket_number: caseRow.latest_docket_number,
       docket_count: payload.entries.length,
       docket_count_exact: true,
       last_seen_at: timestamp,
@@ -4988,7 +4994,7 @@ export class CaseSyncService {
       recent_activity_summary: payload.entries?.[0]?.description || caseRow.recent_activity_summary,
       latest_docket_filed_at: payload.entries?.[0]?.filed_at || caseRow.latest_docket_filed_at,
       latest_docket_number: higherOrderValue(
-        payload.entries?.[0]?.row_number || caseRow.latest_docket_number,
+        caseRow.latest_docket_number,
         coverage?.lastNumber ? String(coverage.lastNumber) : null
       ),
       docket_count: Math.max(payload.entries?.length || 0, coverage?.totalEntries || 0),

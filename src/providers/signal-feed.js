@@ -108,7 +108,7 @@ function detailFromItem(item, detailUrl) {
   return {
     docketId: item.docket_id || null,
     docketNumber: normalizeDocketNumber(item.case_number),
-    caseName: item.case_name || null,
+    caseName: htmlDecode(item.case_name) || null,
     caseUrl: item.case_url || null,
     detailUrl,
     plaintiff: item.plaintiff || null,
@@ -124,7 +124,7 @@ function detailFromItem(item, detailUrl) {
     counselFirm: item.plaintiff_counsel_firm || null,
     entries: (Array.isArray(item.entries) ? item.entries : []).map((entry) => ({
       entryId: entry.entry_id || entry.db_doc_id || null,
-      title: entry.title || null,
+      title: htmlDecode(entry.title) || null,
       filedAt: normalizeSignalDate(entry.entry_date),
       documentNumber: entry.doc_number ?? null,
       documentUrl: entry.docLink || null,
@@ -464,26 +464,29 @@ export class SignalFeedClient {
     };
   }
 
-  async lookupByDocket(docketNumber) {
+  async lookupByDocket(docketNumber, identity = {}) {
     if (!this.enabled) {
       return null;
     }
 
     const normalized = normalizeDocketNumber(docketNumber).toLowerCase();
-    const candidates = this.apiKey && this.apiBaseUrl
-      ? await this.fetchApiRecent()
-      : await this.fetchPublicRecent();
-    const candidate = candidates.find((item) => normalizeDocketNumber(item.docketNumber).toLowerCase() === normalized);
-    if (!candidate) {
-      return null;
+    // The latest 15 rows are discovery, not a historical case lookup.
+    const url = new URL(this.publicCasesUrl);
+    url.pathname = url.pathname.replace(/\/$/, "");
+    url.searchParams.set("q", normalized.replace(/^\d+:/, "").replace(/^(\d{2})-/, "20$1-"));
+    const candidates = parsePublicRows(await this.requestText(url.toString()), url.toString())
+      .filter(item => normalizeDocketNumber(item.docketNumber).toLowerCase() === normalized &&
+        new URL(item.detailUrl).origin === url.origin);
+    if (candidates.length > 3) return null;
+    const matches = [];
+    for (const candidate of candidates) {
+      const detail = await this.fetchPublicDetail(candidate.detailUrl);
+      if (!detail || normalizeDocketNumber(detail.docketNumber).toLowerCase() !== normalized) continue;
+      if (identity.courtId && detail.courtId !== identity.courtId &&
+          !(identity.courtId.length === 2 && detail.courtId?.startsWith(identity.courtId))) continue;
+      matches.push({ ...candidate, ...detail });
     }
-
-    const detail = candidate.detailUrl
-      ? await this.fetchPublicDetail(candidate.detailUrl)
-      : this.apiKey
-        ? await this.fetchApiEntries(candidate)
-        : null;
-    return { ...candidate, ...(detail || {}) };
+    return matches.length === 1 ? matches[0] : null;
   }
 
   async fetchKnownCase(candidate = {}) {

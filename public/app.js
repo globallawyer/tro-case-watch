@@ -775,7 +775,7 @@ function renderDetail(item) {
     {
       label: "Docket 归档情况",
       value: entries.length
-        ? `${entriesTruncated ? "当前加载" : "已归档"} ${entries.length} 条 · 带正文 ${textCount} 条`
+        ? `${entriesTruncated ? "当前加载" : "已归档"} ${entries.length} 条 · 带详细说明 ${textCount} 条`
         : "仅案件摘要"
     }
   ];
@@ -824,6 +824,8 @@ function renderDetail(item) {
           ${entriesTruncated ? '<span class="tag-pill">完整时间线继续加载中</span>' : ""}
           ${docketGapCount > 0 ? `<span class="tag-pill">已知缺口至少 ${docketGapCount} 条</span>` : ""}
           ${missingRangeLabel ? `<span class="tag-pill">待补序号 ${missingRangeLabel}</span>` : ""}
+          ${item.docket_numbered_sequence_complete ? '<span class="tag-pill">已收录的编号区间连续</span>' : ""}
+          ${item.unnumbered_docket_entries_count ? `<span class="tag-pill">另有 ${Number(item.unnumbered_docket_entries_count)} 条未编号或待核验记录，不编造序号</span>` : ""}
           ${item.latest_docket_number ? `<span class="tag-pill">最高已知编号 #${item.latest_docket_number}，非已抓取数量</span>` : ""}
           ${titleOnlyCount ? `<span class="tag-pill">${titleOnlyCount} 条仅有标题或通知，正文待补</span>` : ""}
         </div>
@@ -882,7 +884,7 @@ function renderDetail(item) {
               const docketSequence = Object.hasOwn(entry, "docket_sequence")
                 ? entry.docket_sequence || ""
                 : entry.entry_number || entry.document_number || "";
-              const numPrefix = docketSequence ? `#${docketSequence} · ` : "序号待补 · ";
+              const numPrefix = docketSequence ? `#${docketSequence} · ` : entry.sequence_status === "unverified" ? "编号待核验 · " : "未编号记录 · ";
               return `
                 <article class="timeline-item">
                   <div class="timeline-item-head">
