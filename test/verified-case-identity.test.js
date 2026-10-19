@@ -53,6 +53,36 @@ test("two confirmed offices with the same plaintiff and date remain ambiguous", 
   assert.equal(store.findCatalogPlaceholderForCase(verified), null);
 }));
 
+test("existing verified local counterparts share a timeline and coverage without rewriting either source record", () => withStore(store => {
+  const short = store.upsertCase(record("short"));
+  const full = store.upsertCase(record("full", { docket_number: verified.docketNumber, primary_source: "courtfeed" }));
+  store.upsertDocketEntry({ case_id: full.id, source_entry_key: "rich", source_entry_id: "rich", primary_source: "signal-feed",
+    entry_number: "1", filed_at: "2026-10-16", description: "COMPLAINT: Plaintiff alleges infringement and requests injunctive relief." });
+  assert.equal(store.getCase(short.id).entries.length, 1);
+  assert.equal(store.getCase(short.id).docket_number, verified.docketNumber);
+  assert.deepEqual(store.getEntryCoverageForCaseIds([short.id]).get(short.id), store.getEntryCoverageForCaseIds([full.id]).get(full.id));
+  assert.equal(store.db.prepare("SELECT docket_number FROM cases WHERE id=?").get(short.id).docket_number, reference.docket_number);
+}));
+
+test("a competing office outside the requested batch prevents every ambiguous short-record join", () => withStore(store => {
+  const short = store.upsertCase(record("short"));
+  const one = store.upsertCase(record("one", { docket_number: "1:26-cv-12712" }));
+  const two = store.upsertCase(record("two", { docket_number: "2:26-cv-12712" }));
+  store.upsertDocketEntry({ case_id: short.id, source_entry_key: "short-entry", source_entry_id: "short-entry", primary_source: "61tro", description: "ORDER: Unknown office record." });
+  assert.equal(store.getCase(one.id).entries.length, 0);
+  assert.equal(store.getCase(two.id).entries.length, 0);
+  assert.equal(store.getEntryCoverageForCaseIds([one.id]).has(one.id), false);
+  assert.equal(store.getCase(short.id).entries.length, 1);
+}));
+
+test("different plaintiff, court or filing date cannot acquire a local counterpart's docket", () => withStore(store => {
+  store.upsertCase(record("full", { docket_number: verified.docketNumber }));
+  for (const [index, change] of [{ case_name: "Different Plaintiff v. Schedule A" }, { court_id: "nysd" }, { date_filed: "2026-10-15" }, { date_filed: null }].entries()) {
+    const short = store.upsertCase(record(`mismatch-${index}`, change));
+    assert.equal(store.getCase(short.id).docket_number, reference.docket_number);
+  }
+}));
+
 test("public lookup accepts a missing office only with complete identity evidence", async () => {
   const client = new SignalFeedClient({ enabled: true, publicCasesUrl: "https://example.test/en/cases/" });
   client.requestText = async () => '<tr><td><a href="/en/cases/verified">1:2026-cv-12712</a></td></tr>';

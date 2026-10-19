@@ -5,6 +5,12 @@ function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function rejectVerificationPage(html) {
+  if (/<title>\s*(?:安全验证|访问验证|Security Verification|Just a moment)/i.test(html) || /name=["']slider_token["']/i.test(html)) {
+    throw Object.assign(new Error("Priority source requires human verification; no docket data received"), { code: "SOURCE_CHALLENGE" });
+  }
+}
+
 function stripTags(value) {
   return String(value || "").replace(/<[^>]+>/g, " ");
 }
@@ -332,7 +338,8 @@ export class CatalogClient {
       if (payload?.code === 1 && payload.url) {
         return payload.url;
       }
-    } catch {
+    } catch (error) {
+      if (error.code === "SOURCE_CHALLENGE" || [403, 429].includes(Number(error.status))) throw error;
       return `/case-${stateCode}-${year}-cv-${serial}.html`;
     }
 
@@ -361,10 +368,12 @@ export class CatalogClient {
       }
     }
 
+    if (!listings.length) throw Object.assign(new Error("No catalog rows could be verified; previous discovery state preserved"), { code: "EMPTY_DISCOVERY" });
     return listings;
   }
 
   parseListingPage(html, pageUrl) {
+    rejectVerificationPage(html);
     const rows = [];
     const tableRows = String(html || "").matchAll(/<tr>([\s\S]*?)<\/tr>/gi);
 
@@ -411,11 +420,7 @@ export class CatalogClient {
   }
 
   parseCasePage(html, pageUrl, meta) {
-    if (/<title>\s*(?:安全验证|访问验证|Security Verification|Just a moment)/i.test(html) || /name=["']slider_token["']/i.test(html)) {
-      const error = new Error("Priority source requires human verification; no docket data received");
-      error.code = "SOURCE_CHALLENGE";
-      throw error;
-    }
+    rejectVerificationPage(html);
     const canonicalUrl = new URL(pageUrl);
     canonicalUrl.search = "";
     canonicalUrl.hash = "";
@@ -515,9 +520,8 @@ export class CatalogClient {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), this.timeoutMs);
 
-    let response;
     try {
-      response = await fetch(url, {
+      const response = await fetch(url, {
         ...options,
         signal: controller.signal,
         headers: {
@@ -526,26 +530,43 @@ export class CatalogClient {
           ...(options.headers || {})
         }
       });
+      if (!response.ok) {
+        await response.body?.cancel();
+        const retryAfter = response.headers.get("retry-after");
+        const retryAfterMs = /^\d+$/.test(retryAfter || "") ? Number(retryAfter) * 1000
+          : Math.max(0, Date.parse(retryAfter || "") - Date.now()) || 0;
+        throw Object.assign(new Error(`${PRIORITY_FEED_PUBLIC_LABEL} 请求失败：${response.status}`), { status: response.status, retryAfterMs });
+      }
+      const reader = response.body?.getReader();
+      let text = "";
+      let bytes = 0;
+      const decoder = new TextDecoder();
+      if (reader) {
+        try {
+          while (true) {
+            const chunk = await reader.read();
+            if (chunk.done) break;
+            bytes += chunk.value.byteLength;
+            if (bytes > 4 * 1024 * 1024) {
+              await reader.cancel();
+              throw Object.assign(new Error("Public docket page exceeds 4 MiB safety limit"), { code: "RESPONSE_TOO_LARGE" });
+            }
+            text += decoder.decode(chunk.value, { stream: true });
+          }
+          text += decoder.decode();
+        } finally { reader.releaseLock(); }
+      }
+      rejectVerificationPage(text);
+      return text;
     } catch (error) {
       if (error?.name === "AbortError") {
-        throw new Error(`${PRIORITY_FEED_PUBLIC_LABEL} 请求超时（${this.timeoutMs}ms）`);
+        throw Object.assign(new Error(`${PRIORITY_FEED_PUBLIC_LABEL} 请求超时（${this.timeoutMs}ms）`), { code: "REQUEST_TIMEOUT" });
       }
 
       throw error;
     } finally {
       clearTimeout(timeoutId);
+      this.lastRequestAt = Date.now();
     }
-
-    this.lastRequestAt = Date.now();
-
-    const text = await response.text();
-    if (!response.ok) {
-      const error = new Error(`${PRIORITY_FEED_PUBLIC_LABEL} 请求失败：${response.status}`);
-      error.status = response.status;
-      error.body = text;
-      throw error;
-    }
-
-    return text;
   }
 }

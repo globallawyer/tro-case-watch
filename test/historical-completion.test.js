@@ -44,6 +44,13 @@ test("historical lookup does not follow a foreign-origin case link", async () =>
   assert.equal(await client.lookupByDocket("1:26-cv-04482"), null);
 });
 
+test("newly filed incomplete cases precede older high-gap cases", () => withStore(store => {
+  store.upsertCase(caseRecord({ source_case_key: "old-high-gap", docket_count: 10000, latest_docket_number: "10000" }));
+  const newest = store.upsertCase(caseRecord({ source_case_key: "newest", docket_number: "1:26-cv-12345",
+    date_filed: new Date().toISOString().slice(0, 10), docket_count: 0, latest_docket_number: null }));
+  assert.equal(store.getCasesNeedingSupplementalDocketSync(1)[0].id, newest.id);
+}));
+
 test("coverage includes same-case source copies outside the candidate list without crossing court or office", () => withStore(store => {
   const empty = store.upsertCase(caseRecord({ source_case_key: "empty-copy" }));
   const rich = store.upsertCase(caseRecord({ source_case_key: "rich-copy", primary_source: "signal-feed" }));
@@ -64,7 +71,7 @@ test("coverage joins normalized full-year copies but never guesses an absent off
   const saved = store.upsertCase(caseRecord());
   const fullYear = store.upsertCase(caseRecord({ source_case_key: "full-year" }));
   store.db.prepare("UPDATE cases SET docket_number=? WHERE id=?").run("1:2026-cv-04482", fullYear.id);
-  const noOffice = store.upsertCase(caseRecord({ source_case_key: "unknown-office", docket_number: "26-cv-04482" }));
+  const noOffice = store.upsertCase(caseRecord({ source_case_key: "unknown-office", docket_number: "26-cv-04482", date_filed: "2026-04-22" }));
   store.upsertDocketEntry(entry(fullYear.id, "full-year-text", "signal-feed", "1", "ORDER: The Court directs the parties to file their joint report."));
   store.upsertDocketEntry(entry(noOffice.id, "unknown-office-text", "signal-feed", "77", "ORDER: Office identity is not verified for this separate record."));
   const coverage = store.getEntryCoverageForCaseIds([saved.id]).get(saved.id);

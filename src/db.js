@@ -29,7 +29,7 @@ import { getDocketSequenceValue, getIntegerDocketSequence, hasUnverifiedMirrorNu
 import { getRssDocketEvidence } from "./docket-rss.js";
 import { docketContentScore, getDocketContentStatus } from "./docket-content.js";
 import { normalizeDocketFiledAt } from "./docket-date.js";
-import { verifiesMissingOffice } from "./verified-case-identity.js";
+import { verifiesMissingOffice, resolveVerifiedOfficePeers } from "./verified-case-identity.js";
 import { isPrimaryDocketEntry, docketTimelineTime } from "./docket-presentation.js";
 
 function nowIso() {
@@ -2072,6 +2072,7 @@ function mergeDisplayEntries(existing = null, incoming = null) {
   const canonical = compareEntriesForCanonicalRow(existing, incoming) <= 0 ? existing : incoming;
   const primary = isPrimaryDocketEntry(canonical);
   const supplemental = canonical === existing ? incoming : existing;
+  const supplementalBody = primary && getDocketContentStatus(canonical) !== "descriptive" && getDocketContentStatus(supplemental) === "descriptive";
   const mergedSources = mergeArraysNormalized(
     Array.isArray(existing?.raw?.merged_sources) ? existing.raw.merged_sources : [],
     Array.isArray(incoming?.raw?.merged_sources) ? incoming.raw.merged_sources : [],
@@ -2082,13 +2083,13 @@ function mergeDisplayEntries(existing = null, incoming = null) {
     ...canonical,
     primary_source: canonical?.primary_source || pickPreferredDisplayPrimarySource(existing?.primary_source, incoming?.primary_source),
     source_entry_id: canonical?.source_entry_id || existing?.source_entry_id || incoming?.source_entry_id || null,
-    document_type: canonical?.document_type || pickPreferredEntryType(existing?.document_type, incoming?.document_type),
+    document_type: supplementalBody ? canonical.description || canonical.document_type : canonical?.document_type || pickPreferredEntryType(existing?.document_type, incoming?.document_type),
     entry_number: primary ? getDocketSequenceValue(canonical) || null : pickPreferredEntryNumber(existing?.entry_number, incoming?.entry_number),
     document_number: primary ? getDocketSequenceValue(canonical) || null : pickPreferredEntryNumber(existing?.document_number, incoming?.document_number),
     filed_at: canonical?.filed_at || existing?.filed_at || incoming?.filed_at || null,
-    description: primary ? canonical.description || supplemental.description || null : docketContentScore(existing) !== docketContentScore(incoming)
+    description: supplementalBody ? supplemental.description : primary ? canonical.description || supplemental.description || null : docketContentScore(existing) !== docketContentScore(incoming)
       ? canonical.description : pickPreferredEntryDescription(existing?.description, incoming?.description),
-    description_zh: primary ? canonical.description_zh || (!canonical.description ? supplemental.description_zh : null) || null
+    description_zh: supplementalBody ? supplemental.description_zh || null : primary ? canonical.description_zh || (!canonical.description ? supplemental.description_zh : null) || null
       : pickPreferredEntryDescription(existing?.description_zh, incoming?.description_zh),
     absolute_url: canonical?.absolute_url || pickPreferredEntryUrl(existing?.absolute_url, incoming?.absolute_url),
     is_available: primary ? canonical.is_available ?? supplemental.is_available ?? null : pickPreferredNumericValue(existing?.is_available, incoming?.is_available),
@@ -2096,6 +2097,7 @@ function mergeDisplayEntries(existing = null, incoming = null) {
     pacer_doc_id: primary ? canonical.pacer_doc_id || supplemental.pacer_doc_id || null : preferLongerNormalizedValue(existing?.pacer_doc_id, incoming?.pacer_doc_id) || null,
     raw: mergeNestedObjects(supplemental?.raw || {}, canonical?.raw || {}, {
       merged_sources: mergedSources,
+      ...(supplementalBody ? { primary_title: canonical.description || null, body_supplement_source: supplemental.primary_source } : {}),
       merged_entry_ids: [...new Set([existing.id, incoming.id,
         ...(existing.raw?.merged_entry_ids || []), ...(incoming.raw?.merged_entry_ids || [])].filter(Boolean))]
     })
@@ -4877,37 +4879,11 @@ export class Store {
       return null;
     }
 
-    const canonicalGroupKey = buildCanonicalCaseGroupKey(row);
-    const { exactNeedles, suffixNeedles } = buildDocketSearchNeedles(row.docket_number);
-    const clauses = [];
-    const params = [];
-
-    for (const needle of exactNeedles) {
-      clauses.push("lower(docket_number) = ?");
-      params.push(needle);
-    }
-
-    for (const needle of suffixNeedles) {
-      clauses.push("lower(docket_number) LIKE ?");
-      params.push(`%${needle}`);
-    }
-
-    const matchedPeerRows = clauses.length
-      ? this.db
-          .prepare(`
-            SELECT *
-            FROM cases
-            WHERE ${clauses.join(" OR ")}
-            LIMIT 250
-          `)
-          .all(...params)
-          .map(hydrateCase)
-          .filter((candidate) => buildCanonicalCaseGroupKey(candidate) === canonicalGroupKey)
-      : [row];
-    const peerRows = matchedPeerRows.length ? matchedPeerRows : [row];
-
+    const group = this.iterateCasePeerGroups([Number(row.id)]).next().value;
+    const peerIds = group?.peerIds?.length ? group.peerIds : [Number(row.id)];
+    const peerRows = this.db.prepare(`SELECT * FROM cases WHERE id IN (${peerIds.map(() => "?").join(",")})`)
+      .all(...peerIds).map(hydrateCase);
     const canonicalRow = mergeDuplicateCaseGroup(peerRows.map(buildCaseView));
-    const peerIds = [...new Set(peerRows.map((candidate) => Number(candidate.id)).filter((value) => Number.isFinite(value) && value > 0))];
     const placeholders = peerIds.map(() => "?").join(", ");
     const rawEntries = this.db
       .prepare(`
@@ -5330,51 +5306,82 @@ export class Store {
       .map((item) => item.row);
   }
 
-  *iterateCaseDockets(caseIds = []) {
+  *iterateCasePeerGroups(caseIds = []) {
     const ids = [...new Set(caseIds.map((value) => Number(value)).filter((value) => Number.isFinite(value) && value > 0))];
     if (!ids.length) {
       return;
     }
 
-    const chunkSize = 900;
+    const chunkSize = 300;
     for (let index = 0; index < ids.length; index += chunkSize) {
       const chunk = ids.slice(index, index + chunkSize);
       const placeholders = chunk.map(() => "?").join(", ");
-      const metadata = this.db.prepare(`SELECT id,court_id,court_name,docket_number FROM cases WHERE id IN (${placeholders})`).all(...chunk);
-      const groups = new Map();
+      const columns = "id,court_id,court_name,docket_number,case_name,date_filed";
+      const metadata = this.db.prepare(`SELECT ${columns} FROM cases WHERE id IN (${placeholders})`).all(...chunk);
+      const peersById = new Map(metadata.map(row => [Number(row.id), row]));
       const needles = new Set();
       for (const row of metadata) {
-        const key = buildCanonicalCaseGroupKey(row) || `id:${row.id}`;
-        if (!groups.has(key)) groups.set(key, { requested: [], peers: new Set() });
-        groups.get(key).requested.push(Number(row.id));
-        groups.get(key).peers.add(Number(row.id));
         needles.add(String(row.docket_number || ""));
         for (const needle of buildDocketSearchNeedles(row.docket_number).exactNeedles) needles.add(needle);
         const identity = normalizeDocketIdentity(row.docket_number);
-        needles.add(identity);
-        needles.add(identity.replace(/^(\d+:)?(\d{2})-/, (_, office = "", year) => `${office}20${year}-`));
+        for (const variant of [identity, identity.replace(/^\d+:/, "")]) {
+          needles.add(variant);
+          needles.add(variant.replace(/^(\d+:)?(\d{2})-/, (_, office = "", year) => `${office}20${year}-`));
+        }
       }
       // Resolve same-identity source copies through the docket index, not one
-      // table scan per case. Never join a short number to an unknown office.
+      // table scan per case. Resolve unknown offices only with verified evidence.
       const needleList = [...needles].filter(Boolean);
       for (let offset = 0; offset < needleList.length; offset += chunkSize) {
         const part = needleList.slice(offset, offset + chunkSize);
-        for (const peer of this.db.prepare(`SELECT id,court_id,court_name,docket_number FROM cases
+        for (const peer of this.db.prepare(`SELECT ${columns} FROM cases
           WHERE docket_number IN (${part.map(() => "?").join(",")})`).iterate(...part)) {
-          groups.get(buildCanonicalCaseGroupKey(peer))?.peers.add(Number(peer.id));
+          peersById.set(Number(peer.id), peer);
         }
       }
+      // A missing office is resolved only from independently matching court,
+      // plaintiff and filing date. Indexed date ranges also find competing
+      // offices, so a partial batch cannot accidentally hide ambiguity.
+      const dates = [...new Set([...peersById.values()].filter(row =>
+        !/^\d+:/.test(normalizeDocketIdentity(row.docket_number)) && /^[a-z]{2}(?:nd|sd|ed|wd|md|cd|d)$/.test(row.court_id || ""))
+        .map(row => String(row.date_filed || "").slice(0, 10)).filter(date => /^\d{4}-\d{2}-\d{2}$/.test(date)))];
+      for (let offset = 0; offset < dates.length; offset += 100) {
+        const part = dates.slice(offset, offset + 100);
+        const ranges = part.flatMap(date => [date, new Date(Date.parse(`${date}T00:00:00Z`) + 86400000).toISOString().slice(0, 10)]);
+        for (const peer of this.db.prepare(`SELECT ${columns} FROM cases WHERE ${part.map(() => "(date_filed >= ? AND date_filed < ?)").join(" OR ")}`).iterate(...ranges)) {
+          peersById.set(Number(peer.id), peer);
+        }
+      }
+      const byCore = new Map();
+      for (const peer of peersById.values()) {
+        const key = `${peer.court_id || peer.court_name}|${normalizeDocketIdentity(peer.docket_number).replace(/^\d+:/, "")}`;
+        const bucket = byCore.get(key) || [];
+        bucket.push(peer);
+        byCore.set(key, bucket);
+      }
+      const groups = new Map();
+      for (const row of metadata) {
+        const key = `${row.court_id || row.court_name}|${normalizeDocketIdentity(row.docket_number).replace(/^\d+:/, "")}`;
+        const peers = resolveVerifiedOfficePeers(row, byCore.get(key) || [row], buildCanonicalCaseGroupKey);
+        const peerIds = peers.map(peer => Number(peer.id)).sort((a, b) => a - b);
+        const identity = peerIds.join(",");
+        if (!groups.has(identity)) groups.set(identity, { caseIds: [], peerIds });
+        groups.get(identity).caseIds.push(Number(row.id));
+      }
+      yield* groups.values();
+    }
+  }
+
+  *iterateCaseDockets(caseIds = []) {
+    for (const { caseIds: requested, peerIds } of this.iterateCasePeerGroups(caseIds)) {
       // Each query is an indexed case-id lookup. Do not sort the whole batch's
       // raw JSON by a computed group key, which can exhaust the worker's memory.
-      for (const coverageGroup of groups.values()) {
-        const peerIds = [...coverageGroup.peers];
-        const group = [];
-        for (const row of this.db.prepare(`SELECT * FROM docket_entries
-          WHERE case_id IN (${peerIds.map(() => "?").join(",")}) ORDER BY case_id,id`).iterate(...peerIds)) {
-          group.push(hydrateEntry(row));
-        }
-        yield { caseIds: coverageGroup.requested, peerIds, entries: dedupeEntries(group), rawEntries: group };
+      const group = [];
+      for (const row of this.db.prepare(`SELECT * FROM docket_entries
+        WHERE case_id IN (${peerIds.map(() => "?").join(",")}) ORDER BY case_id,id`).iterate(...peerIds)) {
+        group.push(hydrateEntry(row));
       }
+      yield { caseIds: requested, peerIds, entries: dedupeEntries(group), rawEntries: group };
     }
   }
 
@@ -6003,6 +6010,7 @@ export class Store {
     { recentWindowDays = 120, startDate = "2025-01-01", excludeCaseIds = [], evaluationTime = null } = {}
   ) {
     const recentCutoff = Date.now() - recentWindowDays * 24 * 60 * 60 * 1000;
+    const newlyFiledCutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
     const candidatePoolSize = Math.max(limit * 120, 360);
     const excludedIds = new Set(
       (Array.isArray(excludeCaseIds) ? excludeCaseIds : [])
@@ -6020,10 +6028,11 @@ export class Store {
           AND TRIM(docket_number) <> ''
           AND id NOT IN (SELECT CAST(value AS INTEGER) FROM json_each(?))
           AND ${buildTargetedDocketCoverageClause()}
-        ORDER BY COALESCE(scan.evaluated_at, '') ASC, ${CASE_PRIORITY_ACTIVITY_SQL} DESC
+        ORDER BY CASE WHEN date_filed >= ? AND scan.case_id IS NULL THEN 0 ELSE 1 END,
+          COALESCE(scan.evaluated_at, '') ASC, ${CASE_PRIORITY_ACTIVITY_SQL} DESC
         LIMIT ?
       `)
-      .all(String(startDate || "2025-01-01"), JSON.stringify([...excludedIds]), candidatePoolSize)
+      .all(String(startDate || "2025-01-01"), JSON.stringify([...excludedIds]), newlyFiledCutoff, candidatePoolSize)
       .map(buildCaseView)
       .filter((row) => !excludedIds.has(Number(row.id)));
     const entryCounts = this.getEntryCoverageForCaseIds(candidateRows.map((row) => row.id));
@@ -6098,11 +6107,17 @@ export class Store {
           hasContinuityGap,
           missingPriorityFeedCoverage,
           activityAtRaw,
-          shouldSync
+          shouldSync,
+          newlyFiled: String(row.date_filed || "") >= newlyFiledCutoff
         };
       })
       .filter((item) => item.shouldSync)
       .sort((left, right) => {
+        if (left.newlyFiled !== right.newlyFiled) return left.newlyFiled ? -1 : 1;
+        if (left.newlyFiled && right.newlyFiled) {
+          const filedCompare = String(right.row.date_filed).localeCompare(String(left.row.date_filed));
+          if (filedCompare) return filedCompare;
+        }
         if (left.priority !== right.priority) {
           return left.priority - right.priority;
         }

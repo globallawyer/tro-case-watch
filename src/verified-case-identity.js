@@ -22,3 +22,20 @@ export function verifiesMissingOffice(reference = {}, candidate = {}) {
     court === candidateCourt && plaintiff.length >= 8 && plaintiff === candidatePlaintiff &&
     !/^(?:unknown|unidentified)/.test(plaintiff) && /^\d{4}-\d{2}-\d{2}$/.test(filedAt) && filedAt === candidateFiledAt);
 }
+
+export function resolveVerifiedOfficePeers(reference, candidates, groupKey = row =>
+  `${String(row.court_id || row.court_name || "").toLowerCase()}|${normalizeDocketIdentity(row.docket_number)}`) {
+  const identity = row => normalizeDocketIdentity(row.docket_number);
+  const full = candidates.filter(row => /^\d+:/.test(identity(row)));
+  const matches = row => full.filter(candidate => verifiesMissingOffice(row, candidate));
+  let anchor = reference;
+  if (!/^\d+:/.test(identity(reference))) {
+    const verified = matches(reference);
+    if (new Set(verified.map(identity)).size === 1) anchor = verified[0];
+  }
+  return candidates.filter(row => {
+    if (groupKey(row) === groupKey(anchor)) return true;
+    if (!/^\d+:/.test(identity(anchor)) || !verifiesMissingOffice(row, anchor)) return false;
+    return new Set(matches(row).map(identity)).size === 1;
+  });
+}

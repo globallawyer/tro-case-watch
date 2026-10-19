@@ -77,7 +77,7 @@ export function auditPriorityPolicy(dbPath, { progress = () => {} } = {}) {
               - (Date.parse(left.last_synced_at || left.updated_at || "") || 0));
           const latestTime = versions.length ? Date.parse(versions[0].last_synced_at || versions[0].updated_at || "") || 0 : 0;
           const latest = versions.filter(row => (Date.parse(row.last_synced_at || row.updated_at || "") || 0) === latestTime);
-          if (latest.some(row => row.description) && !latest.some(row => row.description === entry.description)) {
+          if (latest.some(row => getDocketContentStatus(row) === "descriptive") && !latest.some(row => row.description === entry.description)) {
             fail("primary_wording_not_retained", id, entry.id);
           }
         }

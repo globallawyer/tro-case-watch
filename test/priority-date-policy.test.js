@@ -67,6 +67,17 @@ test("missing primary content can be supplied without losing the primary date", 
   assert.equal(entry.filed_at, "2026-06-10");
 }));
 
+test("a primary title is retained as the heading while a matched auxiliary body fills its missing explanation", () => withStore(({ store, row, save }) => {
+  save("aux-body", "signal-feed", "1", "COMPLAINT: Plaintiff alleges infringement of the registered marks in Exhibit A.");
+  save("primary-title", "worldtro", "1", "Complaint");
+  const entry = store.getCase(row.id).entries[0];
+  assert.equal(entry.primary_source, "worldtro");
+  assert.equal(entry.document_type, "Complaint");
+  assert.match(entry.description, /alleges infringement/);
+  assert.equal(entry.raw.primary_title, "Complaint");
+  assert.equal(entry.raw.body_supplement_source, "signal-feed");
+}));
+
 test("unique unnumbered primary text replaces its auxiliary variant without trusting table position", () => withStore(({ store, row, save }) => {
   const text = "MOTION by Example Brand for preliminary injunction against Store Alpha and Store Beta identified in Exhibit A";
   save("aux", "courtlistener", "30", `${text}, with supporting exhibits and counsel declaration.`);

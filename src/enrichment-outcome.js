@@ -38,7 +38,7 @@ export function nextEnrichmentProviderState(previous = {}, failure, { now = Date
   if (!failure) return { failures: 0, nextAttemptAt: null, checkedAt: new Date(now).toISOString() };
   if (!failure.retryable || failure.deferred ||
       failure.status === 404 ||
-      ["EMPTY", "METADATA_ONLY", "EMPTY_RESULT"].includes(failure.code)) return previous;
+      ["EMPTY", "METADATA_ONLY", "EMPTY_RESULT", "EMPTY_CASE_SEARCH"].includes(failure.code)) return previous;
   const failures = Math.min(Number(previous.failures || 0) + 1, 12);
   const delay = Math.max(Number(failure.retryAfterMs || 0), Math.min(6 * 60 * 60 * 1000, 10 * 60 * 1000 * 2 ** (failures - 1)));
   return {

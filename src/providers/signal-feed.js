@@ -479,7 +479,7 @@ export class SignalFeedClient {
     url.searchParams.set("q", normalized.replace(/^\d+:/, "").replace(/^(\d{2})-/, "20$1-"));
     const rows = parsePublicRows(await this.requestText(url.toString()), url.toString());
     if (!rows.length) {
-      throw signalFeedError("EMPTY_DISCOVERY", "public search could not verify any case rows; not proof of case absence");
+      throw signalFeedError("EMPTY_CASE_SEARCH", "public search could not verify this case; not proof of source-wide failure");
     }
     const candidates = rows
       .filter(item => (normalizeDocketNumber(item.docketNumber).toLowerCase() === normalized ||

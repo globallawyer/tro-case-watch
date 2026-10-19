@@ -19,7 +19,9 @@ const store = apply ? new Store(dbPath) : Object.assign(Object.create(Store.prot
 });
 const service = new CaseSyncService({ config: { sync: {} }, store });
 const results = [];
+let transaction = false;
 try {
+  if (apply) { store.db.exec("BEGIN IMMEDIATE"); transaction = true; }
   for (const { targetIds, item } of payload.items) {
     const url = new URL(item.detailUrl);
     if (url.protocol !== "https:" || !["www.trohub.com", "trohub.com"].includes(url.hostname)) throw new Error("Untrusted snapshot origin");
@@ -33,7 +35,11 @@ try {
     const result = apply ? service.ingestSignalFeedItems([item]) : {};
     results.push({ targetIds, docket: item.docketNumber, entries: item.entries?.length || 0, ...result });
   }
+  if (transaction) { store.db.exec("COMMIT"); transaction = false; }
   console.log(JSON.stringify({ apply, results }));
+} catch (error) {
+  if (transaction) store.db.exec("ROLLBACK");
+  throw error;
 } finally {
   store.db.close();
 }

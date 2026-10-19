@@ -54,7 +54,20 @@ test("attempted lookup with an error is not reported as completed", async () => 
 test("an empty public search is indeterminate, not a successful no-match", async () => {
   const client = new SignalFeedClient({ enabled: true, publicCasesUrl: "https://example.test/en/cases/" });
   client.requestText = async () => "<html><h1>Cases</h1></html>";
-  await assert.rejects(client.lookupByDocket("1:26-cv-04482"), { code: "EMPTY_DISCOVERY" });
+  await assert.rejects(client.lookupByDocket("1:26-cv-04482"), { code: "EMPTY_CASE_SEARCH" });
+});
+
+test("one missing case search cannot prevent the next case from obtaining real docket content", async () => {
+  const calls = [];
+  const refresh = fixture({ async enrichCaseWithSignalFeed(id) {
+    calls.push(id);
+    if (id === 1) throw Object.assign(new Error("case search empty"), { code: "EMPTY_CASE_SEARCH" });
+    return { enriched: true, entries: 7 };
+  } });
+  await refresh(1, { providers: ["signal-feed"], respectProviderBackoff: true });
+  const result = await refresh(2, { providers: ["signal-feed"], respectProviderBackoff: true });
+  assert.deepEqual(calls, [1, 2]);
+  assert.deepEqual(result.completedProviders, ["signal-feed"]);
 });
 
 test("known source pages temporarily unavailable remain retryable without malformed language paths", async () => {

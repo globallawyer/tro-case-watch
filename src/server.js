@@ -8,6 +8,7 @@ import zlib from "node:zlib";
 import { URL, fileURLToPath } from "node:url";
 import { config } from "./config.js";
 import { Store } from "./db.js";
+import { syncTaskOutcome } from "./sync-task-outcome.js";
 import { CourtListenerClient, extractCourtListenerWebhookDocketId } from "./providers/courtlistener.js";
 import { CourtFeedClient } from "./providers/courtfeed.js";
 import { RecentFilingsClient } from "./providers/recentfilings.js";
@@ -865,9 +866,9 @@ async function withStandaloneSyncTaskLock(mode, task) {
 
   try {
     const result = await task();
-    const unresolved = result?.outcome === "unresolved";
-    store.finishSyncRun(runId, unresolved ? "failed" : "succeeded", result && typeof result === "object" ? result : { result },
-      unresolved ? "no source supplied docket content; see retry/queue outcome" : null);
+    const outcome = syncTaskOutcome(result);
+    store.finishSyncRun(runId, outcome, result && typeof result === "object" ? result : { result },
+      outcome !== "succeeded" ? "source checks were not fully successful; see per-case results" : null);
     return result;
   } catch (error) {
     store.finishSyncRun(runId, "failed", { mode: normalizedMode }, error?.message || String(error));

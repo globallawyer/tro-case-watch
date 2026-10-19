@@ -4,7 +4,7 @@
 
 - Genuine Worldtro docket records take precedence over corresponding records from every auxiliary source. Legacy RSS notifications labelled as Worldtro are not genuine archive content.
 - A later Worldtro correction wins even when its text is shorter or its filing date is earlier. An auxiliary refresh cannot displace an archived primary record.
-- An empty primary field can be supplemented. Auxiliary-only filings remain visible; source rows and existing case links are not bulk deleted.
+- An empty primary field can be supplemented. A title-only primary record retains its heading while a matched auxiliary record supplies the missing explanation, with separate body provenance. Auxiliary-only filings remain visible; source rows and existing case links are not bulk deleted.
 - Match verified document identities first. A mirror table position is not an official document number. Unnumbered records require an unambiguous content/date match; uncertain candidates remain separate rather than losing filings.
 - Merge the complete case history before limiting a preview. Sort the result by filing date descending, with unknown dates last. Ingestion time is not a filing date.
 - Hide docket numbers for an unreliable sequence, including unverified mirror positions, gaps or conflicting filing-date order. Keep internal numbers for reconciliation, not for fabricated display numbering.

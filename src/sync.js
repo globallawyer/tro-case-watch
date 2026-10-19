@@ -4499,6 +4499,7 @@ export class CaseSyncService {
         failedCases,
         notFoundCases,
         candidateCount: candidates.length,
+        outcome: candidates.length ? (syncedCases === candidates.length ? "checked" : syncedCases ? "partial" : "unresolved") : "idle",
         discoveredCases: Number(discoveryResult.discoveredCases || 0),
         attachedCases: Number(discoveryResult.attachedCases || 0),
         createdCases: Number(discoveryResult.createdCases || 0),
