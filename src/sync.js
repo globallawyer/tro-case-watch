@@ -1874,7 +1874,9 @@ export class CaseSyncService {
             caseName: caseRow.case_name,
             dateFiled: caseRow.date_filed
           })
-        : await this.signalFeed.lookupByDocket(caseRow.docket_number, { courtId: caseRow.court_id });
+        : await this.signalFeed.lookupByDocket(caseRow.docket_number, {
+            courtId: caseRow.court_id, caseName: caseRow.case_name, dateFiled: caseRow.date_filed
+          });
       if (!item) {
         return { enriched: false, reason: "not-found" };
       }

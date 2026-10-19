@@ -29,6 +29,7 @@ import { getDocketSequenceValue, getIntegerDocketSequence, hasUnverifiedMirrorNu
 import { getRssDocketEvidence } from "./docket-rss.js";
 import { docketContentScore, getDocketContentStatus } from "./docket-content.js";
 import { normalizeDocketFiledAt } from "./docket-date.js";
+import { verifiesMissingOffice } from "./verified-case-identity.js";
 
 function nowIso() {
   return new Date().toISOString();
@@ -3233,7 +3234,14 @@ export class Store {
     const plaintiff = nameKey(item.plaintiff || String(item.caseName || "").split(/\s+v\.?\s+/i)[0]);
     if (plaintiff.length < 8) return null;
     const suffix = normalizeDocketIdentity(item.docketNumber).replace(/^\d+:/, "");
-    const matches = this.getFastPathDocketCases("2025-01-01", suffix).filter((row) => {
+    const peers = this.getFastPathDocketCases("2025-01-01", suffix);
+    const conflictingOffice = peers.some(row => /^\d+:/.test(normalizeDocketIdentity(row.docket_number)) &&
+      normalizeDocketIdentity(row.docket_number) !== normalizeDocketIdentity(item.docketNumber) &&
+      verifiesMissingOffice({ ...row, docket_number: suffix }, item));
+    if (conflictingOffice) return null;
+    const verifiedShort = peers.filter(row => verifiesMissingOffice(row, item));
+    if (verifiedShort.length) return verifiedShort.length === 1 ? verifiedShort[0] : null;
+    const matches = peers.filter((row) => {
       const name = nameKey(row.case_name);
       return row.court_id === courtId.slice(0, 2) && !/^\d+:/.test(row.docket_number || "") &&
         isPriorityFeedPrimarySource(row.primary_source) &&

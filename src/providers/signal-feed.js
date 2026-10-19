@@ -1,3 +1,5 @@
+import { verifiesMissingOffice } from "../verified-case-identity.js";
+
 const DEFAULT_USER_AGENT =
   "Mozilla/5.0 (compatible; TROTracker/1.0; +https://www.trotracker.com)";
 
@@ -470,6 +472,7 @@ export class SignalFeedClient {
     }
 
     const normalized = normalizeDocketNumber(docketNumber).toLowerCase();
+    const missingOffice = !/^\d+:/.test(normalized);
     // The latest 15 rows are discovery, not a historical case lookup.
     const url = new URL(this.publicCasesUrl);
     url.pathname = url.pathname.replace(/\/$/, "");
@@ -479,13 +482,16 @@ export class SignalFeedClient {
       throw signalFeedError("EMPTY_DISCOVERY", "public search could not verify any case rows; not proof of case absence");
     }
     const candidates = rows
-      .filter(item => normalizeDocketNumber(item.docketNumber).toLowerCase() === normalized &&
+      .filter(item => (normalizeDocketNumber(item.docketNumber).toLowerCase() === normalized ||
+        (missingOffice && normalizeDocketNumber(item.docketNumber).toLowerCase().replace(/^\d+:/, "") === normalized)) &&
         new URL(item.detailUrl).origin === url.origin);
     if (candidates.length > 3) return null;
     const matches = [];
     for (const candidate of candidates) {
       const detail = await this.fetchPublicDetail(candidate.detailUrl);
-      if (!detail || normalizeDocketNumber(detail.docketNumber).toLowerCase() !== normalized) continue;
+      if (!detail) continue;
+      if (normalizeDocketNumber(detail.docketNumber).toLowerCase() !== normalized &&
+          !verifiesMissingOffice({ docketNumber, ...identity }, detail)) continue;
       if (identity.courtId && detail.courtId !== identity.courtId &&
           !(identity.courtId.length === 2 && detail.courtId?.startsWith(identity.courtId))) continue;
       matches.push({ ...candidate, ...detail });
