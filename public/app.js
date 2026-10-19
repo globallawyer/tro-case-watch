@@ -751,6 +751,7 @@ function renderDetail(item) {
   const insights = item.insights || {};
   const entries = item.entries || [];
   const entriesTruncated = Boolean(item.entries_truncated);
+  const numberingHidden = Boolean(item.docket_numbering_hidden);
   const newestTimelineFiledAt = latestTimelineFiledAt(entries);
   const hasCaseLevelUpdateGap =
     Boolean(item.latest_docket_filed_at) &&
@@ -824,8 +825,9 @@ function renderDetail(item) {
           ${entriesTruncated ? '<span class="tag-pill">完整时间线继续加载中</span>' : ""}
           ${docketGapCount > 0 ? `<span class="tag-pill">已知缺口至少 ${docketGapCount} 条</span>` : ""}
           ${missingRangeLabel ? `<span class="tag-pill">待补序号 ${missingRangeLabel}</span>` : ""}
-          ${item.docket_numbered_sequence_complete ? '<span class="tag-pill">已收录的编号区间连续</span>' : ""}
-          ${item.unnumbered_docket_entries_count ? `<span class="tag-pill">另有 ${Number(item.unnumbered_docket_entries_count)} 条未编号或待核验记录，不编造序号</span>` : ""}
+          ${!numberingHidden && item.docket_numbered_sequence_complete ? '<span class="tag-pill">已收录的编号区间连续</span>' : ""}
+          ${numberingHidden ? '<span class="tag-pill">按日期倒序展示，不显示不可靠编号</span>' : ""}
+          ${!numberingHidden && item.unnumbered_docket_entries_count ? `<span class="tag-pill">另有 ${Number(item.unnumbered_docket_entries_count)} 条未编号或待核验记录，不编造序号</span>` : ""}
           ${item.latest_docket_number ? `<span class="tag-pill">最高已知编号 #${item.latest_docket_number}，非已抓取数量</span>` : ""}
           ${titleOnlyCount ? `<span class="tag-pill">${titleOnlyCount} 条仅有标题或通知，正文待补</span>` : ""}
         </div>
@@ -842,7 +844,7 @@ function renderDetail(item) {
       <div class="timeline-head">
         <div>
           <h3>站内 Docket 时间线</h3>
-          <p>已知编号按 docket 编号倒序排列；未核实编号的记录列在后面并按日期倒序，不推算或补造法院编号。</p>
+          <p>全部记录按日期倒序排列；同条记录采用优先归档内容，其他记录补齐缺口。编号不可靠时不显示编号，日期未知的记录列在最后。</p>
           ${entriesTruncated ? '<p class="focus-text">当前先展示最近条目，已归档的完整时间线正在加载。</p>' : ""}
         </div>
       </div>
@@ -884,7 +886,7 @@ function renderDetail(item) {
               const docketSequence = Object.hasOwn(entry, "docket_sequence")
                 ? entry.docket_sequence || ""
                 : entry.entry_number || entry.document_number || "";
-              const numPrefix = docketSequence ? `#${docketSequence} · ` : entry.sequence_status === "unverified" ? "编号待核验 · " : "未编号记录 · ";
+              const numPrefix = numberingHidden || entry.sequence_status === "hidden" ? "" : docketSequence ? `#${docketSequence} · ` : "";
               return `
                 <article class="timeline-item">
                   <div class="timeline-item-head">

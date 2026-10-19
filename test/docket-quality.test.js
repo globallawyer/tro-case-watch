@@ -60,14 +60,14 @@ function docketEntry(caseId, source, number, description = `Docket entry ${numbe
   };
 }
 
-test("official numbers stay descending even when mirror filing dates disagree", () => {
+test("timeline follows filing dates rather than conflicting document numbers", () => {
   const { directory, store } = createStore();
   try {
     const saved = store.upsertCase(targetCase());
     store.upsertDocketEntry({ ...docketEntry(saved.id, "courtlistener", 10, "ORDER: response due October 20"), filed_at: "2026-05-01" });
     store.upsertDocketEntry({ ...docketEntry(saved.id, "worldtro", 9, "MOTION by Example Brand for expedited discovery"), filed_at: "2026-05-03" });
     store.upsertDocketEntry({ ...docketEntry(saved.id, "61tro", 8, "NOTICE by Example Brand of filing"), entry_number: null, document_number: null, filed_at: "2026-05-05" });
-    assert.deepEqual(store.getCase(saved.id).entries.map((entry) => entry.entry_number), ["10", "9", null]);
+    assert.deepEqual(store.getCase(saved.id).entries.map((entry) => entry.entry_number), [null, "9", "10"]);
   } finally { store.db.close(); fs.rmSync(directory, { recursive: true, force: true }); }
 });
 
@@ -213,7 +213,7 @@ test("empty CourtListener responses never count as successful docket enrichment"
   } finally { store.db.close(); fs.rmSync(directory, { recursive: true, force: true }); }
 });
 
-test("same-day date and timestamp copies merge and sort by actual docket number", () => {
+test("same-day copies merge while retaining timestamp chronology", () => {
   const { directory, store } = createStore();
   try {
     const saved = store.upsertCase(targetCase());
@@ -221,7 +221,7 @@ test("same-day date and timestamp copies merge and sort by actual docket number"
     store.upsertDocketEntry({ ...docketEntry(saved.id, "signal-feed", 10), filed_at: "2026-05-01T12:00:00Z" });
     store.upsertDocketEntry({ ...docketEntry(saved.id, "courtlistener", 11), filed_at: "2026-05-01" });
     const entries = store.getCase(saved.id).entries;
-    assert.deepEqual(entries.map(x => x.entry_number), ["11", "10"]);
+    assert.deepEqual(entries.map(x => x.entry_number), ["10", "11"]);
   } finally { store.db.close(); fs.rmSync(directory, { recursive: true, force: true }); }
 });
 
@@ -281,7 +281,7 @@ test("coverage counts canonical docket items instead of raw source rows", () => 
     assert.equal(coverage.rawEntries, 2);
     assert.equal(coverage.totalEntries, 1);
     assert.equal(store.getCase(saved.id).entries.length, 1);
-    assert.equal(store.getCase(saved.id).entries[0].primary_source, "courtlistener");
+    assert.equal(store.getCase(saved.id).entries[0].primary_source, "worldtro");
   } finally {
     store.db.close();
     fs.rmSync(directory, { recursive: true, force: true });

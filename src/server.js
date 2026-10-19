@@ -37,6 +37,7 @@ import { loadTroDailyUpdates } from "./tro-daily-updates.js";
 import { getAvailableSystemMemoryMb } from "./system-memory.js";
 import { enrichmentFailure, planEnrichmentRetry } from "./enrichment-outcome.js";
 import { createCaseEnrichmentRefresher } from "./case-enrichment.js";
+import { getDocketPresentationPolicy } from "./docket-presentation.js";
 import { getDocketContentStatus } from "./docket-content.js";
 import { analyzeDocketSequence, getDocketSequenceValue, hasUnverifiedMirrorNumber } from "./docket-sequence.js";
 import {
@@ -3053,14 +3054,15 @@ async function runWebhookEnrichmentWorker() {
   }
 }
 
-function serializePublicEntry(entry = {}) {
+function serializePublicEntry(entry = {}, { hideNumbers = false } = {}) {
+  const sequence = hideNumbers ? null : getDocketSequenceValue(entry) || null;
   return {
     id: entry.id,
     filed_at: entry.filed_at || null,
-    entry_number: getDocketSequenceValue(entry) || null,
-    document_number: getDocketSequenceValue(entry) || null,
-    docket_sequence: getDocketSequenceValue(entry) || null,
-    sequence_status: getDocketSequenceValue(entry) ? "numbered" : hasUnverifiedMirrorNumber(entry) ? "unverified" : "unnumbered",
+    entry_number: sequence,
+    document_number: sequence,
+    docket_sequence: sequence,
+    sequence_status: hideNumbers ? "hidden" : sequence ? "numbered" : hasUnverifiedMirrorNumber(entry) ? "unverified" : "unnumbered",
     content_status: getDocketContentStatus(entry),
     document_type: sanitizeEntryDocumentType(entry.document_type),
     description: sanitizePublicText(entry.description),
@@ -3092,7 +3094,8 @@ function serializePublicCaseSummary(item = {}) {
 
 function serializePublicCaseDetail(item = {}) {
   const rawEntries = Array.isArray(item.entries) ? item.entries : [];
-  const serializedEntries = rawEntries.map(serializePublicEntry);
+  const policy = getDocketPresentationPolicy(rawEntries, { truncated: item.entries_truncated });
+  const serializedEntries = rawEntries.map(entry => serializePublicEntry(entry, policy));
   const latestDocketNumber = Number.parseInt(String(item.latest_docket_number || "").replace(/[^0-9].*$/, ""), 10);
   const knownDocketEntries = Math.max(
     Number(item.docket_count || 0),
@@ -3105,6 +3108,10 @@ function serializePublicCaseDetail(item = {}) {
   });
   return {
     ...serializePublicCaseSummary(item),
+    latest_docket_number: policy.hideNumbers ? null : item.latest_docket_number || null,
+    docket_presentation_version: policy.version,
+    docket_timeline_order: policy.order,
+    docket_numbering_hidden: policy.hideNumbers,
     docket_entries_count: docketEntriesCount,
     docket_text_entries_count: rawEntries.filter((entry) => getDocketContentStatus(entry) === "descriptive").length,
     docket_title_only_count: rawEntries.filter((entry) => getDocketContentStatus(entry) !== "descriptive").length,
@@ -3115,7 +3122,7 @@ function serializePublicCaseDetail(item = {}) {
     docket_sequence_complete: !item.entries_truncated && sequence.isComplete && sequence.unnumberedEntryCount === 0,
     docket_numbered_sequence_complete: !item.entries_truncated && sequence.isComplete,
     docket_content_complete: !item.entries_truncated && rawEntries.length > 0 && rawEntries.every((entry) => getDocketContentStatus(entry) === "descriptive"),
-    docket_missing_ranges: item.entries_truncated ? [] : sequence.missingRanges,
+    docket_missing_ranges: item.entries_truncated || policy.hideNumbers ? [] : sequence.missingRanges,
     docket_missing_ranges_truncated: !item.entries_truncated && sequence.missingRangesTruncated,
     entries_truncated: Boolean(item.entries_truncated),
     hydration_pending: item.hydration_pending

@@ -30,6 +30,7 @@ import { getRssDocketEvidence } from "./docket-rss.js";
 import { docketContentScore, getDocketContentStatus } from "./docket-content.js";
 import { normalizeDocketFiledAt } from "./docket-date.js";
 import { verifiesMissingOffice } from "./verified-case-identity.js";
+import { isPrimaryDocketEntry, docketTimelineTime } from "./docket-presentation.js";
 
 function nowIso() {
   return new Date().toISOString();
@@ -1311,6 +1312,11 @@ function dedupeEntries(entries) {
   const publishedLabels = [];
   const fingerprint = entry => normalizeEntryDescription(String(entry.description || "")
     .split(/\s+(?:附件[:：]|\(?Attachments?:)/i)[0].replace(/\s+翻译\s*$/, ""));
+  const primaryTextCounts = new Map();
+  for (const entry of entries.filter(isPrimaryDocketEntry)) {
+    const key = fingerprint(entry);
+    primaryTextCounts.set(key, (primaryTextCounts.get(key) || 0) + 1);
+  }
   for (const entry of entries) {
     if (!getDocketSequenceValue(entry) || hasUnverifiedMirrorNumber(entry)) continue;
     if (getDocketContentStatus(entry) !== "descriptive") publishedLabels.push(entry);
@@ -1322,7 +1328,10 @@ function dedupeEntries(entries) {
   }
   entries = entries.map(entry => {
     if (!hasUnverifiedMirrorNumber(entry)) return entry;
-    let matches = (publishedByText.get(fingerprint(entry)) || []).filter(candidate =>
+    const key = fingerprint(entry);
+    const uniqueLongText = key.length >= 80 && primaryTextCounts.get(key) === 1 &&
+      (publishedByText.get(key) || []).length === 1;
+    let matches = (publishedByText.get(key) || []).filter(candidate => uniqueLongText ||
       !entry.filed_at || !candidate.filed_at || entryDateKey(entry) === entryDateKey(candidate));
     if (!matches.length && entryDateKey(entry)) {
       // Generic labels corroborate a row position only with an exact filing
@@ -1346,13 +1355,14 @@ function dedupeEntries(entries) {
       filed_at: entry.filed_at || matches.find(candidate => candidate.filed_at)?.filed_at || null,
       raw: { ...entry.raw, verified_document_number: number } };
   });
+  entries = mergeUniquePrioritySupplements(entries);
   const orderCollapsed = new Map();
   const orderlessEntries = [];
 
   for (const entry of entries) {
     const numberKey = normalizedEntryOrderKey(entry);
     const text = normalizeEntryDescription(entry.description);
-    const orderKey = numberKey || (!hasUnverifiedMirrorNumber(entry) && entryDateKey(entry) && text.length >= 80 &&
+    const orderKey = numberKey || (entryDateKey(entry) && text.length >= 80 &&
       getDocketContentStatus(entry) === "descriptive" ? `event:${entryDateKey(entry)}|${text}` : "");
     if (!orderKey) {
       orderlessEntries.push(entry);
@@ -1418,6 +1428,36 @@ function dedupeEntries(entries) {
   }
 
   return deduped.filter(Boolean).sort(compareEntriesForTimeline);
+}
+
+function mergeUniquePrioritySupplements(entries) {
+  const byDate = new Map();
+  for (const entry of entries) {
+    if (isPrimaryDocketEntry(entry) || !entryDateKey(entry)) continue;
+    const bucket = byDate.get(entryDateKey(entry)) || [];
+    bucket.push(entry);
+    byDate.set(entryDateKey(entry), bucket);
+  }
+  const proposed = new Map();
+  const uses = new Map();
+  for (const entry of entries) {
+    if (!isPrimaryDocketEntry(entry) || !hasUnverifiedMirrorNumber(entry) || !entryDateKey(entry)) continue;
+    const bucket = byDate.get(entryDateKey(entry)) || [];
+    if (bucket.length > 256) continue;
+    const probe = { ...entry, entry_number: null, document_number: null, raw: { ...entry.raw, row_number: null } };
+    const matches = bucket.filter(candidate => areSemanticallyDuplicateEntries(probe, candidate));
+    if (matches.length !== 1) continue;
+    proposed.set(entry, matches[0]);
+    uses.set(matches[0], (uses.get(matches[0]) || 0) + 1);
+  }
+  const consumed = new Set();
+  const merged = new Map();
+  for (const [primary, supplement] of proposed) {
+    if (uses.get(supplement) !== 1) continue;
+    consumed.add(supplement);
+    merged.set(primary, mergeDisplayEntries(primary, supplement));
+  }
+  return entries.filter(entry => !consumed.has(entry)).map(entry => merged.get(entry) || entry);
 }
 
 function normalizeOrderText(value) {
@@ -1918,7 +1958,7 @@ function entryAuthorityRank(source = "") {
   }
 
   if (isPriorityFeedPrimarySource(normalized)) {
-    return 1;
+    return 8;
   }
 
   return 0;
@@ -2030,6 +2070,8 @@ function mergeDisplayEntries(existing = null, incoming = null) {
   }
 
   const canonical = compareEntriesForCanonicalRow(existing, incoming) <= 0 ? existing : incoming;
+  const primary = isPrimaryDocketEntry(canonical);
+  const supplemental = canonical === existing ? incoming : existing;
   const mergedSources = mergeArraysNormalized(
     Array.isArray(existing?.raw?.merged_sources) ? existing.raw.merged_sources : [],
     Array.isArray(incoming?.raw?.merged_sources) ? incoming.raw.merged_sources : [],
@@ -2041,18 +2083,21 @@ function mergeDisplayEntries(existing = null, incoming = null) {
     primary_source: canonical?.primary_source || pickPreferredDisplayPrimarySource(existing?.primary_source, incoming?.primary_source),
     source_entry_id: canonical?.source_entry_id || existing?.source_entry_id || incoming?.source_entry_id || null,
     document_type: canonical?.document_type || pickPreferredEntryType(existing?.document_type, incoming?.document_type),
-    entry_number: pickPreferredEntryNumber(existing?.entry_number, incoming?.entry_number),
-    document_number: pickPreferredEntryNumber(existing?.document_number, incoming?.document_number),
+    entry_number: primary ? getDocketSequenceValue(canonical) || null : pickPreferredEntryNumber(existing?.entry_number, incoming?.entry_number),
+    document_number: primary ? getDocketSequenceValue(canonical) || null : pickPreferredEntryNumber(existing?.document_number, incoming?.document_number),
     filed_at: canonical?.filed_at || existing?.filed_at || incoming?.filed_at || null,
-    description: docketContentScore(existing) !== docketContentScore(incoming)
+    description: primary ? canonical.description || supplemental.description || null : docketContentScore(existing) !== docketContentScore(incoming)
       ? canonical.description : pickPreferredEntryDescription(existing?.description, incoming?.description),
-    description_zh: pickPreferredEntryDescription(existing?.description_zh, incoming?.description_zh),
+    description_zh: primary ? canonical.description_zh || (!canonical.description ? supplemental.description_zh : null) || null
+      : pickPreferredEntryDescription(existing?.description_zh, incoming?.description_zh),
     absolute_url: canonical?.absolute_url || pickPreferredEntryUrl(existing?.absolute_url, incoming?.absolute_url),
-    is_available: pickPreferredNumericValue(existing?.is_available, incoming?.is_available),
-    page_count: pickPreferredNumericValue(existing?.page_count, incoming?.page_count),
-    pacer_doc_id: preferLongerNormalizedValue(existing?.pacer_doc_id, incoming?.pacer_doc_id) || null,
-    raw: mergeNestedObjects(existing?.raw || {}, incoming?.raw || {}, {
-      merged_sources: mergedSources
+    is_available: primary ? canonical.is_available ?? supplemental.is_available ?? null : pickPreferredNumericValue(existing?.is_available, incoming?.is_available),
+    page_count: primary ? canonical.page_count ?? supplemental.page_count ?? null : pickPreferredNumericValue(existing?.page_count, incoming?.page_count),
+    pacer_doc_id: primary ? canonical.pacer_doc_id || supplemental.pacer_doc_id || null : preferLongerNormalizedValue(existing?.pacer_doc_id, incoming?.pacer_doc_id) || null,
+    raw: mergeNestedObjects(supplemental?.raw || {}, canonical?.raw || {}, {
+      merged_sources: mergedSources,
+      merged_entry_ids: [...new Set([existing.id, incoming.id,
+        ...(existing.raw?.merged_entry_ids || []), ...(incoming.raw?.merged_entry_ids || [])].filter(Boolean))]
     })
   };
 }
@@ -2061,24 +2106,26 @@ function buildMergedDocketEntryRecord(existing = null, record = {}, timestamp = 
   const mergedRaw = mergeNestedObjects(existing?.raw || {}, record.raw || {});
   const existingFiledAt = normalizeDocketFiledAt(existing?.filed_at);
   const incomingFiledAt = normalizeDocketFiledAt(record.filed_at);
+  const primaryUpdate = isPrimaryDocketEntry(record);
   if (record.filed_at && !incomingFiledAt) mergedRaw.rejected_filed_at = record.filed_at;
   return {
     case_id: Number(record.case_id || existing?.case_id || 0),
     source_entry_key: record.source_entry_key || existing?.source_entry_key,
     primary_source: record.primary_source || existing?.primary_source || null,
     source_entry_id: preferLongerNormalizedValue(existing?.source_entry_id, record.source_entry_id) || null,
-    document_type: pickPreferredEntryType(existing?.document_type, record.document_type),
-    entry_number: pickPreferredEntryNumber(existing?.entry_number, record.entry_number),
-    document_number: pickPreferredEntryNumber(existing?.document_number, record.document_number),
-    filed_at: laterIso(existingFiledAt, incomingFiledAt),
-    description: existing && docketContentScore(existing) !== docketContentScore(record)
+    document_type: primaryUpdate ? record.document_type || existing?.document_type || null : pickPreferredEntryType(existing?.document_type, record.document_type),
+    entry_number: primaryUpdate ? record.entry_number || existing?.entry_number || null : pickPreferredEntryNumber(existing?.entry_number, record.entry_number),
+    document_number: primaryUpdate ? record.document_number || existing?.document_number || null : pickPreferredEntryNumber(existing?.document_number, record.document_number),
+    filed_at: primaryUpdate ? incomingFiledAt || existingFiledAt : laterIso(existingFiledAt, incomingFiledAt),
+    description: primaryUpdate ? record.description || existing?.description || null : existing && docketContentScore(existing) !== docketContentScore(record)
       ? (docketContentScore(record) > docketContentScore(existing) ? record.description : existing.description)
       : pickPreferredEntryDescription(existing?.description, record.description),
-    description_zh: existing?.description_zh || record.description_zh || null,
-    absolute_url: pickPreferredEntryUrl(existing?.absolute_url, record.absolute_url),
-    is_available: pickPreferredNumericValue(existing?.is_available, record.is_available),
-    page_count: pickPreferredNumericValue(existing?.page_count, record.page_count),
-    pacer_doc_id: preferLongerNormalizedValue(existing?.pacer_doc_id, record.pacer_doc_id) || null,
+    description_zh: primaryUpdate && record.description !== existing?.description
+      ? record.description_zh || null : existing?.description_zh || record.description_zh || null,
+    absolute_url: primaryUpdate ? record.absolute_url || existing?.absolute_url || null : pickPreferredEntryUrl(existing?.absolute_url, record.absolute_url),
+    is_available: primaryUpdate ? record.is_available ?? existing?.is_available ?? null : pickPreferredNumericValue(existing?.is_available, record.is_available),
+    page_count: primaryUpdate ? record.page_count ?? existing?.page_count ?? null : pickPreferredNumericValue(existing?.page_count, record.page_count),
+    pacer_doc_id: primaryUpdate ? record.pacer_doc_id || existing?.pacer_doc_id || null : preferLongerNormalizedValue(existing?.pacer_doc_id, record.pacer_doc_id) || null,
     raw: mergedRaw,
     last_synced_at: laterIso(existing?.last_synced_at, record.last_synced_at) || timestamp,
     created_at: existing?.created_at || timestamp,
@@ -2087,6 +2134,12 @@ function buildMergedDocketEntryRecord(existing = null, record = {}, timestamp = 
 }
 
 function compareEntriesForCanonicalRow(left, right) {
+  const primaryCompare = Number(isPrimaryDocketEntry(right)) - Number(isPrimaryDocketEntry(left));
+  if (primaryCompare) return primaryCompare;
+  if (isPrimaryDocketEntry(left) && isPrimaryDocketEntry(right)) {
+    const updated = (Date.parse(right.last_synced_at || right.updated_at || "") || 0) - (Date.parse(left.last_synced_at || left.updated_at || "") || 0);
+    if (Number.isFinite(updated) && updated) return updated;
+  }
   const qualityCompare = docketContentScore(right) - docketContentScore(left);
   if (qualityCompare) return qualityCompare;
   const authorityCompare = entryAuthorityRank(right.primary_source) - entryAuthorityRank(left.primary_source);
@@ -2113,6 +2166,8 @@ function compareEntriesForCanonicalRow(left, right) {
 }
 
 function compareEntriesForTimeline(left, right) {
+  const dateCompare = docketTimelineTime(right) - docketTimelineTime(left);
+  if (!Number.isNaN(dateCompare) && dateCompare) return dateCompare;
   const leftOrder = parseEntryOrderValue(left);
   const rightOrder = parseEntryOrderValue(right);
   if (leftOrder !== null || rightOrder !== null) {
@@ -2121,9 +2176,6 @@ function compareEntriesForTimeline(left, right) {
       return numericCompare;
     }
   }
-
-  const dateCompare = entryDateKey(right).localeCompare(entryDateKey(left));
-  if (dateCompare !== 0) return dateCompare;
 
   const sourceCompare = entrySourceRank(right) - entrySourceRank(left);
   if (sourceCompare !== 0) {
@@ -2144,7 +2196,7 @@ function getPriorityFeedEntries(entries = []) {
   const deduped = new Map();
 
   for (const entry of entries
-    .filter((entry) => isPriorityFeedPrimarySource(entry?.primary_source))
+    .filter(isPrimaryDocketEntry)
     .sort(compareEntriesForTimeline)) {
     const signature = [
       normalizeOrderText(entry?.document_number) || normalizeOrderText(entry?.entry_number) || "",
@@ -2197,10 +2249,7 @@ function applyAuthoritativeDocketPreference(caseLike, entries = null) {
     latest_docket_filed_at: laterIso(caseLike.latest_docket_filed_at, newestEntry?.filed_at || null),
     latest_docket_number: higherOrderValue(
       caseLike.latest_docket_number,
-      newestEntry?.row_number ||
-        newestEntry?.document_number ||
-        newestEntry?.entry_number ||
-        (priorityFeedRowCount > 0 ? String(priorityFeedRowCount) : null)
+      newestEntry ? getDocketSequenceValue(newestEntry) : null
     ),
     docket_count: Math.max(
       Number(caseLike.docket_count || 0),
@@ -4860,20 +4909,17 @@ export class Store {
     const canonicalRow = mergeDuplicateCaseGroup(peerRows.map(buildCaseView));
     const peerIds = [...new Set(peerRows.map((candidate) => Number(candidate.id)).filter((value) => Number.isFinite(value) && value > 0))];
     const placeholders = peerIds.map(() => "?").join(", ");
-    const rawFetchLimit = normalizedLimit > 0 ? Math.max(normalizedLimit * 6, normalizedLimit + 1) : 0;
     const rawEntries = this.db
       .prepare(`
         SELECT *
         FROM docket_entries
         WHERE case_id IN (${placeholders})
-        ORDER BY COALESCE(filed_at, created_at) DESC, id DESC
-        ${rawFetchLimit > 0 ? "LIMIT ?" : ""}
+        ORDER BY filed_at DESC, id DESC
       `)
-      .all(...peerIds, ...(rawFetchLimit > 0 ? [rawFetchLimit + 1] : []))
+      .all(...peerIds)
       .map(hydrateEntry);
-    const hasMoreRawEntries = rawFetchLimit > 0 && rawEntries.length > rawFetchLimit;
-    const dedupedEntries = dedupeEntries(hasMoreRawEntries ? rawEntries.slice(0, rawFetchLimit) : rawEntries);
-    const entriesTruncated = normalizedLimit > 0 && (hasMoreRawEntries || dedupedEntries.length > normalizedLimit);
+    const dedupedEntries = dedupeEntries(rawEntries);
+    const entriesTruncated = normalizedLimit > 0 && dedupedEntries.length > normalizedLimit;
     const displayEntries = entriesTruncated ? dedupedEntries.slice(0, normalizedLimit) : dedupedEntries;
 
     const detail = applyAuthoritativeDocketPreference({
@@ -5284,14 +5330,13 @@ export class Store {
       .map((item) => item.row);
   }
 
-  getEntryCoverageForCaseIds(caseIds = []) {
+  *iterateCaseDockets(caseIds = []) {
     const ids = [...new Set(caseIds.map((value) => Number(value)).filter((value) => Number.isFinite(value) && value > 0))];
     if (!ids.length) {
-      return new Map();
+      return;
     }
 
     const chunkSize = 900;
-    const coverage = new Map();
     for (let index = 0; index < ids.length; index += chunkSize) {
       const chunk = ids.slice(index, index + chunkSize);
       const placeholders = chunk.map(() => "?").join(", ");
@@ -5328,8 +5373,15 @@ export class Store {
           WHERE case_id IN (${peerIds.map(() => "?").join(",")}) ORDER BY case_id,id`).iterate(...peerIds)) {
           group.push(hydrateEntry(row));
         }
+        yield { caseIds: coverageGroup.requested, peerIds, entries: dedupeEntries(group), rawEntries: group };
+      }
+    }
+  }
+
+  getEntryCoverageForCaseIds(caseIds = []) {
+    const coverage = new Map();
+    for (const { caseIds: requested, entries, rawEntries: group } of this.iterateCaseDockets(caseIds)) {
         if (!group.length) continue;
-        const entries = dedupeEntries(group);
         const numbers = [...new Set(entries.map(getIntegerDocketSequence).filter(n => n !== null))];
         const descriptive = entries.filter(entry => getDocketContentStatus(entry) === "descriptive").length;
         const baseCoverage = {
@@ -5349,8 +5401,7 @@ export class Store {
           ...baseCoverage,
           ...getCoverageGapPressure(baseCoverage)
         };
-        for (const requestedId of coverageGroup.requested) coverage.set(requestedId, result);
-      }
+        for (const requestedId of requested) coverage.set(requestedId, result);
     }
 
     return coverage;

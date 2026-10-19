@@ -246,7 +246,7 @@ export const config = {
       "WEBHOOK_ENRICHMENT_WORKER_ENABLED",
       envBool("WEBHOOK_ENRICHMENT_ENABLED", true)
     ),
-    webhookEnrichmentProviders: envList("WEBHOOK_ENRICHMENT_PROVIDERS", ["signal-feed", "worldtro", "61tro", "recentfilings", "courtlistener", "pacermonitor"]),
+    webhookEnrichmentProviders: envList("WEBHOOK_ENRICHMENT_PROVIDERS", ["worldtro", "signal-feed", "61tro", "recentfilings", "courtlistener", "pacermonitor"]),
     webhookEnrichmentSettleDelayMs: envInt("WEBHOOK_ENRICHMENT_SETTLE_DELAY_MS", 90 * 1000),
     webhookEnrichmentLeaseTtlMs: envInt("WEBHOOK_ENRICHMENT_LEASE_TTL_MS", 15 * 60 * 1000),
     webhookEnrichmentProviderDelayMs: envInt("WEBHOOK_ENRICHMENT_PROVIDER_DELAY_MS", 2000),
@@ -260,10 +260,10 @@ export const config = {
     webhookEnrichmentSpawnDebounceMs: envInt("WEBHOOK_ENRICHMENT_SPAWN_DEBOUNCE_MS", 5000),
     webhookEnrichmentMaxPendingJobs: envInt("WEBHOOK_ENRICHMENT_MAX_PENDING_JOBS", 500),
     discoveryEnrichmentProviders: envList("DISCOVERY_ENRICHMENT_PROVIDERS", [
+      "worldtro",
       "signal-feed",
       "courtlistener",
       "pacermonitor",
-      "worldtro",
       "61tro",
       "recentfilings"
     ]),
@@ -276,8 +276,8 @@ export const config = {
     docketCompletionQueueDelayMs: envInt("DOCKET_COMPLETION_QUEUE_DELAY_MS", 45 * 1000),
     docketCompletionRecentWindowDays: envInt("DOCKET_COMPLETION_RECENT_WINDOW_DAYS", 365),
     docketCompletionProviders: envList("DOCKET_COMPLETION_PROVIDERS", [
-      "signal-feed",
       "worldtro",
+      "signal-feed",
       "courtlistener",
       "61tro",
       "recentfilings",

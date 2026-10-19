@@ -23,7 +23,7 @@ export function createCaseEnrichmentRefresher({ store, syncService, wait = ms =>
       }
       return [provider];
     })
-  )];
+  )].sort((left, right) => Number(right === PRIORITY_FEED_SOURCE) - Number(left === PRIORITY_FEED_SOURCE));
   const completedProviders = [];
   const failedProviders = [];
   const providerResults = [];
