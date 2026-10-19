@@ -11,6 +11,7 @@
 
 - One shared helper identifies only the explicit legacy RSS formats. Published document references are retained; synthetic RSS IDs and mirror row positions are not official docket numbers.
 - New ingestion retains original row evidence in raw metadata. Legacy records are corrected at read time, without deleting or rewriting the archived rows.
+- Mirror RSS event identity uses the notification marker or explicit court document reference, not the unstable table position. Legacy IDs are reconciled within the indexed case/source scope, so newly inserted mirror rows cannot overwrite unrelated notices.
 - All copies of one real docket number within the same case share a display item, preferring descriptive content and retaining source provenance. Different real numbers remain distinct.
 - Undated unnumbered records are not speculatively combined with other events. Filing dates are not inferred from ingestion dates or RSS publication timestamps.
 - SQL coverage uses the same sequence and content functions as the timeline, in bounded case-ID batches. Materialized intermediate rows omit raw JSON and unnecessary columns.

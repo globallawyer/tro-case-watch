@@ -1751,6 +1751,10 @@ function buildStoredEntryDeduplicationKey(entry) {
   }
 
   const sourceEntryId = normalizeLookupText(entry?.source_entry_id);
+  const rss = getRssDocketEvidence(entry);
+  if (rss && isPriorityFeedPrimarySource(primarySource)) {
+    return `${caseId}|${primarySource}|rss:${rss.notificationId || `document:${rss.number}`}`;
+  }
   if (sourceEntryId) {
     return `${caseId}|${primarySource}|id:${sourceEntryId}`;
   }
@@ -4121,6 +4125,13 @@ export class Store {
     };
 
     const sourceEntryId = String(record?.source_entry_id || "").trim();
+    if (getRssDocketEvidence(record) && isPriorityFeedPrimarySource(primarySource)) {
+      // Legacy row-position IDs cannot identify an event after a mirror inserts
+      // newer rows. Reconcile only RSS evidence within this indexed case scope.
+      pushRows(this.db.prepare(`SELECT * FROM docket_entries WHERE case_id = ? AND primary_source = ?
+        AND (description LIKE '[court-rss:%' OR description LIKE '%法院 RSS 更新%')`)
+        .all(normalizedCaseId, primarySource));
+    }
     if (sourceEntryId) {
       pushRows(
         this.db
@@ -4248,6 +4259,8 @@ export class Store {
     const rss = getRssDocketEvidence(record);
     if (rss) {
       record = { ...record, entry_number: rss.number || null, document_number: rss.number || null,
+        source_entry_id: isPriorityFeedPrimarySource(record.primary_source)
+          ? `rss:${rss.notificationId || `document:${rss.number}`}` : record.source_entry_id,
         raw: { ...(record.raw || {}), source_row_number: record.raw?.source_row_number ?? record.entry_number } };
     }
     const timestamp = nowIso();

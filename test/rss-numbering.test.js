@@ -85,3 +85,18 @@ test("legacy unnumbered RSS notices sort after real filings, not at their old fa
   assert.deepEqual(store.getCase(id).entries.map(getDocketSequenceValue), ["1", ""]);
   assert.equal(store.getEntryCoverageForCaseIds([id]).get(id).lastNumber, 1);
 }));
+
+test("mirror row insertion cannot overwrite a different RSS notification", () => withStore((store, id) => {
+  const save = (key, row, marker) => store.upsertDocketEntry({ case_id: id, source_entry_key: key,
+    source_entry_id: row, primary_source: "worldtro", entry_number: row, document_number: row,
+    description: `[court-rss:${marker}] RSS update: [Order]`, raw: { row_number: row } });
+  const old = save("old-a", "1", "event-a");
+  store.db.prepare("UPDATE docket_entries SET source_entry_id='1' WHERE id=?").run(old.id);
+  save("new-b", "1", "event-b");
+  save("moved-a", "2", "event-a");
+  const rows = store.db.prepare("SELECT source_entry_id,description FROM docket_entries WHERE case_id=? ORDER BY id").all(id);
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0].source_entry_id, "rss:event-a");
+  assert.match(rows[0].description, /event-a/);
+  assert.match(rows[1].description, /event-b/);
+}));
