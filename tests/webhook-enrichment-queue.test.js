@@ -128,3 +128,26 @@ test("webhook enrichment queue stats expose expired leases as runnable work", ()
   assert.equal(activeStats.expiredLeaseCount, 0);
   assert.equal(expiredStats.expiredLeaseCount, 1);
 });
+
+test("unresolved source failures survive queue completion and cannot be removed by a stale lease", () => {
+  const queued = enqueueWebhookEnrichmentJobState(null, { caseId: 12, providers: ["worldtro"], retryAttempts: 5 });
+  const claimed = claimWebhookEnrichmentJobState(queued.state);
+  const unresolved = [{ provider: "worldtro", code: "SOURCE_CHALLENGE", retryable: true }];
+  const stale = finishWebhookEnrichmentJobState(claimed.state, { caseId: 12, leaseId: "wrong", unresolved });
+  assert.equal(stale.state.unresolved.length, 0);
+  const finished = finishWebhookEnrichmentJobState(stale.state, { caseId: 12, leaseId: claimed.job.leaseId, unresolved });
+  assert.equal(finished.state.leased.length, 0);
+  assert.equal(finished.state.unresolved[0].caseId, 12);
+  assert.equal(getWebhookEnrichmentQueueStats(finished.state).unresolvedTotal, 1);
+  const next = enqueueWebhookEnrichmentJobState(finished.state, { caseId: 13, providers: ["signal-feed"] });
+  assert.equal(next.state.unresolved.length, 1);
+});
+
+test("failure budget and diagnostics survive requeue but deferral itself does not increment them", () => {
+  const queued = enqueueWebhookEnrichmentJobState(null, { caseId: 12, providers: ["worldtro"], retryAttempts: 2 });
+  const claimed = claimWebhookEnrichmentJobState(queued.state);
+  const finished = finishWebhookEnrichmentJobState(claimed.state, { caseId: 12, leaseId: claimed.job.leaseId,
+    requeueAfterMs: 60_000, requeueJob: { retryAttempts: 3, lastFailures: [{ code: "ETIMEDOUT" }] } });
+  assert.equal(finished.state.pending[0].retryAttempts, 3);
+  assert.equal(finished.state.pending[0].lastFailures[0].code, "ETIMEDOUT");
+});

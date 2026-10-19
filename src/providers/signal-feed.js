@@ -474,7 +474,11 @@ export class SignalFeedClient {
     const url = new URL(this.publicCasesUrl);
     url.pathname = url.pathname.replace(/\/$/, "");
     url.searchParams.set("q", normalized.replace(/^\d+:/, "").replace(/^(\d{2})-/, "20$1-"));
-    const candidates = parsePublicRows(await this.requestText(url.toString()), url.toString())
+    const rows = parsePublicRows(await this.requestText(url.toString()), url.toString());
+    if (!rows.length) {
+      throw signalFeedError("EMPTY_DISCOVERY", "public search could not verify any case rows; not proof of case absence");
+    }
+    const candidates = rows
       .filter(item => normalizeDocketNumber(item.docketNumber).toLowerCase() === normalized &&
         new URL(item.detailUrl).origin === url.origin);
     if (candidates.length > 3) return null;
@@ -518,6 +522,11 @@ export class SignalFeedClient {
     }
 
     if (lastError) {
+      if (Number(lastError.status) === 404) {
+        lastError.code = "KNOWN_CASE_UNAVAILABLE";
+        lastError.retryable = true;
+        lastError.retryAfterMs = 6 * 60 * 60 * 1000;
+      }
       throw lastError;
     }
     return null;
@@ -536,7 +545,9 @@ export class SignalFeedClient {
 
     append(detailUrl);
     append(String(detailUrl || "").replace("/en/cases/", "/cases/"));
-    append(String(detailUrl || "").replace("/cases/", "/en/cases/"));
+    if (!String(detailUrl || "").includes("/en/cases/")) {
+      append(String(detailUrl || "").replace("/cases/", "/en/cases/"));
+    }
     return [...urls];
   }
 
@@ -607,9 +618,31 @@ export class SignalFeedClient {
       if (!response.ok) {
         const error = new Error(`signal feed request failed with HTTP ${response.status}`);
         error.status = response.status;
+        const retryAfter = response.headers.get("retry-after");
+        error.retryAfterMs = /^\d+$/.test(retryAfter || "")
+          ? Number(retryAfter) * 1000 : Math.max(Date.parse(retryAfter || "") - Date.now(), 0) || 0;
         throw error;
       }
-      return await response.text();
+      // Bound decompressed bytes as well as transfer size; never buffer an arbitrary page.
+      const reader = response.body?.getReader();
+      if (!reader) return "";
+      const chunks = [];
+      let bytes = 0;
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          bytes += value.byteLength;
+          if (bytes > 4 * 1024 * 1024) {
+            controller.abort();
+            throw signalFeedError("RESPONSE_TOO_LARGE", "public page exceeds 4 MiB safety limit");
+          }
+          chunks.push(value);
+        }
+        return Buffer.concat(chunks).toString("utf8");
+      } finally {
+        reader.releaseLock();
+      }
     } finally {
       clearTimeout(timer);
       this.lastRequestAt = Date.now();

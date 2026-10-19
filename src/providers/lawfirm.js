@@ -1358,7 +1358,8 @@ export class LawFirmClient {
         normalizeDocketLookupCoreKey(link.title) === normalizeDocketLookupCoreKey(docketNumber));
       const item = await findMatching61troItemFromDetailCandidates(this, source, links, docketNumber, { courtName });
       if (item) return item;
-    } catch {
+    } catch (error) {
+      if (error.status || error.cause || error.name === "AbortError") throw error;
       // Older deployments may only expose the legacy routes below.
     }
     for (const detailUrl of build61troDirectViewCandidateUrls(source, docketNumber, { courtName })) {
@@ -1485,7 +1486,7 @@ export class LawFirmClient {
 
       if ([408, 409, 425, 429, 500, 502, 503, 504].includes(response.status)) {
         if (attempt >= 2) {
-          throw new Error(`LawFirm fetch failed (${response.status})`);
+          throw Object.assign(new Error(`LawFirm fetch failed (${response.status})`), { status: response.status });
         }
 
         await wait((attempt + 1) * 1000);
@@ -1493,7 +1494,7 @@ export class LawFirmClient {
       }
 
       if (!response.ok) {
-        throw new Error(`LawFirm fetch failed (${response.status})`);
+        throw Object.assign(new Error(`LawFirm fetch failed (${response.status})`), { status: response.status });
       }
 
       return await response.text();

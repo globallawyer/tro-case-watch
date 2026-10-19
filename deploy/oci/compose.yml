@@ -76,7 +76,7 @@ services:
       WEBHOOK_ENRICHMENT_MAX_OLD_SPACE_MB: "256"
       WEBHOOK_ENRICHMENT_MAX_RSS_MB: "320"
       WEBHOOK_ENRICHMENT_MIN_FREE_SYSTEM_MB: "1024"
-      DISCOVERY_ENRICHMENT_PROVIDERS: "signal-feed,courtlistener,pacermonitor,worldtro,61tro,recentfilings"
+      DISCOVERY_ENRICHMENT_PROVIDERS: "signal-feed,worldtro,61tro,pacermonitor,courtlistener,recentfilings"
       DISCOVERY_ENRICHMENT_DELAY_MS: "60000"
       DOCKET_COMPLETION_SCHEDULER_ENABLED: "true"
       DOCKET_COMPLETION_SCHEDULER_INTERVAL_MS: "600000"

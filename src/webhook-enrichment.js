@@ -1,4 +1,4 @@
-const WEBHOOK_ENRICHMENT_QUEUE_VERSION = 1;
+const WEBHOOK_ENRICHMENT_QUEUE_VERSION = 2;
 
 function nowIso() {
   return new Date().toISOString();
@@ -31,6 +31,8 @@ function normalizeJob(raw = {}, { fallbackNow = nowIso() } = {}) {
     caseId,
     providers: uniqueProviders(raw.providers),
     attempts: Math.max(Number(raw.attempts || 0), 0),
+    retryAttempts: Math.max(Number(raw.retryAttempts || 0), 0),
+    lastFailures: Array.isArray(raw.lastFailures) ? raw.lastFailures.slice(0, 12) : [],
     enqueuedAt: raw.enqueuedAt || fallbackNow,
     runAfter: raw.runAfter || fallbackNow,
     priorityAt: raw.priorityAt || raw.lastWebhookFiledAt || raw.lastWebhookAt || fallbackNow,
@@ -107,6 +109,8 @@ function mergeJobs(existing, incoming) {
     ...normalizedExisting,
     providers: uniqueProviders([...normalizedIncoming.providers, ...normalizedExisting.providers]),
     attempts: Math.max(normalizedExisting.attempts, normalizedIncoming.attempts),
+    retryAttempts: Math.max(normalizedExisting.retryAttempts, normalizedIncoming.retryAttempts),
+    lastFailures: normalizedIncoming.lastFailures.length ? normalizedIncoming.lastFailures : normalizedExisting.lastFailures,
     enqueuedAt: normalizedExisting.enqueuedAt,
     runAfter,
     priorityAt,
@@ -125,6 +129,8 @@ function normalizeState(raw = {}) {
     version: WEBHOOK_ENRICHMENT_QUEUE_VERSION,
     pending: (Array.isArray(state.pending) ? state.pending : []).map((item) => normalizeJob(item)).filter(Boolean),
     leased: (Array.isArray(state.leased) ? state.leased : []).map((item) => normalizeJob(item)).filter(Boolean),
+    unresolved: Array.isArray(state.unresolved) ? state.unresolved.slice(-500) : [],
+    unresolvedTotal: Math.max(Number(state.unresolvedTotal || 0), 0),
     updatedAt: state.updatedAt || null
   };
 }
@@ -259,6 +265,7 @@ export function finishWebhookEnrichmentJobState(rawState, {
   now = nowIso(),
   requeueAfterMs = 0,
   requeueJob = null,
+  unresolved = [],
   maxPending = 0
 } = {}) {
   const state = normalizeState(rawState);
@@ -293,6 +300,10 @@ export function finishWebhookEnrichmentJobState(rawState, {
       ...state,
       pending,
       leased: nextLeased,
+      unresolved: finishedJob && unresolved.length
+        ? [...state.unresolved, { caseId: normalizedCaseId, at: now, attempts: finishedJob.attempts, failures: unresolved.slice(0, 12) }].slice(-500)
+        : state.unresolved,
+      unresolvedTotal: state.unresolvedTotal + (finishedJob && unresolved.length ? 1 : 0),
       updatedAt: now
     },
     finishedJob
@@ -311,6 +322,8 @@ export function getWebhookEnrichmentQueueStats(rawState, { now = nowIso() } = {}
     readyCount,
     leasedCount: state.leased.length,
     expiredLeaseCount,
+    unresolvedCount: state.unresolved.length,
+    unresolvedTotal: state.unresolvedTotal,
     nextRunAt: pending[0]?.runAfter || null
   };
 }

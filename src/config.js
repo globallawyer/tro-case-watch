@@ -251,6 +251,7 @@ export const config = {
     webhookEnrichmentLeaseTtlMs: envInt("WEBHOOK_ENRICHMENT_LEASE_TTL_MS", 15 * 60 * 1000),
     webhookEnrichmentProviderDelayMs: envInt("WEBHOOK_ENRICHMENT_PROVIDER_DELAY_MS", 2000),
     webhookEnrichmentRetryDelayMs: envInt("WEBHOOK_ENRICHMENT_RETRY_DELAY_MS", 20 * 60 * 1000),
+    webhookEnrichmentMaxAttempts: envInt("WEBHOOK_ENRICHMENT_MAX_ATTEMPTS", 6),
     webhookEnrichmentMemoryRetryDelayMs: envInt("WEBHOOK_ENRICHMENT_MEMORY_RETRY_DELAY_MS", 10 * 60 * 1000),
     webhookEnrichmentMaxOldSpaceMb: envInt("WEBHOOK_ENRICHMENT_MAX_OLD_SPACE_MB", 256),
     webhookEnrichmentMaxRssMb: envInt("WEBHOOK_ENRICHMENT_MAX_RSS_MB", 384),

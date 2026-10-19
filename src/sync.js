@@ -1313,6 +1313,8 @@ export class CaseSyncService {
           });
         } catch (error) {
           sourceResults.courtlistener.error = error.message;
+          sourceResults.courtlistener.code = error.code || error.cause?.code || error.name;
+          sourceResults.courtlistener.status = error.status || null;
           break;
         }
 
@@ -1350,7 +1352,10 @@ export class CaseSyncService {
       const caseIndex = this.buildCourtFeedCaseIndex();
 
       const recentFilingsMatch = includeRecentFilings
-        ? await this.recentFilings.lookupByDocket(rawTerm, { courtName }).catch(() => null)
+        ? await this.recentFilings.lookupByDocket(rawTerm, { courtName }).catch(error => {
+            Object.assign(sourceResults.recentfilings, { error: error.message, code: error.code || error.cause?.code || error.name, status: error.status || null });
+            return null;
+          })
         : null;
       if (recentFilingsMatch?.item) {
         const recentIngest = this.ingestRecentFilingsItems(
@@ -1372,7 +1377,10 @@ export class CaseSyncService {
             sourceIds: ["61tro"],
             courtName,
             caseName
-          }).catch(() => null)
+          }).catch(error => {
+            Object.assign(sourceResults["61tro"], { error: error.message, code: error.code || error.cause?.code || error.name, status: error.status || null });
+            return null;
+          })
         : null;
       if (supplementalMatch?.item) {
         const supplementalIngest = this.ingestLawFirmItems(
@@ -3619,7 +3627,7 @@ export class CaseSyncService {
       const caseIndex = this.buildCourtFeedCaseIndex();
       const recentMatch = await this.recentFilings.lookupByDocket(docketNumber, {
         courtName: caseRow.court_name || ""
-      }).catch(() => null);
+      });
       if (recentMatch?.item) {
         const ingest = this.ingestRecentFilingsItems(
           {
@@ -3636,7 +3644,7 @@ export class CaseSyncService {
       const federalRecordLookup = trackedSource.id === "ilnd"
         ? await this.recentFilings.lookupFederalRecordByDocket(docketNumber, {
             courtName: caseRow.court_name || ""
-          }).catch(() => null)
+          })
         : null;
 
       if (federalRecordLookup?.source) {
@@ -3694,10 +3702,12 @@ export class CaseSyncService {
       }
 
       return {
-        enriched: Boolean(casesUpserted || matchedRecentCase || (federalRecordLookup?.records || []).length),
+        enriched: false,
+        contentAvailable: false,
+        metadataUpdated: Boolean(casesUpserted || matchedRecentCase || (federalRecordLookup?.records || []).length),
         reason:
           casesUpserted || matchedRecentCase || (federalRecordLookup?.records || []).length
-            ? "completed"
+            ? "metadata-only"
             : federalRecordLookup
               ? federalRecordLookup.state || "not-found"
               : "not-found",
@@ -3742,7 +3752,7 @@ export class CaseSyncService {
         caseName: caseRow.case_name || "",
         plaintiffs: caseRow.plaintiffs || [],
         firms: caseRow.raw?.firm || []
-      }).catch(() => null);
+      });
       if (!sourceResult?.item) {
         return { enriched: false, reason: "not-found" };
       }

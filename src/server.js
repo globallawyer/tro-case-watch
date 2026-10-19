@@ -35,7 +35,8 @@ import { DailyEmailReportService } from "./daily-report.js";
 import { TroDailyRoundupService } from "./tro-daily-roundup.js";
 import { loadTroDailyUpdates } from "./tro-daily-updates.js";
 import { getAvailableSystemMemoryMb } from "./system-memory.js";
-import { didEnrichmentComplete } from "./enrichment-outcome.js";
+import { enrichmentFailure, planEnrichmentRetry } from "./enrichment-outcome.js";
+import { createCaseEnrichmentRefresher } from "./case-enrichment.js";
 import { getDocketContentStatus } from "./docket-content.js";
 import { analyzeDocketSequence, getDocketSequenceValue, hasUnverifiedMirrorNumber } from "./docket-sequence.js";
 import {
@@ -863,7 +864,9 @@ async function withStandaloneSyncTaskLock(mode, task) {
 
   try {
     const result = await task();
-    store.finishSyncRun(runId, "succeeded", result && typeof result === "object" ? result : { result });
+    const unresolved = result?.outcome === "unresolved";
+    store.finishSyncRun(runId, unresolved ? "failed" : "succeeded", result && typeof result === "object" ? result : { result },
+      unresolved ? "no source supplied docket content; see retry/queue outcome" : null);
     return result;
   } catch (error) {
     store.finishSyncRun(runId, "failed", { mode: normalizedMode }, error?.message || String(error));
@@ -2722,215 +2725,7 @@ function queueCaseHydration(caseId, initialItem) {
   return plan;
 }
 
-async function refreshCaseAcrossSources(caseId, {
-  initialItem = null,
-  providers = [SIGNAL_FEED_PROVIDER_KEY, "lookup:courtlistener", "recentfilings", "61tro", PRIORITY_FEED_SOURCE, "courtlistener", "pacermonitor", "docketalarm", "unicourt"],
-  interProviderDelayMs = 0,
-  shouldContinue = null
-} = {}) {
-  const expandedProviders = [...new Set(
-    providers.flatMap((provider) => {
-      if (provider === "lookup") {
-        return ["lookup:courtlistener", "recentfilings", "61tro"];
-      }
-      if (provider === "lookup:recentfilings") {
-        return ["recentfilings"];
-      }
-      if (provider === "lookup:61tro") {
-        return ["61tro"];
-      }
-      return [provider];
-    })
-  )];
-  const completedProviders = [];
-  const failedProviders = [];
-  const providerResults = [];
-  let lookupResult = null;
-  let current = store.getCase(caseId) || initialItem || null;
-  let stoppedReason = null;
-
-  const refreshCurrent = () => {
-    current = store.getCase(caseId) || current;
-    return current;
-  };
-
-  const shouldRunProvider = async (provider) => {
-    if (typeof shouldContinue !== "function") {
-      return {
-        ok: true,
-        reason: null
-      };
-    }
-
-    const decision = await shouldContinue({
-      caseId,
-      provider,
-      current: refreshCurrent(),
-      completedProviders: [...completedProviders],
-      failedProviders: [...failedProviders],
-      providerResults: [...providerResults]
-    });
-    if (decision === false) {
-      return {
-        ok: false,
-        reason: "stopped"
-      };
-    }
-
-    if (decision && typeof decision === "object" && decision.ok === false) {
-      return {
-        ok: false,
-        reason: decision.reason || "stopped"
-      };
-    }
-
-    return {
-      ok: true,
-      reason: null
-    };
-  };
-
-  const runProvider = async (provider, task) => {
-    const decision = await shouldRunProvider(provider);
-    if (!decision.ok) {
-      stoppedReason = decision.reason;
-      return false;
-    }
-
-    try {
-      const result = await task();
-      providerResults.push({
-        provider,
-        ...(result && typeof result === "object" ? result : { result })
-      });
-      if (didEnrichmentComplete(result)) {
-        completedProviders.push(provider);
-      }
-      refreshCurrent();
-      if (interProviderDelayMs > 0) {
-        await wait(interProviderDelayMs);
-      }
-    } catch (error) {
-      failedProviders.push({
-        provider,
-        error: error?.message || String(error),
-        status: Number(error?.status || 0) || null,
-        retryAfterMs: Number(error?.retryAfterMs || 0) || null
-      });
-      console.warn(`[sync] provider ${provider} failed for case ${caseId}: ${error?.message || error}`);
-    }
-    return true;
-  };
-
-  if (!stoppedReason && expandedProviders.includes(SIGNAL_FEED_PROVIDER_KEY)) {
-    await runProvider(SIGNAL_FEED_PROVIDER_KEY, () => syncService.enrichCaseWithSignalFeed(caseId, { force: true }));
-  }
-
-  const lookupProviders = expandedProviders.filter((provider) => provider.startsWith("lookup:"));
-  if (lookupProviders.length && current) {
-    const decision = await shouldRunProvider("lookup");
-    if (!decision.ok) {
-      stoppedReason = decision.reason;
-    } else {
-      try {
-        const lookupTerm = String(current?.docket_number || current?.case_name || "").trim();
-        if (lookupTerm) {
-          const lookupSources = lookupProviders
-            .map((provider) => provider.split(":")[1] || "")
-            .filter(Boolean);
-          lookupResult = await syncService.importLookup(lookupTerm, {
-            courtName: current?.court_name || "",
-            caseName: current?.case_name || "",
-            sources: lookupSources
-          });
-          providerResults.push({
-            provider: "lookup",
-            lookupResult
-          });
-          refreshCurrent();
-        }
-      } catch (error) {
-        failedProviders.push({
-          provider: "lookup",
-          error: error?.message || String(error),
-          status: Number(error?.status || 0) || null,
-          retryAfterMs: Number(error?.retryAfterMs || 0) || null
-        });
-        console.warn(`[sync] provider lookup failed for case ${caseId}: ${error?.message || error}`);
-      }
-      if (lookupResult?.sourceResults) {
-        for (const provider of lookupProviders) {
-          const sourceKey = provider.split(":")[1] || "";
-          const sourceResult = lookupResult.sourceResults?.[sourceKey] || null;
-          if (!sourceResult?.attempted) {
-            continue;
-          }
-          completedProviders.push(provider);
-        }
-      }
-      if (interProviderDelayMs > 0 && lookupProviders.length) {
-        await wait(interProviderDelayMs);
-      }
-    }
-  }
-
-  if (!stoppedReason && expandedProviders.includes("recentfilings")) {
-    await runProvider("recentfilings", () => syncService.enrichCaseWithRecentFilings(caseId, { force: true }));
-  }
-
-  if (!stoppedReason && expandedProviders.includes("61tro")) {
-    await runProvider("61tro", () => syncService.enrichCaseWithLawFirmLookup(caseId, {
-      sourceIds: ["61tro"],
-      force: true
-    }));
-  }
-
-  if (!stoppedReason && expandedProviders.includes(PRIORITY_FEED_SOURCE)) {
-    await runProvider(PRIORITY_FEED_SOURCE, () => {
-      return syncService.enrichCaseWithPriorityFeed(caseId, {
-        force: true
-      });
-    });
-  }
-
-  if (!stoppedReason && expandedProviders.includes("courtlistener")) {
-    await runProvider("courtlistener", () => syncService.enrichCaseWithCourtListener(caseId, { force: true }));
-  }
-
-  if (!stoppedReason && expandedProviders.includes("pacermonitor")) {
-    await runProvider("pacermonitor", () => syncService.enrichCaseWithPacerMonitor(caseId, { force: true }));
-  }
-
-  if (!stoppedReason && expandedProviders.includes("docketalarm")) {
-    await runProvider("docketalarm", () => syncService.enrichCaseWithDocketAlarm(caseId, { force: true }));
-  }
-
-  if (!stoppedReason && expandedProviders.includes("unicourt")) {
-    await runProvider("unicourt", () => syncService.enrichCaseWithUniCourt(caseId, { force: true }));
-  }
-
-  store.refreshCaseDocketSummary(caseId);
-  refreshCurrent();
-
-  return {
-    caseId,
-    requestedProviders: expandedProviders,
-    completedProviders,
-    failedProviders,
-    providerResults,
-    stoppedReason,
-    lookupResult
-  };
-}
-
-function isTransientEnrichmentFailure(failure = {}) {
-  const status = Number(failure?.status || 0);
-  if ([408, 409, 425, 429, 500, 502, 503, 504].includes(status)) {
-    return true;
-  }
-
-  return /\b(408|409|425|429|500|502|503|504)\b/.test(String(failure?.error || ""));
-}
+const refreshCaseAcrossSources = createCaseEnrichmentRefresher({ store, syncService, wait });
 
 function shouldClearCachesForEnrichment(result = {}) {
   return (result.providerResults || []).some((item) =>
@@ -3128,6 +2923,7 @@ async function runWebhookEnrichmentWorker() {
     const result = await refreshCaseAcrossSources(claimedJob.caseId, {
       initialItem: store.getCase(claimedJob.caseId),
       providers: claimedJob.providers,
+      respectProviderBackoff: true,
       interProviderDelayMs: Math.max(Number(config.sync?.webhookEnrichmentProviderDelayMs || 0), 0),
       shouldContinue: () => {
         const guard = checkWebhookEnrichmentMemoryPressure();
@@ -3140,16 +2936,12 @@ async function runWebhookEnrichmentWorker() {
       }
     });
 
-    const remainingProviders = (claimedJob.providers || []).filter((provider) => !result.completedProviders.includes(provider));
-    const transientFailures = (result.failedProviders || []).filter(isTransientEnrichmentFailure);
-    const retryAfterMs = transientFailures.reduce((maxDelay, failure) => {
-      return Math.max(maxDelay, Number(failure?.retryAfterMs || 0), 0);
-    }, 0);
-    const requeueAfterMs = result.stoppedReason === "memory-pressure"
-      ? Math.max(Number(config.sync?.webhookEnrichmentMemoryRetryDelayMs || 0), 60 * 1000)
-      : transientFailures.length && remainingProviders.length
-        ? Math.max(Number(config.sync?.webhookEnrichmentRetryDelayMs || 0), retryAfterMs, 60 * 1000)
-        : 0;
+    const retryPlan = planEnrichmentRetry(claimedJob, result, {
+      maxAttempts: config.sync.webhookEnrichmentMaxAttempts,
+      retryDelayMs: config.sync.webhookEnrichmentRetryDelayMs,
+      memoryRetryDelayMs: config.sync.webhookEnrichmentMemoryRetryDelayMs
+    });
+    const { requeueAfterMs } = retryPlan;
 
     const finished = store.updateCheckpointAtomically(webhookEnrichmentQueueCheckpointKey, (currentValue) => {
       const completion = finishWebhookEnrichmentJobState(currentValue, {
@@ -3157,9 +2949,12 @@ async function runWebhookEnrichmentWorker() {
         leaseId: claimedJob.leaseId,
         now: new Date().toISOString(),
         requeueAfterMs,
+        unresolved: retryPlan.unresolved,
         requeueJob: requeueAfterMs > 0
           ? {
-              providers: remainingProviders.length ? remainingProviders : claimedJob.providers,
+              providers: retryPlan.providers,
+              retryAttempts: retryPlan.retryAttempts,
+              lastFailures: result.failedProviders,
               priorityAt: claimedJob.priorityAt,
               lastWebhookAt: claimedJob.lastWebhookAt,
               lastWebhookFiledAt: claimedJob.lastWebhookFiledAt,
@@ -3190,13 +2985,22 @@ async function runWebhookEnrichmentWorker() {
       completedProviders: result.completedProviders,
       failedProviders: result.failedProviders,
       stoppedReason: result.stoppedReason,
+      coverage: result.coverage,
+      outcome: result.failedProviders.length
+        ? (result.completedProviders.length ? "partial" : "unresolved")
+        : result.stoppedReason ? "deferred"
+          : result.coverage?.hasContentGap || result.coverage?.hasContinuityGap ? "partial" : "checked",
+      retryAttempts: retryPlan.retryAttempts,
+      retryExhausted: retryPlan.exhausted,
+      unresolvedCount: queueStats.unresolvedCount,
       requeued: requeueAfterMs > 0 ? 1 : 0,
       requeueAfterMs: requeueAfterMs || null,
       pendingCount: queueStats.pendingCount,
       readyCount: queueStats.readyCount,
       leasedCount: queueStats.leasedCount
     };
-    store.finishSyncRun(runId, "completed", stats);
+    store.finishSyncRun(runId, result.failedProviders.length && !result.completedProviders.length ? "failed" : "completed", stats,
+      result.failedProviders.length && !result.completedProviders.length ? "no source supplied docket content; see retry/queue outcome" : null);
 
     return {
       ...stats,
@@ -3205,14 +3009,22 @@ async function runWebhookEnrichmentWorker() {
   } catch (error) {
     if (claimedJob?.caseId) {
       try {
+        const failures = claimedJob.providers.map(provider => enrichmentFailure(error, provider));
+        const retryPlan = planEnrichmentRetry(claimedJob, { failedProviders: failures }, {
+          maxAttempts: config.sync.webhookEnrichmentMaxAttempts,
+          retryDelayMs: config.sync.webhookEnrichmentRetryDelayMs
+        });
         store.updateCheckpointAtomically(webhookEnrichmentQueueCheckpointKey, (currentValue) => {
           const completion = finishWebhookEnrichmentJobState(currentValue, {
             caseId: claimedJob.caseId,
             leaseId: claimedJob.leaseId,
             now: new Date().toISOString(),
-            requeueAfterMs: Math.max(Number(config.sync?.webhookEnrichmentRetryDelayMs || 0), 60 * 1000),
+            requeueAfterMs: retryPlan.requeueAfterMs,
+            unresolved: retryPlan.unresolved,
             requeueJob: {
-              providers: claimedJob.providers,
+              providers: retryPlan.providers,
+              retryAttempts: retryPlan.retryAttempts,
+              lastFailures: failures,
               priorityAt: claimedJob.priorityAt,
               lastWebhookAt: claimedJob.lastWebhookAt,
               lastWebhookFiledAt: claimedJob.lastWebhookFiledAt,
